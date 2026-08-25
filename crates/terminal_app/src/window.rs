@@ -37,6 +37,23 @@ impl TerminalWindowView {
             active_tab_index: 0,
         };
         view.spawn_new_terminal(cx);
+
+        // The macOS display link only redraws while invalidated; without an
+        // ongoing invalidation source the window goes static after the first
+        // frame. Periodically refresh until window invalidation is wired up
+        // end to end (terminal events -> notify -> redraw).
+        cx.spawn(async move |_, cx| loop {
+            cx.background_executor().timer(Duration::from_millis(250)).await;
+            cx.update(|cx| {
+                for handle in cx.windows() {
+                    handle
+                        .update(cx, |_, window, _| window.refresh())
+                        .log_err();
+                }
+            });
+        })
+        .detach();
+
         view
     }
 
