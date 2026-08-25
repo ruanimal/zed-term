@@ -17,9 +17,12 @@ anyhow.workspace = true
 assets.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
+itertools.workspace = true
 log.workspace = true
+collections.workspace = true
 settings.workspace = true
 terminal_core = { path = "../terminal_core" }
 theme.workspace = true
 theme_settings.workspace = true
+ui.workspace = true
 util.workspace = true

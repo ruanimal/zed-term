@@ -4,7 +4,7 @@ use std::{
 };
 
 use gpui::{Bounds, Point, point, size};
-use terminal::Terminal;
+use terminal_core::Terminal;
 use ui::{Pixels, ScrollableHandle, px};
 
 #[derive(Debug)]
