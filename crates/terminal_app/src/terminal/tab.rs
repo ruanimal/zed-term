@@ -37,6 +37,10 @@ impl TerminalTab {
         &self.terminal
     }
 
+    pub fn title(&self, cx: &App) -> String {
+        self.terminal.read(cx).title(false)
+    }
+
     pub(crate) fn scroll_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
         self.terminal.update(cx, |term, cx| {
             term.scroll_wheel(
