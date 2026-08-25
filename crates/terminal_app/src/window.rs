@@ -24,7 +24,7 @@ use crate::terminal::{TerminalElement, TerminalTab};
 
 /// A window in the standalone terminal app.
 pub struct TerminalWindowView {
-    focus_handle: FocusHandle,
+    pub focus_handle: FocusHandle,
     tabs: Vec<Entity<TerminalTab>>,
     active_tab_index: usize,
 }
@@ -56,8 +56,8 @@ impl TerminalWindowView {
                     this.active_tab_index = this.tabs.len() - 1;
                     cx.notify();
                 })
-            })
-            .log_err();
+                .log_err();
+            });
         })
         .detach();
     }
