@@ -18167,6 +18167,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "terminal_app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assets",
+ "gpui",
+ "gpui_platform",
+ "log",
+ "settings",
+ "terminal_core",
+ "theme",
+ "theme_settings",
+ "util",
+]
+
+[[package]]
+name = "terminal_core"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "async-channel 2.5.0",
+ "collections",
+ "futures 0.3.32",
+ "futures-lite 1.13.0",
+ "gpui",
+ "itertools 0.14.0",
+ "libc",
+ "log",
+ "parking_lot",
+ "percent-encoding",
+ "rand 0.9.4",
+ "regex",
+ "schemars 1.0.4",
+ "serde",
+ "settings",
+ "sysinfo 0.37.2",
+ "theme",
+ "theme_settings",
+ "thiserror 2.0.17",
+ "url",
+ "urlencoding",
+ "util",
+ "util_macros",
+ "vte",
+ "windows 0.61.3",
+]
+
+[[package]]
 name = "terminal_size"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

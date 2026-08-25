@@ -208,6 +208,8 @@ members = [
     "crates/telemetry",
     "crates/telemetry_events",
     "crates/terminal",
+    "crates/terminal_core",
+    "crates/terminal_app",
     "crates/terminal_view",
     "crates/text",
     "crates/theme",
