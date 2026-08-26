@@ -7,16 +7,10 @@ pub use settings::AlternateScroll;
 
 use settings::{
     IntoGpui, PathHyperlinkRegex, RegisterSetting, ShowScrollbar, TerminalBell, TerminalBlink,
-    TerminalDockPosition, TerminalLineHeight, VenvSettings, WorkingDirectory,
-    merge_from::MergeFrom,
+    TerminalLineHeight, VenvSettings, WorkingDirectory,
 };
 use util::shell::Shell;
 use theme_settings::FontFamilyName;
-
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct Toolbar {
-    pub breadcrumbs: bool,
-}
 
 #[derive(Clone, Debug, Deserialize, RegisterSetting)]
 pub struct TerminalSettings {
@@ -36,21 +30,18 @@ pub struct TerminalSettings {
     pub copy_on_select: bool,
     pub keep_selection_on_copy: bool,
     pub open_links_in_mouse_mode: bool,
-    pub button: bool,
-    pub dock: TerminalDockPosition,
-    pub starts_open: bool,
-    pub flexible: bool,
+    /// Initial width of a new application window (the Zed `default_width`
+    /// setting meant the docked panel width; in ZedTerm it sizes the window).
     pub default_width: Pixels,
+    /// Initial height of a new application window (see `default_width`).
     pub default_height: Pixels,
     pub detect_venv: VenvSettings,
     pub max_scroll_history_lines: Option<usize>,
     pub scroll_multiplier: f32,
-    pub toolbar: Toolbar,
     pub scrollbar: ScrollbarSettings,
     pub minimum_contrast: f32,
     pub path_hyperlink_regexes: Vec<String>,
     pub path_hyperlink_timeout_ms: u64,
-    pub show_count_badge: bool,
     pub bell: TerminalBell,
 }
 
@@ -81,9 +72,9 @@ fn settings_shell_to_terminal_shell(shell: settings::Shell) -> Shell {
 impl settings::Settings for TerminalSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
         let user_content = content.terminal.clone().unwrap();
-        // Note: we allow a subset of "terminal" settings in the project files.
-        let mut project_content = user_content.project.clone();
-        project_content.merge_from_option(content.project.terminal.as_ref());
+        // ZedTerm has no project concept; read the flattened project-scoped
+        // fields (shell, cwd, env, ...) straight from the "terminal" object.
+        let project_content = user_content.project;
         TerminalSettings {
             shell: settings_shell_to_terminal_shell(project_content.shell.unwrap()),
             working_directory: project_content.working_directory.unwrap(),
@@ -108,18 +99,11 @@ impl settings::Settings for TerminalSettings {
             copy_on_select: user_content.copy_on_select.unwrap(),
             keep_selection_on_copy: user_content.keep_selection_on_copy.unwrap(),
             open_links_in_mouse_mode: user_content.open_links_in_mouse_mode.unwrap(),
-            button: user_content.button.unwrap(),
-            dock: user_content.dock.unwrap(),
-            starts_open: user_content.starts_open.unwrap(),
             default_width: user_content.default_width.unwrap().into_gpui(),
             default_height: user_content.default_height.unwrap().into_gpui(),
-            flexible: user_content.flexible.unwrap(),
             detect_venv: project_content.detect_venv.unwrap(),
             scroll_multiplier: user_content.scroll_multiplier.unwrap(),
             max_scroll_history_lines: user_content.max_scroll_history_lines,
-            toolbar: Toolbar {
-                breadcrumbs: user_content.toolbar.unwrap().breadcrumbs.unwrap(),
-            },
             scrollbar: ScrollbarSettings {
                 show: user_content.scrollbar.unwrap().show,
             },
@@ -134,7 +118,6 @@ impl settings::Settings for TerminalSettings {
                 })
                 .collect(),
             path_hyperlink_timeout_ms: project_content.path_hyperlink_timeout_ms.unwrap(),
-            show_count_badge: user_content.show_count_badge.unwrap(),
             bell: user_content.bell.unwrap(),
         }
     }

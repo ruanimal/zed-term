@@ -16,11 +16,14 @@ doctest = false
 [dependencies]
 anyhow.workspace = true
 assets.workspace = true
+fs.workspace = true
 gpui = { workspace = true, features = ["font-kit", "wayland", "x11"] }
 gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
 itertools.workspace = true
 log.workspace = true
 collections.workspace = true
+paths.workspace = true
+regex.workspace = true
 settings.workspace = true
 terminal_core = { path = "../terminal_core" }
 theme.workspace = true

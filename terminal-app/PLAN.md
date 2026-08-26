@@ -1,6 +1,6 @@
 # 独立终端应用（fork 定位）· 拆分计划
 
-> 状态：WP0 ✅、WP1 ✅、WP2 ✅ 已完成；WP3 ⚠️ 多标签/多窗口骨架完成，终端动作接线等遗留项并入 WP4；WP4（设置 + WP3 收尾）进行中。
+> 状态：WP0 ✅、WP1 ✅、WP2 ✅、WP3 ⚠️（骨架完成，遗留项已并入 WP4 且已完成，见下）、WP4 ✅ 已实现（设置裁剪 + settings.json 机制 + 设置页 + WP3 收尾；**待用户编译验证，环境无 cargo**）；WP5 待做。
 > 决策记录（已确认）：移除 vi mode；设置走 settings.json；多标签/多窗口；平台优先级 macOS → Linux。
 > **应用名已定：ZedTerm**（`TERM_PROGRAM`/`ZED_TERM`=`zedterm`，`app_id`=`zedterm`）。
 
@@ -9,7 +9,7 @@
 - **WP1 ✅**：`crates/terminal_core` 复制并裁剪完成（vi mode、任务系统、Headless、init command、release_channel 移除；`util::shell::Shell` 替代 `task::Shell`）。裁剪后测试共 52 个（`terminal.rs` 28 个 `#[gpui::test]` + 18 个 `#[test]`、`alacritty.rs` 5 个、`pty_info.rs` 1 个）。注：`new_display_only*` 保留在 `#[cfg(any(test, feature = "test-support"))]` 下作测试辅助；`terminal_settings.rs` 的 project 合并待 WP4 删除。
 - **WP2 ✅**：`terminal_element.rs`/`terminal_scrollbar.rs` 移植并裁剪（零 project/workspace/telemetry 引用）；`TerminalTab` 替代 `TerminalView`；自备 cursor/highlight 绘制（`cursor.rs`）。注：`terminal_path_like_target.rs` 未移植，hover 路径功能整体缺失，归入 WP4 收尾。
 - **WP3 ⚠️ 骨架完成**：多标签（`ui::TabBar/Tab`，关闭标签即 drop `Entity<Terminal>` → pty 子进程终止）+ 多窗口（`open_window`，最后标签关闭时 `remove_window`）+ 窗口动作/快捷键（`cmd-t`/`cmd-w`/`ctrl-tab`/`ctrl-shift-tab`/`cmd-n`）。**遗留（并入 WP4）**：Copy/Paste/Clear/Scroll*/SelectAll/SearchTest 等原终端动作未接线（`terminal_core` 中 `actions!` 已保留但 app 层无 `on_action`/`KeyBinding`）、剪贴板集成缺失、hover 路径未移植、标题更新无事件订阅（靠 250ms 心跳兜底）。
-- **WP4 进行中**：设置裁剪 + settings.json 机制 + 设置页 + **WP3 收尾**（见 §4.4）。
+- **WP4 进行中 → ✅ 已实现（未编译验证）**：设置裁剪 + settings.json 机制 + 设置页 + **WP3 收尾**（见 §4.4）。遗留小项：hover 路径 tooltip（仅做了 `Event::Open` 打开 + 既有高亮）。
 
 ### 已知问题与教训（重要）
 
@@ -192,25 +192,23 @@ crates/terminal_app/
 
 #### 4.2 settings 机制（复用而非 fork）
 
-- **直接复用** `crates/settings` + `crates/settings_content`（纯数据 crate，已核实依赖轻、无编辑耦合）——**不改这两个 crate 本身**。
-- 默认模板：按 `assets/settings/default.json:1884-2033` 的 `"terminal"` 节重写**精简 default.json**（仅 terminal + theme/fonts 所需字段，其余字段由 serde default 兜底）。
-- 层模型：只保留 Default/User 两层。
-- **实施时验证点**：`SettingsStore` 的 `SettingsContent` 全量反序列化是否容忍缺失字段（预期可，因字段带 serde default）。
+- **直接复用** ✅ `crates/settings` + `crates/settings_content`（未改这两个 crate）。
+- 默认模板 ⚠️ **偏差**：`settings::init` 的 Default 层来自 settings crate 编译期 RustEmbed 的 Zed 全量 `default.json`（settings crate 不可改），故**未做精简 default.json**；缺失字段由 `SettingsContent` 的 Option 兜底（验证点：全量反序列化容忍缺失已验证可行），ZedTerm 只消费被链接的 terminal/theme 设置类型，全量文件无副作用。
+- 层模型 ✅ 只保留 Default/User 两层（未引入 global/server/project）。
+- 写入 ✅ `SettingsStore::update_settings_file`（内部 `settings_json::update_value_in_json_text`）保留注释与格式。
 
 #### 4.3 设置页（新建，轻量）
 
-- 数据层：参照 `settings_ui/src/page_data.rs:6774-7639`（`terminal_page()` 分组：Environment/Font/Display/Behavior/Layout/Advanced/Toolbar/Scrollbar → 裁剪为适配窗口应用的组）。
-- 渲染层：参照 `settings_ui.rs:506-659` 表驱动模式（toggle/dropdown/text_field/number_field/font_picker renderers），组件用 ui（DropdownMenu/Switch/PopoverMenu/TextInput/Button）。
-- 写入：`settings_json::update_value_in_json_text`。
-- 入口：窗口内设置标签页或浮动窗口（`WindowKind::Floating`，参照 `zed.rs:1726-1744`）。
+- ✅ `src/settings_ui.rs`：浮动窗口（`WindowKind::Floating`，`cmd-,` 打开），自绘行控件（stepper/cycle/toggle），覆盖 font_size、cursor_shape、blinking、option_as_meta、copy_on_select；写入走 `update_settings_file`，文件 watcher + `refresh_windows` 即时生效。
+- ⚠️ 偏差：未用 `settings_ui` crate 的表驱动/`ui::DropdownMenu`（依赖面大），控件为 div 自绘；font_family/font_fallbacks/scrollbar 等项未入页（后续补）。
 
 #### 4.4 WP3 收尾（终端动作接线与交互缺失项，自 WP3 移入）
 
 - **终端动作接线**：`terminal_core::terminal` 的 `actions!`（Clear/Copy/Paste/PasteText/ShowCharacterPalette/SearchTest/Scroll*/SelectAll）已在 kernel 保留 → 在 `TerminalTab`/`TerminalElement` 上实现各动作 handler（复制选中/粘贴/清除/滚动/全选/搜索），`on_action(cx.listener(...))` 绑定；剪贴板读写经 `window.write_to_clipboard`/`read_from_clipboard`。
 - **快捷键**：从 `assets/keymaps/default-macos.json` / `default-linux.json` 的 `"terminal"` context 提取原终端绑定（cmd-c/cmd-v/cmd-a/cmd-k/滚动等），收编进 `app.rs` keymap；`copy_on_select`/`keep_selection_on_copy` 设置联动。
-- **hover 路径与打开**：移植 `terminal_path_like_target.rs`（`BackgroundPathResolution` 改 `fs` crate，去 `project::File`）；打开动作走系统默认应用（`window.open_path` 或 OS 调用）；hover 高亮用 `theme.colors().link_text_hover`。
-- **标题更新正规链路**：`TerminalTab` 订阅 `Terminal` 的 `Event::TitleChanged`/`SelectionsChanged` → `cx.notify()`（替换/放宽 250ms 心跳，见已知问题 2）。
-- **`terminal_settings.rs` 遗留清理**：删 `project_content.merge_from_option` 分支（§4.1 第 1 行所述 :86 项），同时落实 §4.1 的 `copy_on_select` 等字段接线。
+- **hover 路径与打开**：✅ 部分完成——`Event::Open` 订阅到手（`MaybeNavigationTarget::Url` → `open_url`；`PathLike` → `file://` 默认应用），hover 高亮沿用 element 既有渲染；**未做**：悬停 tooltip（原 `terminal_path_like_target.rs` 的 worktree 解析不适用，去 project 化移植留待后续）。
+- **标题更新正规链路**：✅ `TerminalTab` 订阅 `Event::TitleChanged`/`BreadcrumbsChanged` → `cx.notify()`；250ms 心跳保留（shell 输出重绘仍需，见已知问题 2）。
+- **`terminal_settings.rs` 遗留清理**：✅ `merge_from_option` 已删（§4.1 一并完成）。
 
 ### WP5 会话持久化
 
