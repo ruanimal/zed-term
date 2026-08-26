@@ -1,20 +1,20 @@
 # 独立终端应用（fork 定位）· 拆分计划
 
-> 状态：WP1（内核裁剪）✅、WP0（骨架+引导）✅、WP2（渲染层移植）✅、WP3（多标签多窗口）✅ 已完成并通过用户验证；WP4（设置）进行中。
+> 状态：WP0 ✅、WP1 ✅、WP2 ✅ 已完成；WP3 ⚠️ 多标签/多窗口骨架完成，终端动作接线等遗留项并入 WP4；WP4（设置 + WP3 收尾）进行中。
 > 决策记录（已确认）：移除 vi mode；设置走 settings.json；多标签/多窗口；平台优先级 macOS → Linux。
 > **应用名已定：ZedTerm**（`TERM_PROGRAM`/`ZED_TERM`=`zedterm`，`app_id`=`zedterm`）。
 
 ## 0. 实施状态
 
-- **WP1 ✅**：`crates/terminal_core` 复制并裁剪完成（vi mode、任务系统、Headless、init command、release_channel 移除；`util::shell` 替代 `task::Shell`），99 测试全绿。
-- **WP2 ✅**：`terminal_element.rs`/`terminal_scrollbar.rs` 移植并裁剪；`TerminalTab` 替代 `TerminalView`；自备 cursor/highlight 绘制。
-- **WP3 ✅**：多标签（`ui::TabBar/Tab`）+ 多窗口（`open_window`）+ 窗口动作/快捷键；用户已验证（prompt 渲染、标签栏正常）。
-- **WP4 进行中**：设置裁剪 + settings.json 机制 + 设置页。
+- **WP1 ✅**：`crates/terminal_core` 复制并裁剪完成（vi mode、任务系统、Headless、init command、release_channel 移除；`util::shell::Shell` 替代 `task::Shell`）。裁剪后测试共 52 个（`terminal.rs` 28 个 `#[gpui::test]` + 18 个 `#[test]`、`alacritty.rs` 5 个、`pty_info.rs` 1 个）。注：`new_display_only*` 保留在 `#[cfg(any(test, feature = "test-support"))]` 下作测试辅助；`terminal_settings.rs` 的 project 合并待 WP4 删除。
+- **WP2 ✅**：`terminal_element.rs`/`terminal_scrollbar.rs` 移植并裁剪（零 project/workspace/telemetry 引用）；`TerminalTab` 替代 `TerminalView`；自备 cursor/highlight 绘制（`cursor.rs`）。注：`terminal_path_like_target.rs` 未移植，hover 路径功能整体缺失，归入 WP4 收尾。
+- **WP3 ⚠️ 骨架完成**：多标签（`ui::TabBar/Tab`，关闭标签即 drop `Entity<Terminal>` → pty 子进程终止）+ 多窗口（`open_window`，最后标签关闭时 `remove_window`）+ 窗口动作/快捷键（`cmd-t`/`cmd-w`/`ctrl-tab`/`ctrl-shift-tab`/`cmd-n`）。**遗留（并入 WP4）**：Copy/Paste/Clear/Scroll*/SelectAll/SearchTest 等原终端动作未接线（`terminal_core` 中 `actions!` 已保留但 app 层无 `on_action`/`KeyBinding`）、剪贴板集成缺失、hover 路径未移植、标题更新无事件订阅（靠 250ms 心跳兜底）。
+- **WP4 进行中**：设置裁剪 + settings.json 机制 + 设置页 + **WP3 收尾**（见 §4.4）。
 
 ### 已知问题与教训（重要）
 
 1. **`font-kit` feature 缺失导致文字完全不可见（已修复）**：workspace 声明 `gpui = { default-features = false }`，依赖 gpui 时必须显式开 `["font-kit", "wayland", "x11"]`（gpui_platform 同理，其 `font-kit` 转发到 `gpui_macos/font-kit`）。否则 quad（背景/光标）正常、glyph 静默失败；gpui examples 因默认 features 正常渲染，极易误导排查。**排查手段**：`screencapture -l <CGWindowID>` 按窗口截图绕开遮挡；`cargo build -p gpui --example hello_world` 是黄金对照。
-2. **macOS display link 只在 invalidation 时重绘**：当前以 250ms `window.refresh()` 心跳维持（workaround），后续应接通 terminal 事件 → notify → 重绘正规链路。
+2. **macOS display link 只在 invalidation 时重绘**：当前以 250ms `window.refresh()` 心跳维持（workaround），正规链路（terminal 事件 → notify → 重绘）随 WP4 §4.4 的 `Event::TitleChanged`/`SelectionsChanged` 订阅一并接通。
 3. **窗口激活需延迟**：`activate_window()` 需在窗口挂到屏幕后（~300ms）调用，否则 display link 不启动。
 4. **待办（用户反馈）**：字体渲染有小瑕疵（现象待复现确认，非阻塞）。
 
@@ -78,10 +78,12 @@ crates/terminal_app/
   src/main.rs           # 入口：Application 引导（参照 main.rs:86-93）
   src/app.rs            # 初始化链：settings::init → theme_settings::init → 字体加载 → open_window
   src/window.rs         # TerminalWindowView（多标签 + 多窗口，WP3）
-  src/tab.rs            # TerminalTab（WP3）
-  src/terminal_element.rs   # 复制自 terminal_view/src/terminal_element.rs（WP2）
-  src/terminal_scrollbar.rs # 复制自 terminal_view/src/terminal_scrollbar.rs
-  src/terminal_path_like_target.rs # 复制并清理（WP2）
+  src/terminal/mod.rs   # TerminalTab（WP3）
+  src/terminal/tab.rs           # TerminalTab：view 状态（IME/滚动/输入转发）
+  src/terminal/terminal_element.rs   # 复制自 terminal_view/src/terminal_element.rs（WP2）
+  src/terminal/terminal_scrollbar.rs # 复制自 terminal_view/src/terminal_scrollbar.rs
+  src/terminal/cursor.rs        # 自备 cursor/highlight 绘制（WP2）
+  src/terminal_path_like_target.rs # 未移植；hover 路径归 WP4 §4.4
   src/persistence.rs    # JSON 会话存储（WP5）
   src/settings_ui.rs    # 设置页（WP4）
   src/assets.rs         # AssetSource 精简版（fonts + themes + icons，参照 crates/assets/src/assets.rs:7-38）
@@ -108,7 +110,7 @@ crates/terminal_app/
 | `terminal.rs:2289, 2296` | `try_keystroke` 内 vi 分支 |
 | `terminal.rs:3070` | `pub fn vi_mode_enabled()` |
 | `alacritty.rs` | `toggle_vi_mode`/`vi_goto_point`/`vi_motion`/`update_vi_cursor_for_scroll`/`update_selection_to_vi_cursor` 及相应测试 |
-| 测试 | 32 个 `#[gpui::test]` 中 vi 相关用例删除，其余保留作回归 |
+| 测试 | 原 35 个 `#[gpui::test]` 中 vi/Headless 相关用例删除（现 28 个），另有 18 个 `#[test]`；`alacritty.rs` 5 个、`pty_info.rs` 1 个，合计 52 |
 
 #### 1.2 移除任务集成（`task` 依赖）
 
@@ -122,13 +124,13 @@ crates/terminal_app/
 | `terminal.rs:2074, 2133, 2141` | init command 握手三函数（Zed 特有） |
 | `terminal.rs:902-925` | `init_command_startup_marker_command(shell_kind)` |
 
-**改造**：`Shell`/`ShellKind` 是 shell 启动必需（`terminal.rs:1112, 1132, 1178, 3185`、`util::shell::get_system_shell`）→ 在 terminal_core 自备 `TerminalShell` 枚举（System / Program{program,args} + shell kind 检测），替换 `task::Shell`。**这是 WP1 的核心改动。**
+**改造（已完成）**：`Shell`/`ShellKind` 是 shell 启动必需（`terminal.rs:1112, 1132, 1178, 3185`、`util::shell::get_system_shell`）→ 直接复用 `util::shell::Shell`（System / Program{program,args,env}），替换 `task::Shell`（原计划的"自备 `TerminalShell` 枚举"未做，复用现成类型功能等价且更省）。**这是 WP1 的核心改动。**
 
 #### 1.3 移除 Zed 特有项
 
 | 位置 | 内容 |
 |---|---|
-| `terminal.rs:86-90, 937-970, 1062, 1446` | `HeadlessTerminal` Global + `new_display_only(_with_bounds)`（调用者仅 `acp_thread`/`eval_cli`，已确认） |
+| `terminal.rs:86-90, 937-970, 1062, 1446` | `HeadlessTerminal` Global + `new_display_only(_with_bounds)`（调用者仅 `acp_thread`/`eval_cli`，已确认）。状态：Global 已删；`new_display_only*` 保留但收进 `#[cfg(any(test, feature = "test-support"))]` 作测试辅助，无产品路径 |
 | `terminal.rs:672-684` | `insert_zed_terminal_env` → `insert_terminal_env`：`TERM_PROGRAM` 改应用名、版本号用自备常量（替代 `release_channel::AppVersion`，使用点 :1057） |
 | `terminal.rs:2801, 2841, 2869` | 工作目录语义（project 依赖分支在 :243-259）→ 保留 CWD 追踪，删项目语义 |
 | `terminal.rs:65-79, 86`（`terminal_settings.rs`） | `task::Shell` 转换、`project_content.merge_from_option`（见 WP4） |
@@ -137,14 +139,14 @@ crates/terminal_app/
 
 **Cargo.toml 变更**：删 `task`、`release_channel`；其余（settings/theme/theme_settings/gpui/collections/util/schemars 等）保留。
 
-**验证**：`cargo test -p terminal_core` 全绿。
+**验证**：`cargo test -p terminal_core`（裁剪后 52 个测试；当前环境无 cargo，未复跑，WP6 一并验证）。
 
 ### WP2 渲染层清理（`terminal_app` 内）
 
 - `terminal_element.rs:1849-1850`：删 telemetry（全文件对 project 仅此引用）。
 - `terminal_scrollbar.rs`：不动。
-- `terminal_path_like_target.rs`：`BackgroundPathResolution`（:916）用 `project::File` → 改用 `fs` crate；"打开"动作改为系统默认应用（`window.open_path` 或 OS 调用）。
-- 消除 `project`/`workspace`/`zed_actions` 依赖后，Cargo.toml 依赖大幅瘦身。
+- `terminal_path_like_target.rs`：**未移植**（`BackgroundPathResolution` :916 用 `project::File`，需改用 `fs` crate + 系统默认应用打开）。hover 路径功能整体缺失，归 WP4 §4.4 收尾。
+- 消除 `project`/`workspace`/`zed_actions` 依赖后，Cargo.toml 依赖大幅瘦身（已达成：`terminal_app` 依赖无 project/workspace/editor/language/task/db）。
 
 ### WP3 标签与窗口视图（最大工作包）
 
@@ -155,7 +157,7 @@ crates/terminal_app/
 - `spawn_task` 全家（:632-1310）
 - 远程/协作分支（:644-660, :847, :891, :943）
 - `zed_actions`（:41, :168, :1416-1453）
-- `actions!`（:45）裁为新动作集：`NewTab`/`CloseTab`/`NextTab`/`PrevTab`/`NewWindow` + 原终端动作（Copy/Paste/Clear/Scroll*/SelectAll/Search）
+- `actions!`（:45）裁为新动作集：`NewTab`/`CloseTab`/`NextTab`/`PrevTab`/`NewWindow` ✅（已在 `window.rs` 接线并绑定快捷键）+ 原终端动作（Copy/Paste/Clear/Scroll*/SelectAll/Search）⚠️ **未接线**：`terminal_core` 的 `actions!` 已保留（`terminal.rs:568-600`），但 `terminal_app` 无 `on_action`/`KeyBinding` 绑定，剪贴板集成缺失 → 归 WP4 §4.4
 
 **多标签**：`ui::TabBar` + `ui::Tab`（渲染模式参照 `workspace/src/pane.rs:2907, 3553`；组件本身零 workspace 耦合）。每 Tag 持有 `Entity<Terminal>` + 标题；关闭 = drop entity（pty 终止）。
 
@@ -173,7 +175,8 @@ crates/terminal_app/
 - rename 弹窗 `editor` 依赖 → `ui::TextInput`
 - `breadcrumbs`/`language`/`db` 依赖
 
-**保留**：复制/粘贴/清除/滚动/搜索/全选动作、IME、hover 路径、标题更新（`Event::TitleChanged`）。
+**保留**（已实现）：IME（`tab.rs` ImeState + 输入处理器）、标题更新兜底（250ms 心跳重绘时读取 `title()`，无事件订阅）。
+**保留**（⚠️ 未实现，归 WP4 §4.4）：复制/粘贴/清除/滚动/搜索/全选动作、hover 路径、`Event::TitleChanged` 订阅 → notify 正规链路。
 
 #### 3.3 快捷键
 
@@ -184,7 +187,7 @@ crates/terminal_app/
 #### 4.1 `TerminalSettings` 裁剪（`terminal_core/src/terminal_settings.rs:21-141`）
 
 - **删除**：`dock`/`starts_open`/`flexible`/`button`/`show_count_badge`/`toolbar`；`WorkingDirectory` 的 CurrentFile/CurrentProject/FirstProject（保留 `Always`/`LastActiveDirectory`）；:65-79 `task::Shell` 转换；:86 project 合并。
-- **保留**：`shell`（自备 `TerminalShell`）、`working_directory`、`env`、`detect_venv`、`font_size/font_family/font_fallbacks/font_features/font_weight`、`line_height`、`cursor_shape`、`blinking`、`alternate_scroll`、`option_as_meta`、`copy_on_select`、`keep_selection_on_copy`、`open_links_in_mouse_mode`、`bell`、`minimum_contrast`、`scroll_multiplier`、`max_scroll_history_lines`、`path_hyperlink_regexes`、`path_hyperlink_timeout_ms`、`scrollbar.show`。
+- **保留**：`shell`（`util::shell::Shell`，非自备枚举）、`working_directory`、`env`、`detect_venv`、`font_size/font_family/font_fallbacks/font_features/font_weight`、`line_height`、`cursor_shape`、`blinking`、`alternate_scroll`、`option_as_meta`、`copy_on_select`、`keep_selection_on_copy`、`open_links_in_mouse_mode`、`bell`、`minimum_contrast`、`scroll_multiplier`、`max_scroll_history_lines`、`path_hyperlink_regexes`、`path_hyperlink_timeout_ms`、`scrollbar.show`。
 - `default_width/default_height` 改为窗口初始尺寸语义。
 
 #### 4.2 settings 机制（复用而非 fork）
@@ -201,6 +204,14 @@ crates/terminal_app/
 - 写入：`settings_json::update_value_in_json_text`。
 - 入口：窗口内设置标签页或浮动窗口（`WindowKind::Floating`，参照 `zed.rs:1726-1744`）。
 
+#### 4.4 WP3 收尾（终端动作接线与交互缺失项，自 WP3 移入）
+
+- **终端动作接线**：`terminal_core::terminal` 的 `actions!`（Clear/Copy/Paste/PasteText/ShowCharacterPalette/SearchTest/Scroll*/SelectAll）已在 kernel 保留 → 在 `TerminalTab`/`TerminalElement` 上实现各动作 handler（复制选中/粘贴/清除/滚动/全选/搜索），`on_action(cx.listener(...))` 绑定；剪贴板读写经 `window.write_to_clipboard`/`read_from_clipboard`。
+- **快捷键**：从 `assets/keymaps/default-macos.json` / `default-linux.json` 的 `"terminal"` context 提取原终端绑定（cmd-c/cmd-v/cmd-a/cmd-k/滚动等），收编进 `app.rs` keymap；`copy_on_select`/`keep_selection_on_copy` 设置联动。
+- **hover 路径与打开**：移植 `terminal_path_like_target.rs`（`BackgroundPathResolution` 改 `fs` crate，去 `project::File`）；打开动作走系统默认应用（`window.open_path` 或 OS 调用）；hover 高亮用 `theme.colors().link_text_hover`。
+- **标题更新正规链路**：`TerminalTab` 订阅 `Terminal` 的 `Event::TitleChanged`/`SelectionsChanged` → `cx.notify()`（替换/放宽 250ms 心跳，见已知问题 2）。
+- **`terminal_settings.rs` 遗留清理**：删 `project_content.merge_from_option` 分支（§4.1 第 1 行所述 :86 项），同时落实 §4.1 的 `copy_on_select` 等字段接线。
+
 ### WP5 会话持久化
 
 - `persistence.rs`：`TerminalDb`（:410）→ `dirs::data_dir` + serde_json 轻量存储。
@@ -208,9 +219,9 @@ crates/terminal_app/
 
 ### WP6 验证与打包
 
-- WP1 后：`cargo test -p terminal_core` 全绿。
-- WP3 后：macOS 手动冒烟（开窗、多标签、多窗口、复制粘贴、滚动、搜索、cwd 继承）。
-- WP4 后：settings.json 读写回环 + 设置页视觉核对。
+- WP1 后：`cargo test -p terminal_core`（52 个测试；当前环境无 cargo 未复跑，WP6 一并验证）。
+- WP3 后：macOS 手动冒烟（开窗、多标签、多窗口、cwd 继承；已通过——prompt 渲染、标签栏正常）。
+- WP4 后（含 §4.4 收尾）：settings.json 读写回环 + 设置页视觉核对 + 终端动作冒烟（复制粘贴、选择、清除、滚动、搜索、hover 路径打开）。
 - WP6：`./script/clippy` + macOS .app 打包；Linux 打包（AppImage/deb）。
 
 ---
@@ -229,6 +240,7 @@ crates/terminal_app/
 WP0 ─┐
 WP1 ─┴→ WP2 → WP3 ─→ WP5 → WP6
 WP1 ───→ WP4 ─────────┘
+             （WP4 含 §4.4 WP3 收尾）
 ```
 
 ## 5. 待决策点
