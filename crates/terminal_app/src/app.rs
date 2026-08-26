@@ -20,11 +20,11 @@ pub const TERM_PROGRAM: &str = "zedterm";
 actions!(terminal_app, [NewTab, CloseTab, NextTab, PreviousTab, NewWindow]);
 
 /// Window options shared by every window the app opens.
-pub fn window_options() -> WindowOptions {
-    use gpui::{WindowBackgroundAppearance, WindowDecorations};
+pub fn window_options(bounds: gpui::Bounds<gpui::Pixels>) -> WindowOptions {
+    use gpui::{WindowBackgroundAppearance, WindowBounds, WindowDecorations};
 
     WindowOptions {
-        window_bounds: None,
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
         focus: true,
         show: true,
         kind: WindowKind::Normal,
@@ -56,20 +56,18 @@ fn load_fonts(cx: &mut App) {
     cx.text_system().add_fonts(embedded_fonts).unwrap();
 }
 
-/// Opens a fresh window with its own tab set. Activates the window and moves
-/// keyboard focus into it so window-level keybindings take effect.
+/// Opens a fresh window with its own tab set. Activates the window shortly
+/// after opening so the macOS display link (which drives redraws) starts.
 pub fn open_new_window(cx: &mut App) {
+    let bounds = gpui::Bounds::centered(None, size(px(900.0), px(600.0)), cx);
     let handle = cx
-        .open_window(window_options(), |window, cx| {
+        .open_window(window_options(bounds), |window, cx| {
             let view = cx.new(|cx| window::TerminalWindowView::new(cx));
             view.read(cx).focus_handle.clone().focus(window, cx);
             view
         })
         .log_err();
 
-    // Give AppKit a moment to attach the window to a screen before asking for
-    // key status; the display link (which drives redraws) is started when the
-    // window becomes visible/key.
     if let Some(handle) = handle {
         let task = cx.spawn(async move |cx| {
             cx.background_executor().timer(Duration::from_millis(300)).await;

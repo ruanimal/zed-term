@@ -7,12 +7,11 @@ use anyhow::Result;
 use gpui::Application;
 
 fn build_application() -> Application {
-    let platform = gpui_platform::current_platform(false);
-    Application::new_inaccessible(platform)
+    gpui_platform::application()
 }
 
 fn main() -> Result<()> {
-    let app = build_application().with_assets(assets::Assets);
+    let app = build_application();
     app.run(|cx| terminal_app::run(cx));
     Ok(())
 }

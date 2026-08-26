@@ -18172,13 +18172,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "assets",
+ "collections",
  "gpui",
  "gpui_platform",
+ "itertools 0.14.0",
  "log",
  "settings",
  "terminal_core",
  "theme",
  "theme_settings",
+ "ui",
  "util",
 ]
 

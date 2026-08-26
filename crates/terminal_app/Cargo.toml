@@ -12,11 +12,12 @@ name = "terminal-app"
 path = "src/main.rs"
 doctest = false
 
+
 [dependencies]
 anyhow.workspace = true
 assets.workspace = true
-gpui.workspace = true
-gpui_platform.workspace = true
+gpui = { workspace = true, features = ["font-kit", "wayland", "x11"] }
+gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
 itertools.workspace = true
 log.workspace = true
 collections.workspace = true
