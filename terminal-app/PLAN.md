@@ -1,23 +1,22 @@
 # 独立终端应用（fork 定位）· 拆分计划
 
-> 状态：实施中。WP1（内核裁剪）已完成，WP0（应用骨架+引导链）已完成，WP2 进行中。
+> 状态：WP1（内核裁剪）✅、WP0（骨架+引导）✅、WP2（渲染层移植）✅、WP3（多标签多窗口）✅ 已完成并通过用户验证；WP4（设置）进行中。
 > 决策记录（已确认）：移除 vi mode；设置走 settings.json；多标签/多窗口；平台优先级 macOS → Linux。
 > **应用名已定：ZedTerm**（`TERM_PROGRAM`/`ZED_TERM`=`zedterm`，`app_id`=`zedterm`）。
 
-## 0. 实施状态（2025 当前分支）
+## 0. 实施状态
 
-- **WP1 完成**：`crates/terminal_core` 从 `crates/terminal` 复制并裁剪（vi mode、任务系统、Headless、init command、release_channel 全部移除；`util::shell::{Shell, ShellBuilder}` 替代 `task::Shell`；`insert_terminal_env` 注入 zedterm），`cargo test -p terminal_core` 99 个测试全绿。
-- **WP0 完成（可启动）**：`crates/terminal_app` 编译通过，`terminal-app` 二进制可启动并出现窗口（占位视图，已验证用户手动退出，exit 0）。
-- **WP2 调研结论**：`terminal_element.rs`（3005 行）是纯 GPUI element 但**与 TerminalView 有 10+ 处耦合**，需为其注入轻量等价状态：
-  - `terminal_view.read(cx).scroll_top`（3 处鼠标/滚动偏移）→ 自备 `TerminalTab.scroll_top`
-  - `terminal_view.read(cx).content_mode(window, cx)`（2 处布局）→ 自备方法（仅 Scrollable）
-  - `terminal_view.downgrade().update(..).scroll_wheel(e, cx)`（滚轮转发）→ 自备 `TerminalTab::scroll_wheel`（移植自 terminal_view.rs 的滚动逻辑）
-  - `terminal_view.read(cx).hover`（hover 工具提示）→ 自备简单 hover 或裁剪
-  - `terminal_view.read(cx).mode`（Standalone 锚定底部）→ 常量 true（Standalone）
-  - Zed 特有移除：`workspace` 字段（无正文使用，直接删）、`BlockProperties/block_below_cursor`（任务/agent 块，删）、`TerminalMode::Embedded`/`ContentMode::Inline`（只留 Standalone/Scrollable）
-  - `editor::{CursorLayout, EditorSettings, HighlightedRange, HighlightedRangeLine}` → 自备简化类型（EditorSettings 仅 `rounded_selection`）或从 editor crate 复制结构
-  - `language::CursorShape` → 自备枚举（Bar/Block/Underline/Hollow）
-- **待做**：WP2 剩余（移植+裁剪 terminal_element）、WP3（TerminalTab/TerminalWindowView 多标签多窗口）、WP4（设置）、WP5（持久化）。
+- **WP1 ✅**：`crates/terminal_core` 复制并裁剪完成（vi mode、任务系统、Headless、init command、release_channel 移除；`util::shell` 替代 `task::Shell`），99 测试全绿。
+- **WP2 ✅**：`terminal_element.rs`/`terminal_scrollbar.rs` 移植并裁剪；`TerminalTab` 替代 `TerminalView`；自备 cursor/highlight 绘制。
+- **WP3 ✅**：多标签（`ui::TabBar/Tab`）+ 多窗口（`open_window`）+ 窗口动作/快捷键；用户已验证（prompt 渲染、标签栏正常）。
+- **WP4 进行中**：设置裁剪 + settings.json 机制 + 设置页。
+
+### 已知问题与教训（重要）
+
+1. **`font-kit` feature 缺失导致文字完全不可见（已修复）**：workspace 声明 `gpui = { default-features = false }`，依赖 gpui 时必须显式开 `["font-kit", "wayland", "x11"]`（gpui_platform 同理，其 `font-kit` 转发到 `gpui_macos/font-kit`）。否则 quad（背景/光标）正常、glyph 静默失败；gpui examples 因默认 features 正常渲染，极易误导排查。**排查手段**：`screencapture -l <CGWindowID>` 按窗口截图绕开遮挡；`cargo build -p gpui --example hello_world` 是黄金对照。
+2. **macOS display link 只在 invalidation 时重绘**：当前以 250ms `window.refresh()` 心跳维持（workaround），后续应接通 terminal 事件 → notify → 重绘正规链路。
+3. **窗口激活需延迟**：`activate_window()` 需在窗口挂到屏幕后（~300ms）调用，否则 display link 不启动。
+4. **待办（用户反馈）**：字体渲染有小瑕疵（现象待复现确认，非阻塞）。
 
 ---
 
