@@ -9,9 +9,9 @@ use std::time::Duration;
 use collections::HashMap;
 use gpui::{
     AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _,
-    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Render,
-    StatefulInteractiveElement as _, Subscription, Styled as _, WeakEntity, Window, div,
-    prelude::FluentBuilder, rgb,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _,
+    Render, StatefulInteractiveElement as _, Subscription, Styled as _, WeakEntity, Window,
+    anchored, deferred, div, prelude::FluentBuilder, rgb,
 };
 use settings::Settings as _;
 use terminal_core::terminal_settings::TerminalSettings;
@@ -35,7 +35,7 @@ pub struct TerminalWindowView {
     pub(crate) tabs: Vec<Entity<TerminalTab>>,
     pub(crate) active_tab_index: usize,
     /// Right-click context menu for the active terminal, if open.
-    context_menu: Option<(Entity<ContextMenu>, Subscription)>,
+    context_menu: Option<(Entity<ContextMenu>, gpui::Point<Pixels>, Subscription)>,
 }
 
 impl TerminalWindowView {
@@ -220,9 +220,11 @@ impl TerminalWindowView {
     }
 
     /// Builds and shows a right-click context menu, keeping it alive in
-    /// `self.context_menu` until dismissed.
+    /// `self.context_menu` until dismissed. The menu is rendered as an
+    /// anchored popover in `render`.
     fn show_context_menu(
         &mut self,
+        position: gpui::Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
         build: impl FnOnce(ContextMenu, &mut Window, &mut Context<ContextMenu>) -> ContextMenu,
@@ -237,16 +239,21 @@ impl TerminalWindowView {
                 cx.notify();
             },
         );
-        self.context_menu = Some((context_menu, subscription));
+        self.context_menu = Some((context_menu, position, subscription));
     }
 
     /// Right-click menu over the terminal surface (mirrors Zed's terminal
     /// context menu minus the workspace/assistant entries).
-    fn deploy_terminal_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn deploy_terminal_context_menu(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(tab) = self.tabs.get(self.active_tab_index).cloned() else {
             return;
         };
-        self.show_context_menu(window, cx, |menu, _, cx| {
+        self.show_context_menu(position, window, cx, |menu, _, cx| {
             menu.context(tab.read(cx).focus_handle.clone())
                 .action("New Terminal", Box::new(NewTab))
                 .separator()
@@ -261,11 +268,16 @@ impl TerminalWindowView {
     }
 
     /// Right-click menu over a tab in the tab bar.
-    fn deploy_tab_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn deploy_tab_context_menu(
+        &mut self,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(tab) = self.tabs.get(self.active_tab_index).cloned() else {
             return;
         };
-        self.show_context_menu(window, cx, |menu, _, cx| {
+        self.show_context_menu(position, window, cx, |menu, _, cx| {
             menu.context(tab.read(cx).focus_handle.clone())
                 .action("New Tab", Box::new(NewTab))
                 .action("New Window", Box::new(NewWindow))
@@ -299,9 +311,9 @@ impl TerminalWindowView {
                         }))
                         .on_mouse_down(
                             MouseButton::Right,
-                            cx.listener(move |this, _, window, cx| {
+                            cx.listener(move |this, event, window, cx| {
                                 this.active_tab_index = idx;
-                                this.deploy_tab_context_menu(window, cx);
+                                this.deploy_tab_context_menu(event.position, window, cx);
                                 cx.notify();
                             }),
                         )
@@ -399,11 +411,20 @@ impl Render for TerminalWindowView {
                                 });
                             });
                         }
-                        this.deploy_terminal_context_menu(window, cx);
+                        this.deploy_terminal_context_menu(event.position, window, cx);
                         cx.notify();
                     }
                 }),
             )
+            .children(self.context_menu.as_ref().map(|(menu, position, _)| {
+                deferred(
+                    anchored()
+                        .position(*position)
+                        .anchor(gpui::Anchor::TopLeft)
+                        .child(menu.clone()),
+                )
+                .with_priority(1)
+            }))
     }
 }
 
