@@ -10,7 +10,7 @@ use collections::HashMap;
 use gpui::{
     AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _,
-    Render, StatefulInteractiveElement as _, Subscription, Styled as _, WeakEntity, Window,
+    Pixels, Render, StatefulInteractiveElement as _, Subscription, Styled as _, WeakEntity, Window,
     anchored, deferred, div, prelude::FluentBuilder, rgb,
 };
 use settings::Settings as _;
