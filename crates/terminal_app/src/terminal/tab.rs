@@ -57,7 +57,9 @@ impl TerminalTab {
         // pick them up; the element reads `title()` every frame.
         this._subscriptions.push(
             cx.subscribe(&this.terminal, |_this, _terminal, event, cx| match event {
-                Event::TitleChanged | Event::BreadcrumbsChanged => cx.notify(),
+                // PTY output arrives as a Wakeup event, not an `Entity::notify`;
+                // repaint immediately (this is the no-heartbeat path).
+                Event::Wakeup | Event::TitleChanged | Event::BreadcrumbsChanged => cx.notify(),
                 Event::Open(target) => match target {
                     // Cmd-click on a hyperlink or path: hand it to the OS.
                     MaybeNavigationTarget::Url(url) => cx.open_url(url),

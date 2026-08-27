@@ -14,7 +14,8 @@
 ### 已知问题与教训（重要）
 
 1. **`font-kit` feature 缺失导致文字完全不可见（已修复）**：workspace 声明 `gpui = { default-features = false }`，依赖 gpui 时必须显式开 `["font-kit", "wayland", "x11"]`（gpui_platform 同理，其 `font-kit` 转发到 `gpui_macos/font-kit`）。否则 quad（背景/光标）正常、glyph 静默失败；gpui examples 因默认 features 正常渲染，极易误导排查。**排查手段**：`screencapture -l <CGWindowID>` 按窗口截图绕开遮挡；`cargo build -p gpui --example hello_world` 是黄金对照。
-2. **macOS display link 只在 invalidation 时重绘**：事件驱动重绘链已接通（Terminal → `TerminalTab` observe → `TerminalWindowView` observe → notify + `TitleChanged` 订阅）；250ms `window.refresh()` 心跳保留作兜底（光标闪烁/未 notify 路径）。后续可将心跳降频或移除。
+2. **macOS display link 只在 invalidation 时重绘**：事件驱动重绘链已接通——pty 输出经 `Event::Wakeup` → `TerminalTab` 订阅 → `cx.notify()`（observe 链对 PTY 输出无效，输出走 EventEmitter 而非 `Entity::notify`，已踩坑）；250ms `window.refresh()` 心跳保留作兜底（光标闪烁/未 notify 路径）。后续可将心跳降频或移除。
+3. **asset source 未设置会让图标与字体静默失效（已修复）**：gpui 默认 asset source 是空实现 `()`——不设置 `.with_assets(assets::Assets)` 时，`load_fonts` 加载 0 个字体（文字走系统 fallback，即"字体瑕疵"来源）、IconButton 的 SVG 图标加载失败（tab 栏 "+"/设置按钮渲染为空白）。Zed 在 `main.rs:349` 设置；terminal_app 必须同样设置。
 3. **窗口激活需延迟**：`activate_window()` 需在窗口挂到屏幕后（~300ms）调用，否则 display link 不启动。
 4. **待办（用户反馈）**：字体渲染有小瑕疵（现象待复现确认，非阻塞）。
 

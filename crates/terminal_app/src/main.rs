@@ -7,7 +7,10 @@ use anyhow::Result;
 use gpui::Application;
 
 fn build_application() -> Application {
-    gpui_platform::application()
+    // Without an explicit asset source gpui defaults to an empty one, which
+    // silently breaks embedded fonts and icon SVGs (the "+" / settings
+    // buttons render blank). `assets::Assets` embeds Zed's theme/font/icon set.
+    gpui_platform::application().with_assets(assets::Assets)
 }
 
 fn main() -> Result<()> {
