@@ -14,7 +14,7 @@
 ### 已知问题与教训（重要）
 
 1. **`font-kit` feature 缺失导致文字完全不可见（已修复）**：workspace 声明 `gpui = { default-features = false }`，依赖 gpui 时必须显式开 `["font-kit", "wayland", "x11"]`（gpui_platform 同理，其 `font-kit` 转发到 `gpui_macos/font-kit`）。否则 quad（背景/光标）正常、glyph 静默失败；gpui examples 因默认 features 正常渲染，极易误导排查。**排查手段**：`screencapture -l <CGWindowID>` 按窗口截图绕开遮挡；`cargo build -p gpui --example hello_world` 是黄金对照。
-2. **macOS display link 只在 invalidation 时重绘**：当前以 250ms `window.refresh()` 心跳维持（workaround），正规链路（terminal 事件 → notify → 重绘）随 WP4 §4.4 的 `Event::TitleChanged`/`SelectionsChanged` 订阅一并接通。
+2. **macOS display link 只在 invalidation 时重绘**：事件驱动重绘链已接通（Terminal → `TerminalTab` observe → `TerminalWindowView` observe → notify + `TitleChanged` 订阅）；250ms `window.refresh()` 心跳保留作兜底（光标闪烁/未 notify 路径）。后续可将心跳降频或移除。
 3. **窗口激活需延迟**：`activate_window()` 需在窗口挂到屏幕后（~300ms）调用，否则 display link 不启动。
 4. **待办（用户反馈）**：字体渲染有小瑕疵（现象待复现确认，非阻塞）。
 
@@ -210,6 +210,7 @@ crates/terminal_app/
 - **标题更新正规链路**：✅ `TerminalTab` 订阅 `Event::TitleChanged`/`BreadcrumbsChanged` → `cx.notify()`；250ms 心跳保留（shell 输出重绘仍需，见已知问题 2）。
 - **`terminal_settings.rs` 遗留清理**：✅ `merge_from_option` 已删（§4.1 一并完成）。
 - **右键菜单**（PLAN WP3.1 提及项，补录）✅：终端区右键菜单（New Terminal / Copy / Paste / Paste Text / Select All / Clear / Close Terminal Tab——对齐原版终端的上下文菜单，去掉 workspace/assistant 项；右键在无选区时先选中单词，mouse mode 下不拦截）；标签栏右键菜单（对齐原版 pane tab 菜单的关闭组：Close / Close Others / Close Left / Close Right / Close All；去 Read-Only/Pin/Rename 等 workspace 依赖项）。复用 `ui::ContextMenu`（以 `deferred(anchored(...))` 挂进 render 树，否则不显示——已踩坑），无需 `menu` crate 直接依赖。
+- **tab 栏增强**（用户反馈"效果不好"，经评估走中间路线，不引入 workspace——`Pane::new` 硬依赖 `WeakEntity<Workspace>`+`Entity<Project>`，workspace 依赖链含 project/language/db/remote/task 等）✅：`ui::TabBar` end_children 加 "+"（NewTab）与设置按钮；TabBar/Tab/ContextMenu/TerminalElement 均为原版组件。待续：hover tooltip（`terminal_path_like_target` 去 project 版）、拖动排序、pinned tab。决策记录见 §5。
 
 ### WP5 会话持久化
 
@@ -244,9 +245,10 @@ WP1 ───→ WP4 ─────────┘
 
 ## 5. 待决策点
 
-1. **应用名/产品标识**（影响 `TERM_PROGRAM`、`app_id`、包名、目录名；先定可避免返工）。
+1. **应用名/产品标识**（影响 `TERM_PROGRAM`、`app_id`、包名、目录名；先定可避免返工）。✅ 已定：ZedTerm。
 2. **fork 时是否保留历史**（影响后期操作：git fork 全仓删除 vs 复制精简）。
 3. **Zed 本体终端是否在远期移除**（fork 完成后视产品决策，不影响本计划）。
+4. ✅ **已决策（2026-08）：不引入 workspace 依赖树**。曾评估复用 `workspace::Pane`（tab 栏宿主）以换取原版 tab 交互，但 `Pane::new` 硬依赖 `WeakEntity<Workspace>` + `Entity<Project>`，且 workspace 依赖链包含 project/language/db/remote/task 等整个编辑器框架——"只复用 Pane"实际等于引入全部依赖。维持私有实现 + 复用原版 ui 组件（TabBar/Tab/ContextMenu/TerminalElement），逐项对齐 Pane 的视觉与交互。
 
 ## 6. 后期 fork 操作步骤（备忘）
 

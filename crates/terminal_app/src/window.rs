@@ -21,7 +21,10 @@ use terminal_core::{
     ScrollPageUp, ScrollToBottom, ScrollToTop, SearchTest, SelectAll as TerminalSelectAll,
     ShowCharacterPalette, TerminalBuilder,
 };
-use ui::{ContextMenu, Tab, TabBar, TabPosition, Toggleable as _};
+use ui::{
+    Clickable as _, ContextMenu, IconButton, IconName, IconSize, Tab, TabBar, TabPosition,
+    Toggleable as _,
+};
 use util::paths::PathStyle;
 use util::ResultExt;
 
@@ -39,24 +42,25 @@ pub struct TerminalWindowView {
     pub(crate) active_tab_index: usize,
     /// Right-click context menu for the active terminal, if open.
     context_menu: Option<(Entity<ContextMenu>, gpui::Point<Pixels>, Subscription)>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl TerminalWindowView {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let view = Self {
+        let mut view = Self {
             focus_handle: cx.focus_handle(),
             tabs: Vec::new(),
             active_tab_index: 0,
             context_menu: None,
+            _subscriptions: Vec::new(),
         };
         view.spawn_new_terminal(cx);
 
-        // The macOS display link only redraws while invalidated; without an
-        // ongoing invalidation source the window goes static after the first
-        // frame. Periodically refresh until window invalidation is wired up
-        // end to end (terminal events -> notify -> redraw). Tab titles now
-        // also arrive via `Event::TitleChanged` subscriptions, but screen
-        // updates (shell output) still depend on this heartbeat.
+        // The macOS display link only redraws while invalidated. Shell output now
+        // repaints through the observe chain (Terminal -> TerminalTab ->
+        // TerminalWindowView) plus the TitleChanged subscription; the heartbeat
+        // remains as a fallback for cursor blink and any path that does not
+        // notify.
         cx.spawn(async move |_, cx| loop {
             cx.background_executor().timer(Duration::from_millis(250)).await;
             cx.update(|cx| {
@@ -74,7 +78,7 @@ impl TerminalWindowView {
 
     /// Starts a PTY-backed shell in a new tab; the tab appears once the shell
     /// is up.
-    fn spawn_new_terminal(&self, cx: &mut Context<Self>) {
+    fn spawn_new_terminal(&mut self, cx: &mut Context<Self>) {
         let focus = self.focus_handle.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let Some(builder) = build_terminal(&cx).await else {
@@ -84,6 +88,7 @@ impl TerminalWindowView {
             let tab = cx.new(|cx| TerminalTab::new(terminal, focus.clone(), cx));
             cx.update(|cx| {
                 this.update(cx, |this, cx| {
+                    this.observe_tab(&tab, cx);
                     this.tabs.push(tab);
                     this.active_tab_index = this.tabs.len() - 1;
                     cx.notify();
@@ -92,6 +97,15 @@ impl TerminalWindowView {
             });
         })
         .detach();
+    }
+
+    /// Registers the window to repaint when the tab notifies (its terminal
+    /// updated). Must run on the foreground thread after the tab exists.
+    fn observe_tab(&mut self, tab: &Entity<TerminalTab>, cx: &mut Context<Self>) {
+        self._subscriptions.push(cx.observe(tab, |this, _, cx| {
+            this.active_tab_index = this.active_tab_index.min(this.tabs.len().saturating_sub(1));
+            cx.notify();
+        }));
     }
 
     /// Runs `f` against the active tab, if there is one.
@@ -308,38 +322,53 @@ impl TerminalWindowView {
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> TabBar {
         let tab_count = self.tabs.len();
-        TabBar::new("window-tabs").children(
-            self.tabs
-                .iter()
-                .enumerate()
-                .map(|(idx, tab)| {
-                    let title = tab.read(cx).title(cx);
-                    let position = if idx == 0 {
-                        TabPosition::First
-                    } else if idx == tab_count - 1 {
-                        TabPosition::Last
-                    } else {
-                        TabPosition::Middle(Ordering::Equal)
-                    };
-                    Tab::new(idx.to_string())
-                        .position(position)
-                        .toggle_state(idx == self.active_tab_index)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.active_tab_index = idx;
-                            cx.notify();
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+        TabBar::new("window-tabs")
+            .end_child(
+                IconButton::new("new-tab-button", IconName::Plus)
+                    .icon_size(IconSize::XSmall)
+                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
+                        this.spawn_new_terminal(cx);
+                    })),
+            )
+            .end_child(
+                IconButton::new("settings-button", IconName::Settings)
+                    .icon_size(IconSize::XSmall)
+                    .on_click(cx.listener(|_, _: &gpui::ClickEvent, _window, cx| {
+                        crate::settings_ui::open_settings_window(cx);
+                    })),
+            )
+            .children(
+                self.tabs
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, tab)| {
+                        let title = tab.read(cx).title(cx);
+                        let position = if idx == 0 {
+                            TabPosition::First
+                        } else if idx == tab_count - 1 {
+                            TabPosition::Last
+                        } else {
+                            TabPosition::Middle(Ordering::Equal)
+                        };
+                        Tab::new(idx.to_string())
+                            .position(position)
+                            .toggle_state(idx == self.active_tab_index)
+                            .on_click(cx.listener(move |this, _, _, cx| {
                                 this.active_tab_index = idx;
-                                this.deploy_tab_context_menu(event.position, window, cx);
                                 cx.notify();
-                            }),
-                        )
-                        .child(title)
-                })
-                .collect::<Vec<_>>(),
-        )
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    this.active_tab_index = idx;
+                                    this.deploy_tab_context_menu(event.position, window, cx);
+                                    cx.notify();
+                                }),
+                            )
+                            .child(title)
+                    })
+                    .collect::<Vec<_>>(),
+            )
     }
 }
 

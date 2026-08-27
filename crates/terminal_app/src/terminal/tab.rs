@@ -69,6 +69,12 @@ impl TerminalTab {
             }),
         );
 
+        // Content updates notify the window so shell output repaints promptly
+        // instead of waiting for the window heartbeat.
+        this._subscriptions.push(
+            cx.observe(&this.terminal, |_, _, cx| cx.notify()),
+        );
+
         this
     }
 
