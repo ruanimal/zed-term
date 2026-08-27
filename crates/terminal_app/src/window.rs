@@ -8,9 +8,10 @@ use std::time::Duration;
 
 use collections::HashMap;
 use gpui::{
-    AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window,
-    div, prelude::FluentBuilder, rgb,
+    AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _,
+    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Render,
+    StatefulInteractiveElement as _, Subscription, Styled as _, WeakEntity, Window, div,
+    prelude::FluentBuilder, rgb,
 };
 use settings::Settings as _;
 use terminal_core::terminal_settings::TerminalSettings;
@@ -20,11 +21,11 @@ use terminal_core::{
     ScrollPageUp, ScrollToBottom, ScrollToTop, SearchTest, SelectAll as TerminalSelectAll,
     ShowCharacterPalette, TerminalBuilder,
 };
-use ui::{Tab, TabBar, TabPosition, Toggleable as _};
+use ui::{ContextMenu, Tab, TabBar, TabPosition, Toggleable as _};
 use util::paths::PathStyle;
 use util::ResultExt;
 
-use crate::{CloseTab, NewTab, NewWindow, NextTab, OpenSettings, PreviousTab};
+use crate::{CloseOtherTabs, CloseTab, NewTab, NewWindow, NextTab, OpenSettings, PreviousTab};
 use crate::terminal::{TerminalElement, TerminalSearchBar, TerminalTab};
 use crate::terminal::tab::ScrollAction;
 
@@ -33,6 +34,8 @@ pub struct TerminalWindowView {
     pub focus_handle: FocusHandle,
     pub(crate) tabs: Vec<Entity<TerminalTab>>,
     pub(crate) active_tab_index: usize,
+    /// Right-click context menu for the active terminal, if open.
+    context_menu: Option<(Entity<ContextMenu>, Subscription)>,
 }
 
 impl TerminalWindowView {
@@ -41,6 +44,7 @@ impl TerminalWindowView {
             focus_handle: cx.focus_handle(),
             tabs: Vec::new(),
             active_tab_index: 0,
+            context_menu: None,
         };
         view.spawn_new_terminal(cx);
 
@@ -201,8 +205,74 @@ impl TerminalWindowView {
         crate::open_new_window(cx);
     }
 
+    fn close_other_tabs(&mut self, _: &CloseOtherTabs, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(active) = self.tabs.get(self.active_tab_index) else {
+            return;
+        };
+        let active_id = active.entity_id();
+        self.tabs.retain(|tab| tab.entity_id() == active_id);
+        self.active_tab_index = 0;
+        cx.notify();
+    }
+
     fn open_settings(&mut self, _: &OpenSettings, _window: &mut Window, cx: &mut Context<Self>) {
         crate::settings_ui::open_settings_window(cx);
+    }
+
+    /// Builds and shows a right-click context menu, keeping it alive in
+    /// `self.context_menu` until dismissed.
+    fn show_context_menu(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        build: impl FnOnce(ContextMenu, &mut Window, &mut Context<ContextMenu>) -> ContextMenu,
+    ) {
+        let context_menu = ContextMenu::build(window, cx, build);
+        window.focus(&context_menu.focus_handle(cx), cx);
+        let subscription = cx.subscribe_in(
+            &context_menu,
+            window,
+            |this, _, _: &DismissEvent, _window, cx| {
+                this.context_menu.take();
+                cx.notify();
+            },
+        );
+        self.context_menu = Some((context_menu, subscription));
+    }
+
+    /// Right-click menu over the terminal surface (mirrors Zed's terminal
+    /// context menu minus the workspace/assistant entries).
+    fn deploy_terminal_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(self.active_tab_index).cloned() else {
+            return;
+        };
+        self.show_context_menu(window, cx, |menu, _, cx| {
+            menu.context(tab.read(cx).focus_handle.clone())
+                .action("New Terminal", Box::new(NewTab))
+                .separator()
+                .action("Copy", Box::new(terminal_core::Copy))
+                .action("Paste", Box::new(terminal_core::Paste))
+                .action("Paste Text", Box::new(terminal_core::PasteText))
+                .action("Select All", Box::new(terminal_core::SelectAll))
+                .action("Clear", Box::new(terminal_core::Clear))
+                .separator()
+                .action("Close Terminal Tab", Box::new(CloseTab))
+        });
+    }
+
+    /// Right-click menu over a tab in the tab bar.
+    fn deploy_tab_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(self.active_tab_index).cloned() else {
+            return;
+        };
+        self.show_context_menu(window, cx, |menu, _, cx| {
+            menu.context(tab.read(cx).focus_handle.clone())
+                .action("New Tab", Box::new(NewTab))
+                .action("New Window", Box::new(NewWindow))
+                .separator()
+                .action("Close Tab", Box::new(CloseTab))
+                .action("Close Other Tabs", Box::new(CloseOtherTabs))
+        });
     }
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> TabBar {
@@ -227,6 +297,14 @@ impl TerminalWindowView {
                             this.active_tab_index = idx;
                             cx.notify();
                         }))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, _, window, cx| {
+                                this.active_tab_index = idx;
+                                this.deploy_tab_context_menu(window, cx);
+                                cx.notify();
+                            }),
+                        )
                         .child(title)
                 })
                 .collect::<Vec<_>>(),
@@ -291,10 +369,41 @@ impl Render for TerminalWindowView {
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_tab))
+            .on_action(cx.listener(Self::close_other_tabs))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::open_settings))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    let Some(tab) = this.tabs.get(this.active_tab_index) else {
+                        return;
+                    };
+                    let in_mouse_mode =
+                        tab.read(cx).terminal.read(cx).mouse_mode(event.modifiers.shift);
+                    if !in_mouse_mode {
+                        // Mirrors Zed: right-click selects the word under the
+                        // cursor before showing the context menu.
+                        let has_selection = tab
+                            .read(cx)
+                            .terminal
+                            .read(cx)
+                            .last_content
+                            .selection
+                            .is_some();
+                        if !has_selection {
+                            tab.update(cx, |tab, cx| {
+                                tab.terminal.update(cx, |term, _| {
+                                    term.select_word_at_event_position(event);
+                                });
+                            });
+                        }
+                        this.deploy_terminal_context_menu(window, cx);
+                        cx.notify();
+                    }
+                }),
+            )
     }
 }
 

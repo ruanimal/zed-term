@@ -28,7 +28,15 @@ pub const TERM_PROGRAM: &str = "zedterm";
 
 actions!(
     terminal_app,
-    [NewTab, CloseTab, NextTab, PreviousTab, NewWindow, OpenSettings]
+    [
+        NewTab,
+        CloseTab,
+        NextTab,
+        PreviousTab,
+        NewWindow,
+        OpenSettings,
+        CloseOtherTabs
+    ]
 );
 
 /// Window options shared by every window the app opens.

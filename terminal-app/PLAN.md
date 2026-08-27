@@ -209,6 +209,7 @@ crates/terminal_app/
 - **hover 路径与打开**：✅ 部分完成——`Event::Open` 订阅到手（`MaybeNavigationTarget::Url` → `open_url`；`PathLike` → `file://` 默认应用），hover 高亮沿用 element 既有渲染；**未做**：悬停 tooltip（原 `terminal_path_like_target.rs` 的 worktree 解析不适用，去 project 化移植留待后续）。
 - **标题更新正规链路**：✅ `TerminalTab` 订阅 `Event::TitleChanged`/`BreadcrumbsChanged` → `cx.notify()`；250ms 心跳保留（shell 输出重绘仍需，见已知问题 2）。
 - **`terminal_settings.rs` 遗留清理**：✅ `merge_from_option` 已删（§4.1 一并完成）。
+- **右键菜单**（PLAN WP3.1 提及项，补录）✅：终端区右键菜单（New Terminal / Copy / Paste / Paste Text / Select All / Clear / Close Terminal Tab——对齐原版终端的上下文菜单，去掉 workspace/assistant 项；右键在无选区时先选中单词，mouse mode 下不拦截）；标签栏右键菜单（New Tab / New Window / Close Tab / Close Other Tabs）。复用 `ui::ContextMenu`，无需 `menu` crate 直接依赖。
 
 ### WP5 会话持久化
 
