@@ -93,16 +93,14 @@ impl RenderOnce for TerminalSearchBar {
                                 "escape" => {
                                     tab.update(cx, |tab, cx| {
                                         tab.close_search(cx);
-                                    })
-                                    .log_err();
-                                    this.focus_handle.clone().focus(window);
+                                    });
+                                    this.focus_handle.clone().focus(window, cx);
                                 }
                                 "enter" => {
                                     let reverse = event.keystroke.modifiers.shift;
                                     tab.update(cx, |tab, cx| {
                                         tab.search_next(reverse, cx);
-                                    })
-                                    .log_err();
+                                    });
                                 }
                                 _ => {}
                             }
@@ -167,8 +165,7 @@ impl InputHandler for TerminalSearchBarInput {
         cx: &mut App,
     ) {
         self.tab
-            .update(cx, |tab, cx| tab.update_search_query(text.to_string(), cx))
-            .log_err();
+            .update(cx, |tab, cx| tab.update_search_query(text.to_string(), cx));
     }
 
     fn replace_and_mark_text_in_range(

@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use gpui::{
     App, AppContext as _, Context, FocusHandle, Focusable as _, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, Styled as _, Window, WindowBounds, WindowKind,
-    WindowOptions, div, rgb, size, px,
+    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
+    UpdateGlobal, Window, WindowBounds, WindowKind, div, rgb, size, px,
 };
 use settings::Settings as _;
 use settings::SettingsStore;
@@ -44,7 +44,7 @@ fn write_setting(
     cx: &mut App,
     update: impl FnOnce(&mut settings::TerminalSettingsContent) + Send + 'static,
 ) {
-    let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor()));
+    let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
     SettingsStore::update_global(cx, |store, _| {
         store.update_settings_file(fs, move |content, _| {
             let terminal = content
@@ -63,7 +63,7 @@ impl Render for SettingsPage {
         let settings = TerminalSettings::get_global(cx);
         let font_size = settings
             .font_size
-            .map(|s| s.to_pixels())
+            .map(|s| f32::from(s))
             .unwrap_or(15.0);
 
         div()
@@ -85,7 +85,7 @@ impl Render for SettingsPage {
                     |cx, delta| {
                         let current = TerminalSettings::get_global(cx)
                             .font_size
-                            .map(|s| s.to_pixels())
+                            .map(|s| f32::from(s))
                             .unwrap_or(15.0);
                         let next = (current + delta).max(1.0);
                         write_setting(cx, move |content| {

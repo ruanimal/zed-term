@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    actions, App, AppContext as _, KeyBinding, WindowKind, WindowOptions, px, size,
+    actions, App, AppContext as _, KeyBinding, UpdateGlobal, WindowOptions, px, size,
 };
 use settings::Settings as _;
 use settings::SettingsStore;
@@ -71,7 +71,7 @@ fn load_fonts(cx: &mut App) {
 /// Watches the user settings file (`~/Library/Application Support/Zed/
 /// settings.json`, same path Zed uses) and applies changes live.
 fn watch_user_settings(cx: &mut App) {
-    let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor()));
+    let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
     SettingsStore::update_global(cx, |store, cx| {
         store.watch_settings_files(fs, cx, |settings_file, result, cx| {
             if matches!(settings_file, settings::SettingsFile::User)

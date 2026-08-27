@@ -56,7 +56,7 @@ impl TerminalTab {
         // React to title changes instead of relying on the window heartbeat to
         // pick them up; the element reads `title()` every frame.
         this._subscriptions.push(
-            cx.subscribe(&this.terminal, |this, _terminal, event, cx| match event {
+            cx.subscribe(&this.terminal, |_this, _terminal, event, cx| match event {
                 Event::TitleChanged | Event::BreadcrumbsChanged => cx.notify(),
                 Event::Open(target) => match target {
                     // Cmd-click on a hyperlink or path: hand it to the OS.
@@ -194,12 +194,12 @@ impl TerminalTab {
                 .unwrap_or_default();
             self.search_query = seed.clone();
             self.run_search(seed, cx);
-            self.search_focus_handle.clone().focus(window);
+            self.search_focus_handle.clone().focus(window, cx);
         } else {
             self.search_query.clear();
             self.active_match = None;
             self.terminal.update(cx, |term, _| term.matches.clear());
-            self.focus_handle.clone().focus(window);
+            self.focus_handle.clone().focus(window, cx);
         }
         cx.notify();
     }
