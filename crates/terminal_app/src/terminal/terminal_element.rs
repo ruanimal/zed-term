@@ -849,6 +849,7 @@ impl TerminalElement {
     }
 
     /// Converts the Alacritty cell styles to GPUI text styles and background color.
+    #[allow(clippy::too_many_arguments)]
     fn cell_style(
         point: Point,
         cell: &Cell,
@@ -1510,7 +1511,7 @@ impl Element for TerminalElement {
                                 line_height: layout.dimensions.line_height,
                                 lines: highlighted_range_lines,
                                 color: *color,
-                                corner_radius: corner_radius,
+                                corner_radius,
                             };
                             hr.paint(true, bounds, window);
                         }
@@ -2157,7 +2158,7 @@ mod tests {
 
     #[test]
     fn test_is_app_chosen_exact_color() {
-        use terminal::{Color, NamedColor, Rgb};
+        use terminal_core::{Color, NamedColor, Rgb};
 
         // Indices 0..=15 are theme-overridable ANSI colors; contrast adjustment must still apply.
         assert!(!TerminalElement::is_app_chosen_exact_color(
@@ -2297,7 +2298,7 @@ mod tests {
             ("blue", 80, 80, 225),
             ("pure red", 255, 0, 0),
         ] {
-            let color = terminal::rgba_color(r, g, b);
+            let color = terminal_core::rgba_color(r, g, b);
             let contrast = apca_contrast(color, dark_bg).abs();
             assert!(
                 contrast < 45.0,
@@ -2571,7 +2572,7 @@ mod tests {
         // This works for both Scrollable and Inline modes because we filter
         // by enumerated line group index, not by cell.point.line values.
         use itertools::Itertools;
-        use terminal::{Cell, IndexedCell, Point};
+        use terminal_core::{Cell, IndexedCell, Point};
 
         // Create mock cells for lines 0-23 (typical terminal with 24 visible lines)
         let mut cells = Vec::new();
@@ -2623,7 +2624,7 @@ mod tests {
         // for scrollback history. The screen-position filtering approach works because
         // we filter by enumerated line group index, not by cell.point.line values.
         use itertools::Itertools;
-        use terminal::{Cell, IndexedCell, Point};
+        use terminal_core::{Cell, IndexedCell, Point};
 
         // Simulate cells from a scrolled terminal with scrollback
         // These have negative line numbers representing scrollback history
@@ -2673,7 +2674,7 @@ mod tests {
     fn test_screen_position_filtering_skip_all() {
         // Test what happens when we skip more rows than exist
         use itertools::Itertools;
-        use terminal::{Cell, IndexedCell, Point};
+        use terminal_core::{Cell, IndexedCell, Point};
 
         let mut cells = Vec::new();
         for line in 0..10i32 {
@@ -2743,8 +2744,8 @@ mod tests {
         // not by cell.point.line values. This makes the filtering agnostic to the
         // actual line numbers in the cells.
         use itertools::Itertools;
-        use terminal::Point;
-        use terminal::{Cell, IndexedCell};
+        use terminal_core::Point;
+        use terminal_core::{Cell, IndexedCell};
 
         // Test with positive line numbers (Inline mode style)
         let positive_cells: Vec<_> = (0..10i32)

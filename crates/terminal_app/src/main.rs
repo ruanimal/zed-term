@@ -15,6 +15,6 @@ fn build_application() -> Application {
 
 fn main() -> Result<()> {
     let app = build_application();
-    app.run(|cx| terminal_app::run(cx));
+    app.run(terminal_app::run);
     Ok(())
 }
