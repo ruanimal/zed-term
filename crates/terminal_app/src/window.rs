@@ -363,6 +363,10 @@ impl TerminalWindowView {
                                     this.active_tab_index = idx;
                                     this.deploy_tab_context_menu(event.position, window, cx);
                                     cx.notify();
+                                    // Stop so the window root's right-click
+                                    // handler does not replace this with the
+                                    // terminal (copy/paste) menu.
+                                    cx.stop_propagation();
                                 }),
                             )
                             .child(title)
