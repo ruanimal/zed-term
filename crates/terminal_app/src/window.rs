@@ -311,7 +311,7 @@ impl TerminalWindowView {
                         }))
                         .on_mouse_down(
                             MouseButton::Right,
-                            cx.listener(move |this, event, window, cx| {
+                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                                 this.active_tab_index = idx;
                                 this.deploy_tab_context_menu(event.position, window, cx);
                                 cx.notify();
