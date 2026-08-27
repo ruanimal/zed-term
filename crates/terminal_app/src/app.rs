@@ -33,7 +33,7 @@ actions!(
 
 /// Window options shared by every window the app opens.
 pub fn window_options(bounds: gpui::Bounds<gpui::Pixels>) -> WindowOptions {
-    use gpui::{WindowBackgroundAppearance, WindowBounds, WindowDecorations};
+    use gpui::{WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind};
 
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),

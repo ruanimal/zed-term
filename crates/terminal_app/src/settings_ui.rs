@@ -5,9 +5,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext as _, Context, FocusHandle, Focusable as _, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
-    UpdateGlobal, Window, WindowBounds, WindowKind, div, rgb, size, px,
+    App, AppContext as _, Context, FocusHandle, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, UpdateGlobal,
+    Window, WindowBounds, WindowKind, div, rgb, size, px,
 };
 use settings::Settings as _;
 use settings::SettingsStore;
@@ -60,11 +60,23 @@ fn write_setting(
 
 impl Render for SettingsPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let settings = TerminalSettings::get_global(cx);
-        let font_size = settings
-            .font_size
-            .map(|s| f32::from(s))
-            .unwrap_or(15.0);
+        // Snapshot the values up front so the settings borrow does not outlive
+        // the `cx` borrow passed into each row.
+        let (font_size, cursor_shape, blinking, option_as_meta, copy_on_select) = {
+            let settings = TerminalSettings::get_global(cx);
+            (
+                settings.font_size.map(f32::from).unwrap_or(15.0),
+                format!("{:?}", settings.cursor_shape).to_lowercase(),
+                match settings.blinking {
+                    settings::TerminalBlink::On => "on",
+                    settings::TerminalBlink::Off => "off",
+                    settings::TerminalBlink::TerminalControlled => "terminal-controlled",
+                }
+                .to_string(),
+                settings.option_as_meta,
+                settings.copy_on_select,
+            )
+        };
 
         div()
             .id("settings-page")
@@ -85,7 +97,7 @@ impl Render for SettingsPage {
                     |cx, delta| {
                         let current = TerminalSettings::get_global(cx)
                             .font_size
-                            .map(|s| f32::from(s))
+                            .map(f32::from)
                             .unwrap_or(15.0);
                         let next = (current + delta).max(1.0);
                         write_setting(cx, move |content| {
@@ -99,7 +111,7 @@ impl Render for SettingsPage {
                     cx,
                     "cursor-shape",
                     "Cursor shape",
-                    format!("{:?}", settings.cursor_shape).to_lowercase(),
+                    cursor_shape,
                     |cx| {
                         let next = match TerminalSettings::get_global(cx).cursor_shape {
                             CursorShape::Block => settings::CursorShapeContent::Underline,
@@ -116,12 +128,7 @@ impl Render for SettingsPage {
                     cx,
                     "cursor-blink",
                     "Cursor blinking",
-                    match settings.blinking {
-                        settings::TerminalBlink::On => "on",
-                        settings::TerminalBlink::Off => "off",
-                        settings::TerminalBlink::TerminalControlled => "terminal-controlled",
-                    }
-                    .to_string(),
+                    blinking,
                     |cx| {
                         let next =
                             match TerminalSettings::get_global(cx).blinking {
@@ -142,7 +149,7 @@ impl Render for SettingsPage {
                     cx,
                     "option-as-meta",
                     "Option as meta",
-                    settings.option_as_meta,
+                    option_as_meta,
                     |cx| {
                         let next = !TerminalSettings::get_global(cx).option_as_meta;
                         write_setting(cx, move |content| content.option_as_meta = Some(next));
@@ -154,7 +161,7 @@ impl Render for SettingsPage {
                     cx,
                     "copy-on-select",
                     "Copy on select",
-                    settings.copy_on_select,
+                    copy_on_select,
                     |cx| {
                         let next = !TerminalSettings::get_global(cx).copy_on_select;
                         write_setting(cx, move |content| content.copy_on_select = Some(next));

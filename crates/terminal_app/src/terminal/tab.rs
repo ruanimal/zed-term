@@ -5,7 +5,7 @@
 
 use std::ops::Range as StdRange;
 
-use gpui::{App, Context, Entity, FocusHandle, Focusable as _, Pixels, ScrollWheelEvent, Window};
+use gpui::{App, Context, Entity, FocusHandle, Pixels, ScrollWheelEvent, Window};
 use settings::Settings as _;
 use terminal_core::{
     Event, MaybeNavigationTarget, Search, Terminal, TerminalBounds,

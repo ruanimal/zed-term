@@ -5,9 +5,8 @@
 //! closes the bar. IME composition is not supported in this first pass.
 
 use gpui::{
-    App, Bounds, Entity, Focusable as _, InputHandler, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ParentElement as _, Pixels, RenderOnce, Styled as _, UTF16Selection,
-    WeakEntity, Window, div,
+    App, Bounds, Entity, InputHandler, InteractiveElement as _, IntoElement, KeyDownEvent,
+    ParentElement as _, Pixels, RenderOnce, Styled as _, UTF16Selection, WeakEntity, Window, div,
 };
 use util::ResultExt;
 

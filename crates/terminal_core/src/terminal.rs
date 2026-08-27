@@ -1297,6 +1297,8 @@ enum TerminalType {
         pty_tx: PtySender,
         info: Arc<PtyProcessInfo>,
     },
+    // Constructed only by the test-support-gated `TerminalBuilder::new_display_only`.
+    #[allow(dead_code)]
     DisplayOnly,
 }
 
