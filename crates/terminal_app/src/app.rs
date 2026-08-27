@@ -9,6 +9,7 @@ use std::time::Duration;
 use gpui::{
     actions, App, AppContext as _, KeyBinding, UpdateGlobal, WindowOptions, px, size,
 };
+use futures::StreamExt;
 use settings::Settings as _;
 use settings::SettingsStore;
 use terminal_core::terminal_settings::TerminalSettings;
@@ -18,6 +19,7 @@ use terminal_core::{
 };
 use util::ResultExt;
 
+pub mod persistence;
 pub mod settings_ui;
 pub mod terminal;
 pub mod window;
@@ -42,17 +44,30 @@ actions!(
     ]
 );
 
-/// Window options shared by every window the app opens.
+/// Window options shared by every window the app opens. The system titlebar
+/// is transparent: the tab bar itself occupies the titlebar strip (as in
+/// Zed), with the traffic lights floating over its left edge.
 pub fn window_options(bounds: gpui::Bounds<gpui::Pixels>) -> WindowOptions {
-    use gpui::{WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind};
+    use gpui::{
+        TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind,
+        point,
+    };
 
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(TitlebarOptions {
+            title: None,
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(9.0), px(9.0))),
+        }),
         focus: true,
         show: true,
         kind: WindowKind::Normal,
         is_movable: true,
-        app_owns_titlebar_drag: false,
+        // We draw our own titlebar (the tab bar) and move the window via
+        // `Window::start_window_move`, so AppKit should not own titlebar
+        // dragging. No-op off macOS.
+        app_owns_titlebar_drag: true,
         display_id: None,
         window_background: WindowBackgroundAppearance::Opaque,
         window_decorations: Some(WindowDecorations::Server),
@@ -77,6 +92,56 @@ fn load_fonts(cx: &mut App) {
         }
     }
     cx.text_system().add_fonts(embedded_fonts).unwrap();
+}
+
+/// Registers the embedded Zed theme families (One/ayu/gruvbox from the asset
+/// source) so settings.json's `theme` selection resolves against them.
+fn load_embedded_themes(cx: &mut App) {
+    let asset_source = cx.asset_source();
+    let Ok(theme_paths) = asset_source.list("themes") else {
+        return;
+    };
+    let registry = theme::ThemeRegistry::global(cx);
+    for theme_path in theme_paths {
+        if !theme_path.ends_with(".json") {
+            continue;
+        }
+        let Some(bytes) = asset_source.load(&theme_path).unwrap_or_else(|_| {
+            log::warn!("Failed to load embedded theme asset {theme_path:?}");
+            None
+        }) else {
+            continue;
+        };
+        theme_settings::load_user_theme(&registry, &bytes).log_err();
+    }
+}
+
+/// Loads user themes from the themes dir (`paths::themes_dir()`, shared with
+/// Zed), so any Zed theme JSON on disk is available to ZedTerm too.
+fn load_user_themes_in_background(cx: &mut App) {
+    let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
+    cx.spawn(async move |cx| {
+        let themes_dir = paths::themes_dir().clone();
+        if !fs.is_dir(&themes_dir).await {
+            return;
+        }
+        let mut theme_paths = match fs.read_dir(&themes_dir).await {
+            Ok(paths) => paths,
+            Err(error) => {
+                log::warn!("Failed to read themes dir {themes_dir:?}: {error}");
+                return;
+            }
+        };
+        let registry = cx.update(|cx| theme::ThemeRegistry::global(cx));
+        while let Some(Ok(theme_path)) = theme_paths.next().await {
+            let Some(bytes) = fs.load_bytes(&theme_path).await.log_err() else {
+                continue;
+            };
+            theme_settings::load_user_theme(&registry, &bytes).log_err();
+        }
+        cx.update(theme_settings::reload_theme);
+    })
+    .detach();
 }
 
 /// Watches the user settings file (`~/Library/Application Support/Zed/
@@ -104,9 +169,14 @@ pub fn open_new_window(cx: &mut App) {
         size(settings.default_width, settings.default_height),
         cx,
     );
+    open_window_with_bounds(bounds, cx)
+}
+
+/// Opens a main window at the given bounds and schedules its activation.
+fn open_window_with_bounds(bounds: gpui::Bounds<gpui::Pixels>, cx: &mut App) {
     let handle = cx
         .open_window(window_options(bounds), |window, cx| {
-            let view = cx.new(|cx| window::TerminalWindowView::new(cx));
+            let view = cx.new(window::TerminalWindowView::new);
             view.read(cx).focus_handle.clone().focus(window, cx);
             view
         })
@@ -126,12 +196,15 @@ pub fn open_new_window(cx: &mut App) {
 }
 
 /// Bootstrap the application inside GPUI's launch callback: settings, theme
-/// registry, fonts, keymap, then the first window.
+/// registry, fonts, keymap, persistence, then the first window.
 pub fn run(cx: &mut App) {
     settings::init(cx);
     theme_settings::init(theme::LoadThemes::JustBase, cx);
+    load_embedded_themes(cx);
+    load_user_themes_in_background(cx);
     load_fonts(cx);
     watch_user_settings(cx);
+    persist_window_geometry_on_quit(cx);
 
     cx.bind_keys([
         // Window / tab management.
@@ -161,5 +234,34 @@ pub fn run(cx: &mut App) {
         KeyBinding::new("cmd-end", ScrollToBottom, Some("TerminalWindow")),
     ]);
 
-    open_new_window(cx);
+    open_first_window(cx);
+}
+
+/// Opens the first window, restoring its geometry from the previous session
+/// when possible and falling back to a default-sized window otherwise.
+fn open_first_window(cx: &mut App) {
+    let settings = TerminalSettings::get_global(cx);
+    let default_size = size(settings.default_width, settings.default_height);
+    let bounds =
+        persistence::first_window_bounds(cx).unwrap_or_else(|| persistence::default_first_window_bounds(cx, default_size));
+    open_window_with_bounds(bounds, cx);
+}
+
+/// Saves each main window's geometry when the app quits so the next launch
+/// can restore it. The settings floating window is excluded; tabs and shell
+/// state are not persisted.
+fn persist_window_geometry_on_quit(cx: &mut App) {
+    cx.on_app_quit(|cx| {
+        let mut bounds: Vec<gpui::Bounds<gpui::Pixels>> = Vec::new();
+        for handle in cx.windows() {
+            if let Some(main_window) = handle.downcast::<window::TerminalWindowView>() {
+                main_window
+                    .update(cx, |_, window, _| bounds.push(window.bounds()))
+                    .log_err();
+            }
+        }
+        persistence::save_window_geometries(&bounds);
+        async {}
+    })
+    .detach();
 }

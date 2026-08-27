@@ -10,10 +10,12 @@ use collections::HashMap;
 use gpui::{
     AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    ParentElement as _, Pixels, Render, StatefulInteractiveElement as _, Subscription, Styled as _,
-    WeakEntity, Window, anchored, deferred, div, prelude::FluentBuilder, rgb,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render,
+    StatefulInteractiveElement as _, Subscription, Styled as _, WeakEntity, Window, anchored,
+    deferred, div, prelude::FluentBuilder, px,
 };
 use settings::Settings as _;
+use theme::ActiveTheme as _;
 use terminal_core::terminal_settings::TerminalSettings;
 use terminal_core::{
     Clear as TerminalClear, Copy as TerminalCopyAction, Paste as TerminalPasteAction,
@@ -21,6 +23,7 @@ use terminal_core::{
     ScrollPageUp, ScrollToBottom, ScrollToTop, SearchTest, SelectAll as TerminalSelectAll,
     ShowCharacterPalette, TerminalBuilder,
 };
+use ui::utils::{TRAFFIC_LIGHT_PADDING, platform_title_bar_height};
 use ui::{
     Clickable as _, ContextMenu, IconButton, IconName, IconSize, Tab, TabBar, TabPosition,
     Toggleable as _,
@@ -42,6 +45,8 @@ pub struct TerminalWindowView {
     pub(crate) active_tab_index: usize,
     /// Right-click context menu for the active terminal, if open.
     context_menu: Option<(Entity<ContextMenu>, gpui::Point<Pixels>, Subscription)>,
+    /// Left-button state for the titlebar strip drag gesture.
+    titlebar_mouse_down: std::cell::Cell<bool>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -52,6 +57,7 @@ impl TerminalWindowView {
             tabs: Vec::new(),
             active_tab_index: 0,
             context_menu: None,
+            titlebar_mouse_down: std::cell::Cell::new(false),
             _subscriptions: Vec::new(),
         };
         view.spawn_new_terminal(cx);
@@ -81,7 +87,7 @@ impl TerminalWindowView {
     fn spawn_new_terminal(&mut self, cx: &mut Context<Self>) {
         let focus = self.focus_handle.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let Some(builder) = build_terminal(&cx).await else {
+            let Some(builder) = build_terminal(cx).await else {
                 return;
             };
             let terminal = cx.new(|cx| builder.subscribe(cx));
@@ -320,22 +326,84 @@ impl TerminalWindowView {
         });
     }
 
+    /// Renders the titlebar strip: the tab bar itself acts as the window
+    /// titlebar (as in Zed). The traffic lights float over its left edge, so
+    /// that area is reserved as a drag handle; the remaining empty area of
+    /// the strip drags the window and double-click zooms it, like a native
+    /// titlebar. Dragging follows Zed's PlatformTitleBar pattern: flag on
+    /// mouse-down, `start_window_move` on drag; interactive children (tabs,
+    /// buttons) stop propagation so presses on them don't move the window.
+    fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let titlebar_height = platform_title_bar_height(window);
+        let titlebar_background = cx.theme().colors().tab_bar_background;
+        div()
+            .id("title-bar")
+            .h(titlebar_height)
+            .flex_none()
+            .pl(px(TRAFFIC_LIGHT_PADDING))
+            .bg(titlebar_background)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, _| {
+                    this.titlebar_mouse_down.set(true);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, _| {
+                    this.titlebar_mouse_down.set(false);
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, window, _| {
+                if this.titlebar_mouse_down.get() {
+                    this.titlebar_mouse_down.set(false);
+                    window.start_window_move();
+                }
+            }))
+            .on_click(cx.listener(|_, event: &gpui::ClickEvent, window, _| {
+                if event.click_count() >= 2 {
+                    window.zoom_window();
+                }
+            }))
+            .child(self.render_tab_bar(cx))
+    }
+
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> TabBar {
         let tab_count = self.tabs.len();
         TabBar::new("window-tabs")
             .end_child(
-                IconButton::new("new-tab-button", IconName::Plus)
-                    .icon_size(IconSize::XSmall)
-                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
-                        this.spawn_new_terminal(cx);
-                    })),
+                div()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                            // Keep button presses out of the titlebar drag
+                            // gesture (IconButton has no mouse-down hook).
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        IconButton::new("new-tab-button", IconName::Plus)
+                            .icon_size(IconSize::XSmall)
+                            .on_click(cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
+                                this.spawn_new_terminal(cx);
+                            })),
+                    ),
             )
             .end_child(
-                IconButton::new("settings-button", IconName::Settings)
-                    .icon_size(IconSize::XSmall)
-                    .on_click(cx.listener(|_, _: &gpui::ClickEvent, _window, cx| {
-                        crate::settings_ui::open_settings_window(cx);
-                    })),
+                div()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        IconButton::new("settings-button", IconName::Settings)
+                            .icon_size(IconSize::XSmall)
+                            .on_click(cx.listener(|_, _: &gpui::ClickEvent, _window, cx| {
+                                crate::settings_ui::open_settings_window(cx);
+                            })),
+                    ),
             )
             .children(
                 self.tabs
@@ -353,6 +421,14 @@ impl TerminalWindowView {
                         Tab::new(idx.to_string())
                             .position(position)
                             .toggle_state(idx == self.active_tab_index)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+                                    // Keep tab presses out of the titlebar
+                                    // drag gesture.
+                                    cx.stop_propagation();
+                                }),
+                            )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.active_tab_index = idx;
                                 cx.notify();
@@ -377,7 +453,7 @@ impl TerminalWindowView {
 }
 
 impl Render for TerminalWindowView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active_tab = self.tabs.get(self.active_tab_index).cloned();
         let terminal = active_tab
             .as_ref()
@@ -394,8 +470,8 @@ impl Render for TerminalWindowView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(0x14151a))
-            .child(self.render_tab_bar(cx))
+            .bg(cx.theme().colors().terminal_background)
+            .child(self.render_title_bar(window, cx))
             .when_some(active_tab.clone().filter(|_| search_active), |this, tab| {
                 this.child(TerminalSearchBar::new(tab, cx.weak_entity()).into_any_element())
             })
