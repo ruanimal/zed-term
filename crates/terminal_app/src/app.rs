@@ -31,11 +31,14 @@ actions!(
     [
         NewTab,
         CloseTab,
+        CloseOtherTabs,
+        CloseLeft,
+        CloseRight,
+        CloseAll,
         NextTab,
         PreviousTab,
         NewWindow,
-        OpenSettings,
-        CloseOtherTabs
+        OpenSettings
     ]
 );
 

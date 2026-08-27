@@ -9,9 +9,9 @@ use std::time::Duration;
 use collections::HashMap;
 use gpui::{
     AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _,
-    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _,
-    Pixels, Render, StatefulInteractiveElement as _, Subscription, Styled as _, WeakEntity, Window,
-    anchored, deferred, div, prelude::FluentBuilder, rgb,
+    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    ParentElement as _, Pixels, Render, StatefulInteractiveElement as _, Subscription, Styled as _,
+    WeakEntity, Window, anchored, deferred, div, prelude::FluentBuilder, rgb,
 };
 use settings::Settings as _;
 use terminal_core::terminal_settings::TerminalSettings;
@@ -25,7 +25,10 @@ use ui::{ContextMenu, Tab, TabBar, TabPosition, Toggleable as _};
 use util::paths::PathStyle;
 use util::ResultExt;
 
-use crate::{CloseOtherTabs, CloseTab, NewTab, NewWindow, NextTab, OpenSettings, PreviousTab};
+use crate::{
+    CloseAll, CloseLeft, CloseOtherTabs, CloseRight, CloseTab, NewTab, NewWindow, NextTab,
+    OpenSettings, PreviousTab,
+};
 use crate::terminal::{TerminalElement, TerminalSearchBar, TerminalTab};
 use crate::terminal::tab::ScrollAction;
 
@@ -215,6 +218,22 @@ impl TerminalWindowView {
         cx.notify();
     }
 
+    fn close_left(&mut self, _: &CloseLeft, _window: &mut Window, cx: &mut Context<Self>) {
+        self.tabs.drain(..self.active_tab_index);
+        self.active_tab_index = 0;
+        cx.notify();
+    }
+
+    fn close_right(&mut self, _: &CloseRight, _window: &mut Window, cx: &mut Context<Self>) {
+        self.tabs.truncate(self.active_tab_index + 1);
+        cx.notify();
+    }
+
+    fn close_all(&mut self, _: &CloseAll, window: &mut Window, _cx: &mut Context<Self>) {
+        self.tabs.clear();
+        window.remove_window();
+    }
+
     fn open_settings(&mut self, _: &OpenSettings, _window: &mut Window, cx: &mut Context<Self>) {
         crate::settings_ui::open_settings_window(cx);
     }
@@ -279,11 +298,11 @@ impl TerminalWindowView {
         };
         self.show_context_menu(position, window, cx, |menu, _, cx| {
             menu.context(tab.read(cx).focus_handle.clone())
-                .action("New Tab", Box::new(NewTab))
-                .action("New Window", Box::new(NewWindow))
-                .separator()
-                .action("Close Tab", Box::new(CloseTab))
-                .action("Close Other Tabs", Box::new(CloseOtherTabs))
+                .action("Close", Box::new(CloseTab))
+                .action("Close Others", Box::new(CloseOtherTabs))
+                .action("Close Left", Box::new(CloseLeft))
+                .action("Close Right", Box::new(CloseRight))
+                .action("Close All", Box::new(CloseAll))
         });
     }
 
@@ -338,6 +357,7 @@ impl Render for TerminalWindowView {
         div()
             .id("terminal-window")
             .key_context("TerminalWindow")
+            .track_focus(&self.focus_handle)
             .size_full()
             .flex()
             .flex_col()
@@ -382,6 +402,9 @@ impl Render for TerminalWindowView {
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::close_other_tabs))
+            .on_action(cx.listener(Self::close_left))
+            .on_action(cx.listener(Self::close_right))
+            .on_action(cx.listener(Self::close_all))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::new_window))
@@ -424,6 +447,25 @@ impl Render for TerminalWindowView {
                         .child(menu.clone()),
                 )
                 .with_priority(1)
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                // Keys that no keymap binding consumed (Enter, Tab, arrows,
+                // Ctrl+C, ...) are translated to ANSI and sent to the pty,
+                // mirroring Zed's `TerminalView::key_down`.
+                let Some(tab) = this.tabs.get(this.active_tab_index) else {
+                    return;
+                };
+                let handled = tab.update(cx, |tab, cx| {
+                    tab.terminal.update(cx, |term, cx| {
+                        term.try_keystroke(
+                            &event.keystroke,
+                            TerminalSettings::get_global(cx).option_as_meta,
+                        )
+                    })
+                });
+                if handled {
+                    cx.stop_propagation();
+                }
             }))
     }
 }
