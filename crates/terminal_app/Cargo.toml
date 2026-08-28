@@ -24,6 +24,7 @@ log.workspace = true
 collections.workspace = true
 paths.workspace = true
 regex.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true

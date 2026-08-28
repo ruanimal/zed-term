@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    actions, App, AppContext as _, KeyBinding, UpdateGlobal, WindowOptions, px, size,
+    actions, Action, App, AppContext as _, KeyBinding, UpdateGlobal, WindowOptions, px, size,
 };
 use futures::StreamExt;
 use settings::Settings as _;
@@ -43,6 +43,19 @@ actions!(
         OpenSettings
     ]
 );
+
+/// Sends raw text (escape sequences included) directly to the PTY, mirroring
+/// Zed's `terminal::SendText`.
+#[derive(Action, Clone, Debug, Default, PartialEq, serde::Deserialize, schemars::JsonSchema)]
+#[action(namespace = terminal_app)]
+pub struct SendText(pub String);
+
+/// Sends the given keystroke through the terminal's keystroke translation
+/// (`Terminal::try_keystroke`), so e.g. `cmd-backspace` can send `ctrl-u`,
+/// mirroring Zed's `terminal::SendKeystroke`.
+#[derive(Action, Clone, Debug, Default, PartialEq, serde::Deserialize, schemars::JsonSchema)]
+#[action(namespace = terminal_app)]
+pub struct SendKeystroke(pub String);
 
 /// Window options shared by every window the app opens. The system titlebar
 /// is transparent: the tab bar itself occupies the titlebar strip (as in
@@ -232,6 +245,30 @@ pub fn run(cx: &mut App) {
         KeyBinding::new("shift-end", ScrollToBottom, Some("TerminalWindow")),
         KeyBinding::new("cmd-home", ScrollToTop, Some("TerminalWindow")),
         KeyBinding::new("cmd-end", ScrollToBottom, Some("TerminalWindow")),
+        KeyBinding::new(
+            "cmd-shift-up",
+            terminal_core::ScrollHalfPageUp,
+            Some("TerminalWindow"),
+        ),
+        KeyBinding::new(
+            "cmd-shift-down",
+            terminal_core::ScrollHalfPageDown,
+            Some("TerminalWindow"),
+        ),
+        // Shell-line-editing conveniences translated through SendKeystroke /
+        // SendText, mirroring Zed's "Terminal" context (alt-b/f/left/right are
+        // word jumps; cmd-backspace/delete clear to start/end of line).
+        KeyBinding::new("cmd-backspace", SendKeystroke("ctrl-u".into()), Some("TerminalWindow")),
+        KeyBinding::new("cmd-delete", SendKeystroke("ctrl-k".into()), Some("TerminalWindow")),
+        KeyBinding::new("cmd-right", SendKeystroke("ctrl-e".into()), Some("TerminalWindow")),
+        KeyBinding::new("cmd-left", SendKeystroke("ctrl-a".into()), Some("TerminalWindow")),
+        KeyBinding::new("ctrl-backspace", SendKeystroke("ctrl-w".into()), Some("TerminalWindow")),
+        KeyBinding::new("ctrl-delete", SendText("\x1b[3;5~".into()), Some("TerminalWindow")),
+        KeyBinding::new("alt-delete", SendText("\x1bd".into()), Some("TerminalWindow")),
+        KeyBinding::new("alt-left", SendText("\x1bb".into()), Some("TerminalWindow")),
+        KeyBinding::new("alt-right", SendText("\x1bf".into()), Some("TerminalWindow")),
+        KeyBinding::new("alt-b", SendText("\x1bb".into()), Some("TerminalWindow")),
+        KeyBinding::new("alt-f", SendText("\x1bf".into()), Some("TerminalWindow")),
     ]);
 
     open_first_window(cx);

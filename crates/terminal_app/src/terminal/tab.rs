@@ -175,6 +175,13 @@ impl TerminalTab {
             ScrollAction::LineDown => term.scroll_line_down(),
             ScrollAction::PageUp => term.scroll_page_up(),
             ScrollAction::PageDown => term.scroll_page_down(),
+            // Half-page scrolls compose from the line-based delta API; the
+            // alacritty grid clamps deltas at the top/bottom (and to zero on
+            // the alt screen), so no extra mode handling is needed here.
+            ScrollAction::HalfPageUp => term.scroll_up_by((term.viewport_lines() / 2).max(1)),
+            ScrollAction::HalfPageDown => {
+                term.scroll_down_by((term.viewport_lines() / 2).max(1))
+            }
             ScrollAction::Top => term.scroll_to_top(),
             ScrollAction::Bottom => term.scroll_to_bottom(),
         });
@@ -281,6 +288,8 @@ pub(crate) enum ScrollAction {
     LineDown,
     PageUp,
     PageDown,
+    HalfPageUp,
+    HalfPageDown,
     Top,
     Bottom,
 }

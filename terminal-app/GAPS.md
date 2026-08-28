@@ -23,15 +23,21 @@ Zed 的 Terminal keymap 中有一组非动作类绑定，靠 `SendKeystroke`/`Se
 - 显式拦截 up/down/pageup/pagedown/escape/enter/ctrl-c/ctrl-r 保证正确透传
 现状：只有裸 `on_key_down` → `try_keystroke` 透传（commit 9d27364792），无这一组映射，且内核 `try_keystroke` 是否覆盖全部场景未系统核对。
 - 来源：同上 keymap 对照；是"键不对劲"感受的直接来源之一。
+- **已完成（2026-08-28）**：app.rs 定义带参 action `SendText(String)`/`SendKeystroke(String)`（`#[action(namespace = terminal_app)]`，与 Zed terminal_view 同名同语义），window.rs 各接 handler（SendText → `Terminal::input`；SendKeystroke → parse 后走 `Terminal::try_keystroke`，解析失败记日志忽略，同 Zed）；keymap 按 default-macos.json Terminal context 补齐 10 条：cmd-backspace→ctrl-u、cmd-delete→ctrl-k、cmd-right/left→ctrl-e/a、ctrl-backspace→ctrl-w、alt-delete→ESC d、alt-left/right→ESC b/f、alt-b/f→ESC b/f、ctrl-delete→ESC[3;5~。Zed 的显式拦截组（up/down/pageup/pagedown/escape/enter/ctrl-c/ctrl-r）无需照抄——ZedTerm 无 keymap 消费这些键，裸 on_key_down 透传路径行为与 SendKeystroke 一致。注意 ctrl-r 未被占用（ZedTerm 的 SearchTest 绑定 cmd-f，不冲突）。
 
 ## P1 — 明确缺席的功能
 
 ### G3. ScrollHalfPageUp / ScrollHalfPageDown 未绑定
 内核已有动作（terminal.rs actions!），Zed 默认绑定为 cmd-shift-up/down（核实确切默认键位）；ZedTerm app 层完全未接线。
+- 核实结果（2026-08-28）：GAPS 原记录有误——**Zed 上游（origin/main 全仓检索）ScrollHalfPageUp/Down 仅在 actions! 中声明，既无 handler 也无任何 keymap 绑定**（assets/keymaps/*.json 零命中），是上游半成品，无"默认键位"可对照。
+- 方案（已采用）：terminal_core 已提供 `scroll_up_by/down_by(lines)` + `viewport_lines()`，app 层组合即可；alacritty grid 对 Delta 在顶端/底端 clamp、alt screen 下 history 为 0 时自然归零（grid/mod.rs scroll_display），无需额外模式判断。
+- **已完成（2026-08-28）**：tab.rs ScrollAction 增加 HalfPageUp/HalfPageDown（取 `viewport_lines()/2`，min 1 行）；window.rs 接 terminal_core::ScrollHalfPageUp/Down handler；keymap 采用用户惯用 `cmd-shift-up/down` 绑定（Zed 上游未绑定，此为 ZedTerm 自定默认值）。
 ### G4. Reopen Closed Tab
 Zed: `cmd-shift-t`（pane::ReopenClosedItem，仅编辑器 tab）。终端场景同样高频（误关恢复）。需要闭_tab 时暂存 TerminalBuilder 所需信息（cwd/shell）而非 Entity 本身。
 ### G5. tab 溢出行为
 多标签超出宽度时的表现未验证：原版 ui::TabBar 自带 `overflow_x_scroll()`（tab_bar.rs:133），需确认我们的 TabBar 用法下生效且有可见的滚动指示；否则改为允许横向滚动的容器。
+- 核实结果（2026-08-28）：TabBar 内部 tab 容器固定 `overflow_x_scroll()`（tab_bar.rs:139），且滚动与否与是否传 handle 无关——无 handle 时 gpui 走 element_state 内部 offset（div.rs:2169）。故溢出时**滚轮横滚一直可用**，缺的是"激活 tab 自动滚回可视区"（Zed pane.rs:1512 `scroll_to_item`）。
+- **已完成（2026-08-28）**：window.rs 增加 `tab_bar_scroll_handle: ScrollHandle`，TabBar `track_scroll` 接线；新增 `activate_tab(index)` 统一激活入口（tab 点击/右键/next/previous tab 均走它），激活即 `scroll_to_item(index)` 保证当前 tab 滚回可视区，对齐 Zed Pane 行为。未加"滚动指示边框"（Zed 用 2px 右边框提示左侧有被裁剪的 tab，成本高收益低，若用户仍觉不明显再补录）。
 
 ## P2 — 观感与细节
 

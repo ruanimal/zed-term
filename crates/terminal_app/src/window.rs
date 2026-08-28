@@ -10,7 +10,7 @@ use collections::HashMap;
 use gpui::{
     AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, ScrollHandle,
     StatefulInteractiveElement as _, Subscription, Styled as _, WeakEntity, Window, anchored,
     deferred, div, prelude::FluentBuilder, px,
 };
@@ -33,7 +33,7 @@ use util::ResultExt;
 
 use crate::{
     CloseAll, CloseLeft, CloseOtherTabs, CloseRight, CloseTab, NewTab, NewWindow, NextTab,
-    OpenSettings, PreviousTab,
+    OpenSettings, PreviousTab, SendKeystroke, SendText,
 };
 use crate::terminal::{TerminalElement, TerminalSearchBar, TerminalTab};
 use crate::terminal::tab::ScrollAction;
@@ -47,6 +47,9 @@ pub struct TerminalWindowView {
     context_menu: Option<(Entity<ContextMenu>, gpui::Point<Pixels>, Subscription)>,
     /// Left-button state for the titlebar strip drag gesture.
     titlebar_mouse_down: std::cell::Cell<bool>,
+    /// Tracks the tab bar's horizontal scroll so an activated tab can be
+    /// scrolled back into view when the tabs overflow.
+    tab_bar_scroll_handle: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -58,6 +61,7 @@ impl TerminalWindowView {
             active_tab_index: 0,
             context_menu: None,
             titlebar_mouse_down: std::cell::Cell::new(false),
+            tab_bar_scroll_handle: ScrollHandle::new(),
             _subscriptions: Vec::new(),
         };
         view.spawn_new_terminal(cx);
@@ -114,6 +118,14 @@ impl TerminalWindowView {
         }));
     }
 
+    /// Activates the tab at `index` and keeps it visible in the tab bar even
+    /// when the tabs overflow the bar's width (like Zed's `Pane::update_active_tab`).
+    fn activate_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.active_tab_index = index;
+        self.tab_bar_scroll_handle.scroll_to_item(index);
+        cx.notify();
+    }
+
     /// Runs `f` against the active tab, if there is one.
     fn with_active_tab(
         &mut self,
@@ -165,6 +177,24 @@ impl TerminalWindowView {
         self.with_active_tab(cx, |tab, cx| tab.scroll(ScrollAction::PageDown, cx));
     }
 
+    fn scroll_half_page_up(
+        &mut self,
+        _: &terminal_core::ScrollHalfPageUp,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.with_active_tab(cx, |tab, cx| tab.scroll(ScrollAction::HalfPageUp, cx));
+    }
+
+    fn scroll_half_page_down(
+        &mut self,
+        _: &terminal_core::ScrollHalfPageDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.with_active_tab(cx, |tab, cx| tab.scroll(ScrollAction::HalfPageDown, cx));
+    }
+
     fn scroll_to_top(&mut self, _: &ScrollToTop, _window: &mut Window, cx: &mut Context<Self>) {
         self.with_active_tab(cx, |tab, cx| tab.scroll(ScrollAction::Top, cx));
     }
@@ -193,6 +223,41 @@ impl TerminalWindowView {
         self.spawn_new_terminal(cx);
     }
 
+    /// Sends raw text straight to the PTY (the keymap's escape-sequence
+    /// conveniences, e.g. `alt-delete` → ESC d).
+    fn send_text(&mut self, SendText(text): &SendText, _window: &mut Window, cx: &mut Context<Self>) {
+        if text.is_empty() {
+            return;
+        }
+        self.with_active_tab(cx, |tab, cx| {
+            tab.terminal.update(cx, |term, _| {
+                term.input(text.clone().into_bytes());
+            });
+        });
+    }
+
+    /// Translates the action's keystroke string (e.g. "ctrl-u") via
+    /// `Terminal::try_keystroke`, like Zed's TerminalView::send_keystroke.
+    /// Lets the keymap map mac-friendly shortcuts onto shell-line-editing
+    /// control codes (`cmd-backspace` → ctrl-u, `cmd-right` → ctrl-e, ...).
+    fn send_keystroke(
+        &mut self,
+        SendKeystroke(key): &SendKeystroke,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(keystroke) = gpui::Keystroke::parse(key) else {
+            log::warn!("Invalid SendKeystroke binding: {key:?}");
+            return;
+        };
+        let option_as_meta = TerminalSettings::get_global(cx).option_as_meta;
+        self.with_active_tab(cx, |tab, cx| {
+            tab.terminal.update(cx, |term, _| {
+                term.try_keystroke(&keystroke, option_as_meta);
+            });
+        });
+    }
+
     fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.is_empty() {
             window.remove_window();
@@ -211,17 +276,16 @@ impl TerminalWindowView {
         if self.tabs.is_empty() {
             return;
         }
-        self.active_tab_index = (self.active_tab_index + 1) % self.tabs.len();
-        cx.notify();
+        let index = (self.active_tab_index + 1) % self.tabs.len();
+        self.activate_tab(index, cx);
     }
 
     fn previous_tab(&mut self, _: &PreviousTab, _window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.is_empty() {
             return;
         }
-        self.active_tab_index =
-            (self.active_tab_index + self.tabs.len() - 1) % self.tabs.len();
-        cx.notify();
+        let index = (self.active_tab_index + self.tabs.len() - 1) % self.tabs.len();
+        self.activate_tab(index, cx);
     }
 
     fn new_window(&mut self, _: &NewWindow, _window: &mut Window, cx: &mut Context<Self>) {
@@ -371,6 +435,7 @@ impl TerminalWindowView {
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> TabBar {
         let tab_count = self.tabs.len();
         TabBar::new("window-tabs")
+            .track_scroll(&self.tab_bar_scroll_handle)
             .end_child(
                 div()
                     .on_mouse_down(
@@ -430,13 +495,12 @@ impl TerminalWindowView {
                                 }),
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.active_tab_index = idx;
-                                cx.notify();
+                                this.activate_tab(idx, cx);
                             }))
                             .on_mouse_down(
                                 MouseButton::Right,
                                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                    this.active_tab_index = idx;
+                                    this.activate_tab(idx, cx);
                                     this.deploy_tab_context_menu(event.position, window, cx);
                                     cx.notify();
                                     // Stop so the window root's right-click
@@ -504,11 +568,15 @@ impl Render for TerminalWindowView {
             .on_action(cx.listener(Self::scroll_line_down))
             .on_action(cx.listener(Self::scroll_page_up))
             .on_action(cx.listener(Self::scroll_page_down))
+            .on_action(cx.listener(Self::scroll_half_page_up))
+            .on_action(cx.listener(Self::scroll_half_page_down))
             .on_action(cx.listener(Self::scroll_to_top))
             .on_action(cx.listener(Self::scroll_to_bottom))
             .on_action(cx.listener(Self::toggle_search))
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(Self::send_text))
+            .on_action(cx.listener(Self::send_keystroke))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::close_other_tabs))
             .on_action(cx.listener(Self::close_left))
