@@ -6,6 +6,7 @@ mod element;
 #[path = "terminal_scrollbar.rs"]
 mod scrollbar;
 mod search_bar;
+pub(crate) mod split;
 pub(crate) mod tab;
 
 pub use cursor::{CursorLayout, HighlightedRange, HighlightedRangeLine, TerminalCursorShape};

@@ -8,10 +8,24 @@
 ## P0 — 骨架级缺失
 
 ### G1. Split panes 分屏
-Zed 终端支持 `cmd-d`（右分）、`ctrl-alt-up/down/left/right` 四向分屏，pane::Split* 是终端日常使用的高频操作。ZedTerm 完全没有分屏能力——这是单点最大差距。
-- 现状：`window.rs` 只有多标签，无分割布局概念。
-- 方案约束：不能引入 workspace::Pane（见 PLAN §5 决策记录），需自写轻量 split 树（每个 split 持有一个 TerminalTab Entity），包含焦点管理（分屏间跳转 zed 用 pane::ActivateNextPane 类语义）与 divider 拖拽。工作量约半个原 WP3。
-- 来源：对照 `assets/keymaps/default-macos.json` "Terminal" context + 使用痛点。
+（方案草稿见上）**已完成（2026-08-28）**：
+- 新文件 `terminal/split.rs`：`SplitNode` 树（Leaf 持 `Entity<TerminalTab>` / Axis 持 axis+flexes+children），`split`/`remove`（含单子节点 collapse）语义对齐 Zed `PaneAxis`（pane_group.rs:686/733）；`collect_tabs` 扁平化叶子供焦点循环与渲染。
+- window.rs：`split_root`（None=单窗格 tab 布局）+ `active_pane_tab`（焦点 pane 的 tab）；SplitRight/Left/Up/Down 四向 action（cmd-d、ctrl-alt-四向），首次 split 自动把单窗格布局提升为 split 树；新终端经 `build_terminal_in` 异步进入新叶子；ActivateNext/PreviousPane（cmd-{ / cmd-}、cmd-alt-left/right）按叶子视觉序循环并同步 tab 栏选中。
+- divider 拖拽：divider 元素 mouse_down latch（thread_local anchor+axis），窗口级 on_mouse_move 每帧调 `resize_flexes`（相邻 flex 对守恒分配、MIN_FLEX=0.05 兜底），mouse_up 清 anchor——解决 divider 局部 on_mouse_move 移出 6px 命中区丢事件的问题（Zed 同样在 element 层做窗口级拖拽）。
+- 渲染：`SplitNode::render` 递归 flex_row/col，flex_grow 权重布局，divider 1px 主题色 border；叶子渲染复用现有 `TerminalElement`。
+- ClosePane 已实现（关 pane 收缩树 + 同步 tab 栏；最后一个叶子保留 tab 栏语义）。zoom（pane 独占内容区）留待后续，见下方备注。
+- 验证：cargo check/test/clippy（terminal_app 26 通过、terminal_core 99 通过、clippy --deny warnings 全绿）。
+- 待用户真机验收：cmd-d 分屏、拖 divider、cmd-} 循环焦点、关 pane 收缩。
+- 备注：zoom split（激活 pane 独占）与方向性跳转（ActivatePaneInDirection 几何相邻）未做，属增量项，若用户需要再补录。
+- 方案草稿（2026-08-28）：
+  - **数据结构**（新文件 `terminal/split.rs`）：`enum SplitNode { Leaf { tab: Entity<TerminalTab> }, Axis { axis: Axis, flexes: Vec<f32>, children: Vec<SplitNode> } }`，窗口持有 `root: SplitNode` + `active_leaf_path`。语义对齐 Zed `Member`/`PaneAxis`（pane_group.rs:296/648）但砍掉 workspace 依赖：无 bounding_boxes 缓存、无持久化。
+  - **split 语义**：沿 Zed `PaneAxis::split`（pane_group.rs:686）——找到目标 Leaf；若其父 Axis 与 split 方向同轴则插入兄弟 Leaf（flexes 重置为 1），否则把 Leaf 原位替换为新的二元 Axis。新 Leaf 新建 terminal（走既有 `spawn_new_terminal` 的 builder 路径）并持有焦点。
+  - **渲染**：递归 `SplitNode::render` 产出 flex 容器（Horizontal→`flex_row`，Vertical→`flex_col`），子节点按 `flexes[i]` 设 `flex_grow`；divider 是 1px 可拖拽元素，拖拽时把像素位移换算为相邻两个 flex 的增减（同 Zed compute_resize 思路但简化为只动相邻一对）。叶子 = 现有 `TerminalElement` 渲染路径。
+  - **焦点**：`ActivateNextPane/ActivatePreviousPane`（cmd-k left/right 之外的 Zed 绑定是 cmd-shift-[ / cmd-shift-]，见 keymap）按叶子扁平序循环；`ActivatePaneInDirection` 用几何相邻算法（叶子的 bounding box 沿方向投影最近者）——首轮可只做 Next/Prev，方向跳转后补。
+  - **关闭**：`CloseActivePane` 移除叶子后向上收缩（父 Axis 只剩一个孩子时用孩子替换 Axis，对齐 Zed `remove` 的 collapse 逻辑）；最后一个叶子 = 关窗口（复用 close_tab 语义）。
+  - **zoom**：`zoom_window` 已有双击最大化先例；分屏内的 zoom（激活 pane 独占内容区）用 `maximized_leaf: Option<()>` 标记 + render 时只渲染该叶子实现。
+  - **keymap**（对齐 default-macos.json Terminal context）：cmd-d→SplitRight、ctrl-alt-up/down/left/right→四向 Split、cmd-shift-[ / cmd-shift-]→前后 pane、cmd-w 语义不变（关 tab→关 pane）。
+  - **验收**：cmd-d 右分出新终端、divider 可拖、cmd-shift-[/] 循环焦点、关 split 后布局收缩、cmd-w 关窗前最后一个 pane 行为正确。
 
 ### G2. macOS 键盘手感件（SendKeystroke / SendText 组）
 Zed 的 Terminal keymap 中有一组非动作类绑定，靠 `SendKeystroke`/`SendText` 把组合键翻译成 shell 快捷键：
@@ -34,6 +48,7 @@ Zed 的 Terminal keymap 中有一组非动作类绑定，靠 `SendKeystroke`/`Se
 - **已完成（2026-08-28）**：tab.rs ScrollAction 增加 HalfPageUp/HalfPageDown（取 `viewport_lines()/2`，min 1 行）；window.rs 接 terminal_core::ScrollHalfPageUp/Down handler；keymap 采用用户惯用 `cmd-shift-up/down` 绑定（Zed 上游未绑定，此为 ZedTerm 自定默认值）。
 ### G4. Reopen Closed Tab
 Zed: `cmd-shift-t`（pane::ReopenClosedItem，仅编辑器 tab）。终端场景同样高频（误关恢复）。需要闭_tab 时暂存 TerminalBuilder 所需信息（cwd/shell）而非 Entity 本身。
+- **已完成（2026-08-28）**：close_tab 时把该 tab 的 `Terminal::working_directory()` 压入 `closed_tab_cwds` 栈（上限 10 条，GAPS 方案里"暂存 TerminalBuilder 信息"落地为只存 cwd——shell/env 走 settings 即时值，重开时语义更正确）；`ReopenClosedTab` action（cmd-shift-t，对齐 Zed）+ tab 右键菜单 "Reopen Closed Tab" 项，`build_terminal_in(Some(cwd))` 以原 cwd 起新 shell。验证：cargo check/test/clippy 通过。待真机验收（cmd-shift-t 恢复 + cwd 正确）。
 ### G5. tab 溢出行为
 多标签超出宽度时的表现未验证：原版 ui::TabBar 自带 `overflow_x_scroll()`（tab_bar.rs:133），需确认我们的 TabBar 用法下生效且有可见的滚动指示；否则改为允许横向滚动的容器。
 - 核实结果（2026-08-28）：TabBar 内部 tab 容器固定 `overflow_x_scroll()`（tab_bar.rs:139），且滚动与否与是否传 handle 无关——无 handle 时 gpui 走 element_state 内部 offset（div.rs:2169）。故溢出时**滚轮横滚一直可用**，缺的是"激活 tab 自动滚回可视区"（Zed pane.rs:1512 `scroll_to_item`）。

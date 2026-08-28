@@ -20,7 +20,7 @@ use terminal_core::{
     Clear as TerminalClear, Copy as TerminalCopyAction, Paste as TerminalPasteAction,
     PasteText as TerminalPasteTextAction, ScrollLineDown, ScrollLineUp, ScrollPageDown,
     ScrollPageUp, ScrollToBottom, ScrollToTop, SearchTest, SelectAll as TerminalSelectAll,
-    ShowCharacterPalette, TerminalBuilder,
+    ShowCharacterPalette, Terminal, TerminalBuilder,
 };
 use theme::ActiveTheme as _;
 use ui::utils::{TRAFFIC_LIGHT_PADDING, platform_title_bar_height};
@@ -31,11 +31,13 @@ use ui::{
 use util::ResultExt;
 use util::paths::PathStyle;
 
+use crate::terminal::split::{self, SplitDirection, SplitNode};
 use crate::terminal::tab::ScrollAction;
 use crate::terminal::{TerminalElement, TerminalSearchBar, TerminalTab};
 use crate::{
-    CloseAll, CloseLeft, CloseOtherTabs, CloseRight, CloseTab, NewTab, NewWindow, NextTab,
-    OpenSettings, PreviousTab, SendKeystroke, SendText,
+    ActivateNextPane, ActivatePreviousPane, CloseAll, CloseLeft, CloseOtherTabs, ClosePane,
+    CloseRight, CloseTab, NewTab, NewWindow, NextTab, OpenSettings, PreviousTab, ReopenClosedTab,
+    SendKeystroke, SendText, SplitDown, SplitLeft, SplitRight, SplitUp,
 };
 
 /// Fixed content width for every tab so the tab bar does not reflow while
@@ -47,12 +49,26 @@ const TAB_TITLE_WIDTH: gpui::Pixels = px(140.);
 /// `MAX_TAB_TITLE_LEN`; keeps tooltips and copy-paste from carrying absurd
 /// titles even though the layout already truncates visually.
 const TAB_TITLE_MAX_CHARS: usize = 24;
+/// How many recently closed tabs' working directories to remember for
+/// `ReopenClosedTab`.
+const MAX_REMEMBERED_CLOSED_TABS: usize = 10;
 
 /// A window in the standalone terminal app.
 pub struct TerminalWindowView {
     pub focus_handle: FocusHandle,
     pub(crate) tabs: Vec<Entity<TerminalTab>>,
     pub(crate) active_tab_index: usize,
+    /// Split-tree layout of panes; leaves reference tabs from `tabs`.
+    /// `None` means the single-pane (tabs-only) legacy layout.
+    pub(crate) split_root: Option<crate::terminal::split::SplitNode>,
+    /// The tab shown in the focused pane. Kept as a handle so pane actions
+    /// (split/close/focus cycling) have an anchor even while iterating.
+    pub(crate) active_pane_tab: Option<Entity<TerminalTab>>,
+    /// Working directories of recently closed tabs, most recent first, for
+    /// `ReopenClosedTab` (G4). Zed keeps the whole item around; keeping just
+    /// the cwd matches this app's no-history-policy while restoring the
+    /// "continue where I was" experience.
+    closed_tab_cwds: Vec<std::path::PathBuf>,
     /// Right-click context menu for the active terminal, if open.
     context_menu: Option<(Entity<ContextMenu>, gpui::Point<Pixels>, Subscription)>,
     /// Left-button state for the titlebar strip drag gesture.
@@ -69,6 +85,9 @@ impl TerminalWindowView {
             focus_handle: cx.focus_handle(),
             tabs: Vec::new(),
             active_tab_index: 0,
+            split_root: None,
+            active_pane_tab: None,
+            closed_tab_cwds: Vec::new(),
             context_menu: None,
             titlebar_mouse_down: std::cell::Cell::new(false),
             tab_bar_scroll_handle: ScrollHandle::new(),
@@ -98,8 +117,8 @@ impl TerminalWindowView {
         view
     }
 
-    /// Starts a PTY-backed shell in a new tab; the tab appears once the shell
-    /// is up.
+    /// Starts a PTY-backed shell; in split layout the new terminal takes over
+    /// the active pane, otherwise it appears as a new tab.
     fn spawn_new_terminal(&mut self, cx: &mut Context<Self>) {
         let focus = self.focus_handle.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
@@ -111,7 +130,10 @@ impl TerminalWindowView {
             cx.update(|cx| {
                 this.update(cx, |this, cx| {
                     this.observe_tab(&tab, cx);
-                    this.tabs.push(tab);
+                    this.tabs.push(tab.clone());
+                    if this.split_root.is_some() {
+                        this.replace_active_pane_tab(&tab, cx);
+                    }
                     this.active_tab_index = this.tabs.len() - 1;
                     cx.notify();
                 })
@@ -119,6 +141,35 @@ impl TerminalWindowView {
             });
         })
         .detach();
+    }
+
+    /// Replaces the tab in the focused pane with `tab` (used by split
+    /// actions), keeping the split tree shape intact.
+    fn replace_active_pane_tab(&mut self, tab: &Entity<TerminalTab>, _cx: &mut Context<Self>) {
+        Self::replace_tab_in_node(self.split_root.as_mut(), self.active_pane_tab.as_ref(), tab);
+        self.active_pane_tab = Some(tab.clone());
+    }
+
+    fn replace_tab_in_node(
+        node: Option<&mut crate::terminal::split::SplitNode>,
+        old_tab: Option<&Entity<TerminalTab>>,
+        new_tab: &Entity<TerminalTab>,
+    ) {
+        let (Some(node), Some(old_tab)) = (node, old_tab) else {
+            return;
+        };
+        match node {
+            crate::terminal::split::SplitNode::Leaf { tab } => {
+                if tab == old_tab {
+                    *tab = new_tab.clone();
+                }
+            }
+            crate::terminal::split::SplitNode::Axis { children, .. } => {
+                for child in children {
+                    Self::replace_tab_in_node(Some(child), Some(old_tab), new_tab);
+                }
+            }
+        }
     }
 
     /// Registers the window to repaint when the tab notifies (its terminal
@@ -255,6 +306,180 @@ impl TerminalWindowView {
         self.spawn_new_terminal(cx);
     }
 
+    // Split panes (G1). The split tree lives in `split_root`; each split
+    // spawns a fresh terminal into a new leaf next to the focused pane's leaf
+    // (mirroring Zed's `pane::Split*` + `workspace::split_pane`).
+
+    /// Returns the tab currently filling the focused pane (in split layout)
+    /// or the active tab (plain tab layout).
+    fn focused_pane_tab(&self) -> Option<Entity<TerminalTab>> {
+        if self.split_root.is_some() {
+            self.active_pane_tab.clone()
+        } else {
+            self.tabs.get(self.active_tab_index).cloned()
+        }
+    }
+
+    fn split_pane(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
+        let Some(anchor_tab) = self.focused_pane_tab() else {
+            // No pane yet (first terminal still spawning): fall back to the
+            // legacy new-tab flow; once it lands, splitting is available.
+            self.spawn_new_terminal(cx);
+            return;
+        };
+        // First split: promote the current single-pane layout into a split
+        // tree whose first leaf keeps the anchor tab.
+        if self.split_root.is_none() {
+            let Some(anchor) = self.tabs.get(self.active_tab_index).cloned() else {
+                return;
+            };
+            self.split_root = Some(SplitNode::leaf(anchor));
+            self.active_pane_tab = self.tabs.get(self.active_tab_index).cloned();
+        }
+        let focus = self.focus_handle.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let Some(builder) = build_terminal(cx).await else {
+                return;
+            };
+            let terminal = cx.new(|cx| builder.subscribe(cx));
+            let tab = cx.new(|cx| TerminalTab::new(terminal, focus.clone(), cx));
+            cx.update(|cx| {
+                this.update(cx, |this, cx| {
+                    this.observe_tab(&tab, cx);
+                    this.tabs.push(tab.clone());
+                    if let Some(root) = this.split_root.as_mut()
+                        && root.split(&anchor_tab, tab.clone(), direction)
+                    {
+                        this.active_pane_tab = Some(tab);
+                        let index = this.tabs.len() - 1;
+                        this.tab_bar_scroll_handle.scroll_to_item(index);
+                    }
+                    cx.notify();
+                })
+                .log_err();
+            });
+        })
+        .detach();
+    }
+
+    fn split_right(&mut self, _: &SplitRight, _window: &mut Window, cx: &mut Context<Self>) {
+        self.split_pane(SplitDirection::Right, cx);
+    }
+
+    fn split_left(&mut self, _: &SplitLeft, _window: &mut Window, cx: &mut Context<Self>) {
+        self.split_pane(SplitDirection::Left, cx);
+    }
+
+    fn split_up(&mut self, _: &SplitUp, _window: &mut Window, cx: &mut Context<Self>) {
+        self.split_pane(SplitDirection::Up, cx);
+    }
+
+    fn split_down(&mut self, _: &SplitDown, _window: &mut Window, cx: &mut Context<Self>) {
+        self.split_pane(SplitDirection::Down, cx);
+    }
+
+    /// Cycles pane focus through the split tree's leaves in visual order.
+    fn activate_adjacent_pane(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(anchor) = self.active_pane_tab.clone() else {
+            return;
+        };
+        let Some(root) = self.split_root.as_ref() else {
+            return;
+        };
+        let mut leaves = Vec::new();
+        root.collect_tabs(&mut leaves);
+        if leaves.len() < 2 {
+            return;
+        }
+        let current = leaves.iter().position(|tab| **tab == anchor);
+        let next = match current {
+            Some(index) => {
+                if forward {
+                    (index + 1) % leaves.len()
+                } else {
+                    (index + leaves.len() - 1) % leaves.len()
+                }
+            }
+            // The anchor vanished (e.g. removed elsewhere); pick an edge.
+            None => {
+                if forward {
+                    0
+                } else {
+                    leaves.len() - 1
+                }
+            }
+        };
+        self.active_pane_tab = Some(leaves[next].clone());
+        self.focus_pane(window, cx);
+        if let Some(index) = self.tabs.iter().position(|tab| *tab == *leaves[next]) {
+            self.active_tab_index = index;
+            self.tab_bar_scroll_handle.scroll_to_item(index);
+        }
+        cx.notify();
+    }
+
+    fn activate_next_pane(
+        &mut self,
+        _: &ActivateNextPane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_adjacent_pane(true, window, cx);
+    }
+
+    fn activate_previous_pane(
+        &mut self,
+        _: &ActivatePreviousPane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_adjacent_pane(false, window, cx);
+    }
+
+    /// Focuses the terminal inside the active pane.
+    fn focus_pane(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.active_pane_tab.as_ref() {
+            let focus_handle = tab.read(cx).focus_handle.clone();
+            focus_handle.focus(window, cx);
+        }
+    }
+
+    /// Removes the focused pane's leaf from the split tree, collapsing the
+    /// tree like Zed's `PaneAxis::remove`. The pane's tab is also closed
+    /// (removed from the tab bar); closing the last pane closes the window.
+    fn close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(anchor) = self.active_pane_tab.clone() else {
+            return;
+        };
+        if let Some(root) = self.split_root.as_mut() {
+            if let Some(replacement) = root.remove(&anchor) {
+                *root = replacement;
+            }
+            // Drop the closed tab from the tab bar model.
+            if let Some(index) = self.tabs.iter().position(|tab| *tab == anchor) {
+                self.tabs.remove(index);
+            }
+            // Pick a new active pane tab.
+            let mut leaves = Vec::new();
+            root.collect_tabs(&mut leaves);
+            if leaves.is_empty() || self.tabs.is_empty() {
+                window.remove_window();
+                return;
+            }
+            let next_tab = leaves[leaves.len() - 1].clone();
+            self.active_pane_tab = Some(next_tab.clone());
+            if let Some(index) = self.tabs.iter().position(|tab| *tab == next_tab) {
+                self.active_tab_index = index;
+            }
+        }
+        cx.notify();
+    }
+
     /// Sends raw text straight to the PTY (the keymap's escape-sequence
     /// conveniences, e.g. `alt-delete` → ESC d).
     fn send_text(
@@ -300,6 +525,13 @@ impl TerminalWindowView {
             window.remove_window();
             return;
         }
+        // Remember the cwd so `ReopenClosedTab` can restore it (G4).
+        if let Some(tab) = self.tabs.get(self.active_tab_index)
+            && let Some(cwd) = tab.read(cx).terminal.read(cx).working_directory()
+        {
+            self.closed_tab_cwds.insert(0, cwd);
+            self.closed_tab_cwds.truncate(MAX_REMEMBERED_CLOSED_TABS);
+        }
         self.tabs.remove(self.active_tab_index);
         if self.tabs.is_empty() {
             window.remove_window();
@@ -307,6 +539,38 @@ impl TerminalWindowView {
             self.active_tab_index = self.active_tab_index.min(self.tabs.len() - 1);
             cx.notify();
         }
+    }
+
+    /// Reopens the most recently closed tab, starting its shell in that tab's
+    /// former working directory (mirrors Zed's `pane::ReopenClosedItem`).
+    fn reopen_closed_tab(
+        &mut self,
+        _: &ReopenClosedTab,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(cwd) = self.closed_tab_cwds.first().cloned() else {
+            return;
+        };
+        self.closed_tab_cwds.remove(0);
+        let focus = self.focus_handle.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let Some(builder) = build_terminal_in(Some(cwd), cx).await else {
+                return;
+            };
+            let terminal = cx.new(|cx| builder.subscribe(cx));
+            let tab = cx.new(|cx| TerminalTab::new(terminal, focus.clone(), cx));
+            cx.update(|cx| {
+                this.update(cx, |this, cx| {
+                    this.observe_tab(&tab, cx);
+                    this.tabs.push(tab);
+                    this.active_tab_index = this.tabs.len() - 1;
+                    cx.notify();
+                })
+                .log_err();
+            });
+        })
+        .detach();
     }
 
     fn next_tab(&mut self, _: &NextTab, _window: &mut Window, cx: &mut Context<Self>) {
@@ -424,6 +688,8 @@ impl TerminalWindowView {
         };
         self.show_context_menu(position, window, cx, |menu, _, cx| {
             menu.context(tab.read(cx).focus_handle.clone())
+                .action("Reopen Closed Tab", Box::new(ReopenClosedTab))
+                .separator()
                 .action("Close", Box::new(CloseTab))
                 .action("Close Others", Box::new(CloseOtherTabs))
                 .action("Close Left", Box::new(CloseLeft))
@@ -568,12 +834,53 @@ impl TerminalWindowView {
 
 impl Render for TerminalWindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let active_tab = self.tabs.get(self.active_tab_index).cloned();
+        let active_tab = self.focused_pane_tab();
         let terminal = active_tab.as_ref().map(|tab| tab.read(cx).terminal.clone());
         let search_active = active_tab
             .as_ref()
             .map(|tab| tab.read(cx).search_active)
             .unwrap_or(false);
+        let in_split_layout = self.split_root.is_some();
+
+        // Content area: split tree when present, single terminal otherwise.
+        // Pre-clone the tab handles so the recursive render borrows the tree
+        // exclusively and the closure only touches already-cloned state.
+        let content = if let Some(root) = self.split_root.as_mut() {
+            let focus_handle = self.focus_handle.clone();
+            let mut leaf_tabs: Vec<(Entity<Terminal>, Entity<TerminalTab>)> = Vec::new();
+            {
+                let mut tabs_out: Vec<&Entity<TerminalTab>> = Vec::new();
+                root.collect_tabs(&mut tabs_out);
+                for tab in tabs_out {
+                    let terminal = tab.read(cx).terminal.clone();
+                    leaf_tabs.push((terminal, tab.clone()));
+                }
+            }
+            let mut tab_iter = leaf_tabs.into_iter();
+            root.render(window, cx, &mut |_tab| {
+                // Leaves are visited in the same visual order as
+                // `collect_tabs`, so popping front-to-back stays aligned.
+                if let Some((terminal, tab)) = tab_iter.next() {
+                    TerminalElement::new(terminal, tab, focus_handle.clone(), true, true)
+                        .into_any_element()
+                } else {
+                    div().into_any_element()
+                }
+            })
+        } else {
+            terminal
+                .zip(active_tab.clone())
+                .map(|(terminal, tab)| {
+                    TerminalElement::new(terminal, tab, self.focus_handle.clone(), true, true)
+                        .into_any_element()
+                })
+                .unwrap_or_else(|| {
+                    div()
+                        .size_full()
+                        .child("Starting terminal…")
+                        .into_any_element()
+                })
+        };
 
         div()
             .id("terminal-window")
@@ -587,20 +894,7 @@ impl Render for TerminalWindowView {
             .when_some(active_tab.clone().filter(|_| search_active), |this, tab| {
                 this.child(TerminalSearchBar::new(tab, cx.weak_entity()).into_any_element())
             })
-            .child(
-                terminal
-                    .zip(active_tab)
-                    .map(|(terminal, tab)| {
-                        TerminalElement::new(terminal, tab, self.focus_handle.clone(), true, true)
-                            .into_any_element()
-                    })
-                    .unwrap_or_else(|| {
-                        div()
-                            .size_full()
-                            .child("Starting terminal…")
-                            .into_any_element()
-                    }),
-            )
+            .child(div().flex_1().min_h_0().child(content))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::paste_text))
@@ -617,6 +911,7 @@ impl Render for TerminalWindowView {
             .on_action(cx.listener(Self::toggle_search))
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(Self::reopen_closed_tab))
             .on_action(cx.listener(Self::send_text))
             .on_action(cx.listener(Self::send_keystroke))
             .on_action(cx.listener(Self::close_tab))
@@ -628,6 +923,54 @@ impl Render for TerminalWindowView {
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::open_settings))
+            .when(in_split_layout, |this| {
+                this.on_action(cx.listener(Self::activate_next_pane))
+                    .on_action(cx.listener(Self::activate_previous_pane))
+                    .on_action(cx.listener(Self::close_pane))
+            })
+            .on_action(cx.listener(Self::split_right))
+            .on_action(cx.listener(Self::split_left))
+            .on_action(cx.listener(Self::split_up))
+            .on_action(cx.listener(Self::split_down))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                // Titlebar drag gesture first (it owns the flag-based latch).
+                if this.titlebar_mouse_down.get() {
+                    this.titlebar_mouse_down.set(false);
+                    window.start_window_move();
+                    return;
+                }
+                // Divider drag: while an anchor is latched, every move
+                // re-distributes the first flex pair of the dragged axis.
+                if let (Some(anchor), Some(axis)) = (split::drag_anchor(), split::drag_axis()) {
+                    let is_horizontal = axis == gpui::Axis::Horizontal;
+                    let position = if is_horizontal {
+                        event.position.x
+                    } else {
+                        event.position.y
+                    };
+                    // The split container is the window content minus the
+                    // titlebar strip; take its axis length from the viewport.
+                    let viewport = window.viewport_size();
+                    let container_length = if is_horizontal {
+                        viewport.width
+                    } else {
+                        viewport.height - platform_title_bar_height(window)
+                    };
+                    if container_length > px(0.)
+                        && let Some(root) = this.split_root.as_mut()
+                    {
+                        root.resize_flexes(axis, container_length, position - anchor);
+                        split::update_drag_anchor(position);
+                        cx.notify();
+                    }
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseUpEvent, _window, _cx| {
+                    split::take_drag_anchor();
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -694,10 +1037,19 @@ impl Render for TerminalWindowView {
 
 /// Builds a PTY-backed terminal on the foreground executor.
 async fn build_terminal(cx: &gpui::AsyncApp) -> Option<TerminalBuilder> {
+    build_terminal_in(None, cx).await
+}
+
+/// Builds a PTY-backed terminal, optionally rooted at `cwd` (used by
+/// `ReopenClosedTab` to restore the closed tab's working directory).
+async fn build_terminal_in(
+    cwd: Option<std::path::PathBuf>,
+    cx: &gpui::AsyncApp,
+) -> Option<TerminalBuilder> {
     let settings = cx.update(|cx| TerminalSettings::get_global(cx).clone());
     let builder = cx.update(|cx| {
         TerminalBuilder::new(
-            None,
+            cwd,
             settings.shell.clone(),
             HashMap::<String, String>::default(),
             settings.cursor_shape,

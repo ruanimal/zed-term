@@ -40,7 +40,23 @@ actions!(
         NextTab,
         PreviousTab,
         NewWindow,
-        OpenSettings
+        OpenSettings,
+        /// Splits the focused pane to the right (new terminal).
+        SplitRight,
+        /// Splits the focused pane downward (new terminal).
+        SplitDown,
+        /// Splits the focused pane upward (new terminal).
+        SplitUp,
+        /// Splits the focused pane to the left (new terminal).
+        SplitLeft,
+        /// Moves focus to the next pane (wrapping).
+        ActivateNextPane,
+        /// Moves focus to the previous pane (wrapping).
+        ActivatePreviousPane,
+        /// Closes the focused pane; the last pane closes the window.
+        ClosePane,
+        /// Reopens the most recently closed tab (cwd preserved).
+        ReopenClosedTab
     ]
 );
 
@@ -224,6 +240,7 @@ pub fn run(cx: &mut App) {
     cx.bind_keys([
         // Window / tab management.
         KeyBinding::new("cmd-t", NewTab, Some("TerminalWindow")),
+        KeyBinding::new("cmd-shift-t", ReopenClosedTab, Some("TerminalWindow")),
         KeyBinding::new("cmd-w", CloseTab, Some("TerminalWindow")),
         KeyBinding::new("ctrl-tab", NextTab, Some("TerminalWindow")),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some("TerminalWindow")),
@@ -307,6 +324,17 @@ pub fn run(cx: &mut App) {
         ),
         KeyBinding::new("alt-b", SendText("\x1bb".into()), Some("TerminalWindow")),
         KeyBinding::new("alt-f", SendText("\x1bf".into()), Some("TerminalWindow")),
+        // Split panes, mirroring Zed's "Terminal" context (cmd-d /
+        // ctrl-alt-directions) and pane focus cycling (cmd-{ / cmd-}).
+        KeyBinding::new("cmd-d", SplitRight, Some("TerminalWindow")),
+        KeyBinding::new("ctrl-alt-right", SplitRight, Some("TerminalWindow")),
+        KeyBinding::new("ctrl-alt-left", SplitLeft, Some("TerminalWindow")),
+        KeyBinding::new("ctrl-alt-up", SplitUp, Some("TerminalWindow")),
+        KeyBinding::new("ctrl-alt-down", SplitDown, Some("TerminalWindow")),
+        KeyBinding::new("cmd-}", ActivateNextPane, Some("TerminalWindow")),
+        KeyBinding::new("cmd-{", ActivatePreviousPane, Some("TerminalWindow")),
+        KeyBinding::new("cmd-alt-left", ActivatePreviousPane, Some("TerminalWindow")),
+        KeyBinding::new("cmd-alt-right", ActivateNextPane, Some("TerminalWindow")),
     ]);
 
     open_first_window(cx);
