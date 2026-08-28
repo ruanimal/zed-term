@@ -6,10 +6,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{
-    actions, Action, App, AppContext as _, KeyBinding, UpdateGlobal, WindowOptions, px, size,
-};
 use futures::StreamExt;
+use gpui::{
+    Action, App, AppContext as _, KeyBinding, UpdateGlobal, WindowOptions, actions, px, size,
+};
 use settings::Settings as _;
 use settings::SettingsStore;
 use terminal_core::terminal_settings::TerminalSettings;
@@ -197,7 +197,9 @@ fn open_window_with_bounds(bounds: gpui::Bounds<gpui::Pixels>, cx: &mut App) {
 
     if let Some(handle) = handle {
         let task = cx.spawn(async move |cx| {
-            cx.background_executor().timer(Duration::from_millis(300)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(300))
+                .await;
             handle
                 .update(cx, |_, window, _| {
                     window.activate_window();
@@ -234,7 +236,11 @@ pub fn run(cx: &mut App) {
         KeyBinding::new("cmd-a", SelectAll, Some("TerminalWindow")),
         KeyBinding::new("cmd-k", Clear, Some("TerminalWindow")),
         KeyBinding::new("cmd-f", SearchTest, Some("TerminalWindow")),
-        KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("TerminalWindow")),
+        KeyBinding::new(
+            "ctrl-cmd-space",
+            ShowCharacterPalette,
+            Some("TerminalWindow"),
+        ),
         KeyBinding::new("shift-up", ScrollLineUp, Some("TerminalWindow")),
         KeyBinding::new("shift-down", ScrollLineDown, Some("TerminalWindow")),
         KeyBinding::new("shift-pageup", ScrollPageUp, Some("TerminalWindow")),
@@ -258,15 +264,47 @@ pub fn run(cx: &mut App) {
         // Shell-line-editing conveniences translated through SendKeystroke /
         // SendText, mirroring Zed's "Terminal" context (alt-b/f/left/right are
         // word jumps; cmd-backspace/delete clear to start/end of line).
-        KeyBinding::new("cmd-backspace", SendKeystroke("ctrl-u".into()), Some("TerminalWindow")),
-        KeyBinding::new("cmd-delete", SendKeystroke("ctrl-k".into()), Some("TerminalWindow")),
-        KeyBinding::new("cmd-right", SendKeystroke("ctrl-e".into()), Some("TerminalWindow")),
-        KeyBinding::new("cmd-left", SendKeystroke("ctrl-a".into()), Some("TerminalWindow")),
-        KeyBinding::new("ctrl-backspace", SendKeystroke("ctrl-w".into()), Some("TerminalWindow")),
-        KeyBinding::new("ctrl-delete", SendText("\x1b[3;5~".into()), Some("TerminalWindow")),
-        KeyBinding::new("alt-delete", SendText("\x1bd".into()), Some("TerminalWindow")),
+        KeyBinding::new(
+            "cmd-backspace",
+            SendKeystroke("ctrl-u".into()),
+            Some("TerminalWindow"),
+        ),
+        KeyBinding::new(
+            "cmd-delete",
+            SendKeystroke("ctrl-k".into()),
+            Some("TerminalWindow"),
+        ),
+        KeyBinding::new(
+            "cmd-right",
+            SendKeystroke("ctrl-e".into()),
+            Some("TerminalWindow"),
+        ),
+        KeyBinding::new(
+            "cmd-left",
+            SendKeystroke("ctrl-a".into()),
+            Some("TerminalWindow"),
+        ),
+        KeyBinding::new(
+            "ctrl-backspace",
+            SendKeystroke("ctrl-w".into()),
+            Some("TerminalWindow"),
+        ),
+        KeyBinding::new(
+            "ctrl-delete",
+            SendText("\x1b[3;5~".into()),
+            Some("TerminalWindow"),
+        ),
+        KeyBinding::new(
+            "alt-delete",
+            SendText("\x1bd".into()),
+            Some("TerminalWindow"),
+        ),
         KeyBinding::new("alt-left", SendText("\x1bb".into()), Some("TerminalWindow")),
-        KeyBinding::new("alt-right", SendText("\x1bf".into()), Some("TerminalWindow")),
+        KeyBinding::new(
+            "alt-right",
+            SendText("\x1bf".into()),
+            Some("TerminalWindow"),
+        ),
         KeyBinding::new("alt-b", SendText("\x1bb".into()), Some("TerminalWindow")),
         KeyBinding::new("alt-f", SendText("\x1bf".into()), Some("TerminalWindow")),
     ]);
@@ -279,8 +317,8 @@ pub fn run(cx: &mut App) {
 fn open_first_window(cx: &mut App) {
     let settings = TerminalSettings::get_global(cx);
     let default_size = size(settings.default_width, settings.default_height);
-    let bounds =
-        persistence::first_window_bounds(cx).unwrap_or_else(|| persistence::default_first_window_bounds(cx, default_size));
+    let bounds = persistence::first_window_bounds(cx)
+        .unwrap_or_else(|| persistence::default_first_window_bounds(cx, default_size));
     open_window_with_bounds(bounds, cx);
 }
 

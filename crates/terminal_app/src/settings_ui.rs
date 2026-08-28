@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use gpui::{
     App, AppContext as _, Context, FocusHandle, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, UpdateGlobal,
-    Window, WindowBounds, WindowKind, div, rgb, size, px,
+    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, UpdateGlobal, Window,
+    WindowBounds, WindowKind, div, px, rgb, size,
 };
 use settings::Settings as _;
 use settings::SettingsStore;
@@ -88,86 +88,63 @@ impl Render for SettingsPage {
             .gap_3()
             .bg(rgb(0x14151a))
             .child(div().text_color(rgb(0xdcddde)).child("Terminal Settings"))
+            .child(self.number_row(
+                cx,
+                "font-size",
+                "Font size",
+                format!("{font_size:.1} px"),
+                |cx, delta| {
+                    let current = TerminalSettings::get_global(cx)
+                        .font_size
+                        .map(f32::from)
+                        .unwrap_or(15.0);
+                    let next = (current + delta).max(1.0);
+                    write_setting(cx, move |content| {
+                        content.font_size = Some(settings::FontSize(next));
+                    });
+                },
+            ))
             .child(
-                self.number_row(
-                    cx,
-                    "font-size",
-                    "Font size",
-                    format!("{font_size:.1} px"),
-                    |cx, delta| {
-                        let current = TerminalSettings::get_global(cx)
-                            .font_size
-                            .map(f32::from)
-                            .unwrap_or(15.0);
-                        let next = (current + delta).max(1.0);
-                        write_setting(cx, move |content| {
-                            content.font_size = Some(settings::FontSize(next));
-                        });
-                    },
-                ),
+                self.cycle_row(cx, "cursor-shape", "Cursor shape", cursor_shape, |cx| {
+                    let next = match TerminalSettings::get_global(cx).cursor_shape {
+                        CursorShape::Block => settings::CursorShapeContent::Underline,
+                        CursorShape::Underline => settings::CursorShapeContent::Bar,
+                        CursorShape::Bar => settings::CursorShapeContent::Hollow,
+                        CursorShape::Hollow => settings::CursorShapeContent::Block,
+                    };
+                    write_setting(cx, move |content| content.cursor_shape = Some(next));
+                }),
             )
             .child(
-                self.cycle_row(
-                    cx,
-                    "cursor-shape",
-                    "Cursor shape",
-                    cursor_shape,
-                    |cx| {
-                        let next = match TerminalSettings::get_global(cx).cursor_shape {
-                            CursorShape::Block => settings::CursorShapeContent::Underline,
-                            CursorShape::Underline => settings::CursorShapeContent::Bar,
-                            CursorShape::Bar => settings::CursorShapeContent::Hollow,
-                            CursorShape::Hollow => settings::CursorShapeContent::Block,
-                        };
-                        write_setting(cx, move |content| content.cursor_shape = Some(next));
-                    },
-                ),
+                self.cycle_row(cx, "cursor-blink", "Cursor blinking", blinking, |cx| {
+                    let next = match TerminalSettings::get_global(cx).blinking {
+                        settings::TerminalBlink::Off => settings::TerminalBlink::TerminalControlled,
+                        settings::TerminalBlink::TerminalControlled => settings::TerminalBlink::On,
+                        settings::TerminalBlink::On => settings::TerminalBlink::Off,
+                    };
+                    write_setting(cx, move |content| content.blinking = Some(next));
+                }),
             )
-            .child(
-                self.cycle_row(
-                    cx,
-                    "cursor-blink",
-                    "Cursor blinking",
-                    blinking,
-                    |cx| {
-                        let next =
-                            match TerminalSettings::get_global(cx).blinking {
-                                settings::TerminalBlink::Off => {
-                                    settings::TerminalBlink::TerminalControlled
-                                }
-                                settings::TerminalBlink::TerminalControlled => {
-                                    settings::TerminalBlink::On
-                                }
-                                settings::TerminalBlink::On => settings::TerminalBlink::Off,
-                            };
-                        write_setting(cx, move |content| content.blinking = Some(next));
-                    },
-                ),
-            )
-            .child(
-                self.toggle_row(
-                    cx,
-                    "option-as-meta",
-                    "Option as meta",
-                    option_as_meta,
-                    |cx| {
-                        let next = !TerminalSettings::get_global(cx).option_as_meta;
-                        write_setting(cx, move |content| content.option_as_meta = Some(next));
-                    },
-                ),
-            )
-            .child(
-                self.toggle_row(
-                    cx,
-                    "copy-on-select",
-                    "Copy on select",
-                    copy_on_select,
-                    |cx| {
-                        let next = !TerminalSettings::get_global(cx).copy_on_select;
-                        write_setting(cx, move |content| content.copy_on_select = Some(next));
-                    },
-                ),
-            )
+            .child(self.toggle_row(
+                cx,
+                "option-as-meta",
+                "Option as meta",
+                option_as_meta,
+                |cx| {
+                    let next = !TerminalSettings::get_global(cx).option_as_meta;
+                    write_setting(cx, move |content| content.option_as_meta = Some(next));
+                },
+            ))
+            .child(self.toggle_row(
+                cx,
+                "copy-on-select",
+                "Copy on select",
+                copy_on_select,
+                |cx| {
+                    let next = !TerminalSettings::get_global(cx).copy_on_select;
+                    write_setting(cx, move |content| content.copy_on_select = Some(next));
+                },
+            ))
     }
 }
 
@@ -188,12 +165,7 @@ impl SettingsPage {
             .flex()
             .items_center()
             .gap_2()
-            .child(
-                div()
-                    .flex_grow_1()
-                    .text_color(rgb(0x9aa4b2))
-                    .child(label),
-            )
+            .child(div().flex_grow_1().text_color(rgb(0x9aa4b2)).child(label))
             .child(div().text_color(rgb(0xdcddde)).child(value))
             .child(
                 div()
@@ -229,12 +201,7 @@ impl SettingsPage {
             .flex()
             .items_center()
             .gap_2()
-            .child(
-                div()
-                    .flex_grow_1()
-                    .text_color(rgb(0x9aa4b2))
-                    .child(label),
-            )
+            .child(div().flex_grow_1().text_color(rgb(0x9aa4b2)).child(label))
             .child(div().text_color(rgb(0xdcddde)).child(value))
             .child(
                 div()
@@ -261,15 +228,14 @@ impl SettingsPage {
             .flex()
             .items_center()
             .gap_2()
+            .child(div().flex_grow_1().text_color(rgb(0x9aa4b2)).child(label))
             .child(
                 div()
-                    .flex_grow_1()
-                    .text_color(rgb(0x9aa4b2))
-                    .child(label),
-            )
-            .child(
-                div()
-                    .text_color(if enabled { rgb(0x73d0ff) } else { rgb(0x9aa4b2) })
+                    .text_color(if enabled {
+                        rgb(0x73d0ff)
+                    } else {
+                        rgb(0x9aa4b2)
+                    })
                     .child(if enabled { "On" } else { "Off" }),
             )
             .child(

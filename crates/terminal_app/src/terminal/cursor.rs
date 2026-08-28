@@ -7,7 +7,7 @@
 use std::cmp::Ordering;
 
 use gpui::{
-    App, Bounds, BorderStyle, Hsla, PathBuilder, Point, Pixels, ShapedLine, TextAlign, Window,
+    App, BorderStyle, Bounds, Hsla, PathBuilder, Pixels, Point, ShapedLine, TextAlign, Window,
     fill, outline, point, px, size,
 };
 use util::ResultExt;
@@ -74,9 +74,7 @@ impl CursorLayout {
                 size: size(self.block_width, self.line_height),
             },
             TerminalCursorShape::Underline => Bounds {
-                origin: self.origin
-                    + origin
-                    + Point::new(Pixels::ZERO, self.line_height - px(2.0)),
+                origin: self.origin + origin + Point::new(Pixels::ZERO, self.line_height - px(2.0)),
                 size: size(self.block_width, px(2.0)),
             },
         }

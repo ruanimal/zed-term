@@ -106,7 +106,11 @@ pub fn save_window_geometries(window_bounds: &[Bounds<Pixels>]) {
 fn sanitize_bounds(bounds: Bounds<Pixels>, cx: &App) -> Option<Bounds<Pixels>> {
     let width = bounds.size.width.as_f32();
     let height = bounds.size.height.as_f32();
-    if !width.is_finite() || !height.is_finite() || width < MIN_RESTORED_WIDTH || height < MIN_RESTORED_HEIGHT {
+    if !width.is_finite()
+        || !height.is_finite()
+        || width < MIN_RESTORED_WIDTH
+        || height < MIN_RESTORED_HEIGHT
+    {
         return None;
     }
     let displays = cx.displays();
@@ -132,10 +136,11 @@ fn sanitize_bounds(bounds: Bounds<Pixels>, cx: &App) -> Option<Bounds<Pixels>> {
 pub fn default_first_window_bounds(cx: &App, default_size: Size<Pixels>) -> Bounds<Pixels> {
     if let Some(display) = cx.displays().first() {
         let display_bounds = display.bounds();
-        let origin_x =
-            display_bounds.left().as_f32() + ((display_bounds.size.width - default_size.width).as_f32() / 2.0).max(0.0);
+        let origin_x = display_bounds.left().as_f32()
+            + ((display_bounds.size.width - default_size.width).as_f32() / 2.0).max(0.0);
         let origin_y = display_bounds.top().as_f32()
-            + ((display_bounds.size.height - default_size.height).as_f32() / 2.0).max(0.0);        return Bounds {
+            + ((display_bounds.size.height - default_size.height).as_f32() / 2.0).max(0.0);
+        return Bounds {
             origin: Point {
                 x: px(origin_x),
                 y: px(origin_y),
@@ -143,5 +148,11 @@ pub fn default_first_window_bounds(cx: &App, default_size: Size<Pixels>) -> Boun
             size: default_size,
         };
     }
-    Bounds::new(Point { x: px(0.0), y: px(0.0) }, default_size)
+    Bounds::new(
+        Point {
+            x: px(0.0),
+            y: px(0.0),
+        },
+        default_size,
+    )
 }

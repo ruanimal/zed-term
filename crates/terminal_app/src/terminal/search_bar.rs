@@ -70,16 +70,13 @@ impl RenderOnce for TerminalSearchBar {
                     .text_color(gpui::rgb(0x9aa4b2))
                     .child("Search:"),
             )
-            .child(
-                div()
-                    .flex_grow_1()
-                    .text_color(gpui::rgb(0xdcddde))
-                    .child(if search_query.is_empty() {
-                        "Type to search the terminal buffer…".to_string()
-                    } else {
-                        format!("{match_count} matches")
-                    }),
-            )
+            .child(div().flex_grow_1().text_color(gpui::rgb(0xdcddde)).child(
+                if search_query.is_empty() {
+                    "Type to search the terminal buffer…".to_string()
+                } else {
+                    format!("{match_count} matches")
+                },
+            ))
             .on_key_down({
                 let window_view = self.window_view.clone();
                 move |event: &KeyDownEvent, window, cx| {

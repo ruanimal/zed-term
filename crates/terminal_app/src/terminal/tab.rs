@@ -55,27 +55,27 @@ impl TerminalTab {
 
         // React to title changes instead of relying on the window heartbeat to
         // pick them up; the element reads `title()` every frame.
-        this._subscriptions.push(
-            cx.subscribe(&this.terminal, |_this, _terminal, event, cx| match event {
-                // PTY output arrives as a Wakeup event, not an `Entity::notify`;
-                // repaint immediately (this is the no-heartbeat path).
-                Event::Wakeup | Event::TitleChanged | Event::BreadcrumbsChanged => cx.notify(),
-                Event::Open(target) => match target {
-                    // Cmd-click on a hyperlink or path: hand it to the OS.
-                    MaybeNavigationTarget::Url(url) => cx.open_url(url),
-                    MaybeNavigationTarget::PathLike(target) => {
-                        cx.open_url(&format!("file://{}", target.maybe_path));
-                    }
-                },
-                _ => {}
-            }),
-        );
+        this._subscriptions
+            .push(
+                cx.subscribe(&this.terminal, |_this, _terminal, event, cx| match event {
+                    // PTY output arrives as a Wakeup event, not an `Entity::notify`;
+                    // repaint immediately (this is the no-heartbeat path).
+                    Event::Wakeup | Event::TitleChanged | Event::BreadcrumbsChanged => cx.notify(),
+                    Event::Open(target) => match target {
+                        // Cmd-click on a hyperlink or path: hand it to the OS.
+                        MaybeNavigationTarget::Url(url) => cx.open_url(url),
+                        MaybeNavigationTarget::PathLike(target) => {
+                            cx.open_url(&format!("file://{}", target.maybe_path));
+                        }
+                    },
+                    _ => {}
+                }),
+            );
 
         // Content updates notify the window so shell output repaints promptly
         // instead of waiting for the window heartbeat.
-        this._subscriptions.push(
-            cx.observe(&this.terminal, |_, _, cx| cx.notify()),
-        );
+        this._subscriptions
+            .push(cx.observe(&this.terminal, |_, _, cx| cx.notify()));
 
         this
     }
@@ -179,9 +179,7 @@ impl TerminalTab {
             // alacritty grid clamps deltas at the top/bottom (and to zero on
             // the alt screen), so no extra mode handling is needed here.
             ScrollAction::HalfPageUp => term.scroll_up_by((term.viewport_lines() / 2).max(1)),
-            ScrollAction::HalfPageDown => {
-                term.scroll_down_by((term.viewport_lines() / 2).max(1))
-            }
+            ScrollAction::HalfPageDown => term.scroll_down_by((term.viewport_lines() / 2).max(1)),
             ScrollAction::Top => term.scroll_to_top(),
             ScrollAction::Bottom => term.scroll_to_bottom(),
         });
@@ -253,7 +251,8 @@ impl TerminalTab {
             (current + 1) % match_count
         };
         self.active_match = Some(next);
-        self.terminal.update(cx, |term, _| term.activate_match(next));
+        self.terminal
+            .update(cx, |term, _| term.activate_match(next));
         cx.notify();
     }
 

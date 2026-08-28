@@ -1,17 +1,17 @@
 use crate::terminal::tab::TerminalTab;
-use crate::terminal::{
-    CursorLayout, HighlightedRange, HighlightedRangeLine, TerminalCursorShape,
-};
+use crate::terminal::{CursorLayout, HighlightedRange, HighlightedRangeLine, TerminalCursorShape};
 use gpui::{
-    AbsoluteLength, App, Bounds, ContentMask, Context, DispatchPhase,
-    Element, ElementId, Entity, FocusHandle, Font, FontFeatures, FontStyle, FontWeight,
-    GlobalElementId, HighlightStyle, Hitbox, Hsla, InputHandler, InteractiveElement, Interactivity,
-    IntoElement, LayoutId, Length, ModifiersChangedEvent, MouseButton, MouseMoveEvent, Pixels,
-    Point as GpuiPoint, StatefulInteractiveElement, StrikethroughStyle, TextRun, TextStyle,
-    UTF16Selection, UnderlineStyle, WhiteSpace, Window, fill, point, px, relative, size,
+    AbsoluteLength, App, Bounds, ContentMask, Context, DispatchPhase, Element, ElementId, Entity,
+    FocusHandle, Font, FontFeatures, FontStyle, FontWeight, GlobalElementId, HighlightStyle,
+    Hitbox, Hsla, InputHandler, InteractiveElement, Interactivity, IntoElement, LayoutId, Length,
+    ModifiersChangedEvent, MouseButton, MouseMoveEvent, Pixels, Point as GpuiPoint,
+    StatefulInteractiveElement, StrikethroughStyle, TextRun, TextStyle, UTF16Selection,
+    UnderlineStyle, WhiteSpace, Window, fill, point, px, relative, size,
 };
 use itertools::Itertools;
 use settings::Settings;
+use std::fmt::Debug;
+use std::mem;
 use std::time::Instant;
 use terminal_core::{
     Cell, Color, Content, CursorShape, IndexedCell, Modes, NamedColor, Point, Range, Terminal,
@@ -21,8 +21,6 @@ use terminal_core::{
 use theme::{ActiveTheme, Theme};
 use theme_settings::ThemeSettings;
 use ui::utils::ensure_minimum_contrast;
-use std::mem;
-use std::fmt::Debug;
 use util::ResultExt;
 
 /// The information generated during layout that is necessary for painting.
@@ -945,12 +943,7 @@ impl TerminalElement {
         }
     }
 
-    fn register_mouse_listeners(
-        &mut self,
-        mode: Modes,
-        hitbox: &Hitbox,
-        window: &mut Window,
-    ) {
+    fn register_mouse_listeners(&mut self, mode: Modes, hitbox: &Hitbox, window: &mut Window) {
         let focus = self.focus.clone();
         let terminal = self.terminal.clone();
         let terminal_view = self.terminal_view.clone();
@@ -1168,9 +1161,11 @@ impl Element for TerminalElement {
 
                 let line_height = terminal_settings.line_height.value();
 
-                let font_size = terminal_settings.font_size.map_or(buffer_font_size, |size| {
-                    theme_settings::adjusted_font_size(size, cx)
-                });
+                let font_size = terminal_settings
+                    .font_size
+                    .map_or(buffer_font_size, |size| {
+                        theme_settings::adjusted_font_size(size, cx)
+                    });
 
                 let theme = cx.theme().clone();
 
@@ -1220,34 +1215,33 @@ impl Element for TerminalElement {
                     origin.x += gutter;
 
                     let should_anchor_to_bottom = {
-                            let content = self.terminal.read(cx).last_content();
-                            content.mode.contains(Modes::ALT_SCREEN)
-                                || (content.scrolled_to_bottom && content.bottom_row_occupied)
-                        };
-                        let scale_factor = window.scale_factor();
-                        let line_height_pixels = px(line_height);
-                        let line_height_device_px = (f32::from(line_height_pixels) * scale_factor)
-                            .round()
-                            .max(1.0) as i32;
-                        let available_height_device_px =
-                            (f32::from(available_height) * scale_factor)
-                                .floor()
-                                .max(0.0) as i32;
+                        let content = self.terminal.read(cx).last_content();
+                        content.mode.contains(Modes::ALT_SCREEN)
+                            || (content.scrolled_to_bottom && content.bottom_row_occupied)
+                    };
+                    let scale_factor = window.scale_factor();
+                    let line_height_pixels = px(line_height);
+                    let line_height_device_px = (f32::from(line_height_pixels) * scale_factor)
+                        .round()
+                        .max(1.0) as i32;
+                    let available_height_device_px = (f32::from(available_height) * scale_factor)
+                        .floor()
+                        .max(0.0) as i32;
 
-                        let rows =
-                            ((available_height_device_px / line_height_device_px) as usize).max(1);
-                        let snapped_height_device_px = (rows as i32) * line_height_device_px;
-                        let padding_device_px =
-                            (available_height_device_px - snapped_height_device_px).max(0);
+                    let rows =
+                        ((available_height_device_px / line_height_device_px) as usize).max(1);
+                    let snapped_height_device_px = (rows as i32) * line_height_device_px;
+                    let padding_device_px =
+                        (available_height_device_px - snapped_height_device_px).max(0);
 
-                        let snapped_height =
-                            px(snapped_height_device_px as f32 / scale_factor.max(1.0));
-                        let padding = px(padding_device_px as f32 / scale_factor.max(1.0));
+                    let snapped_height =
+                        px(snapped_height_device_px as f32 / scale_factor.max(1.0));
+                    let padding = px(padding_device_px as f32 / scale_factor.max(1.0));
 
-                        size.height = snapped_height;
-                        if should_anchor_to_bottom {
-                            origin.y += padding;
-                        }
+                    size.height = snapped_height;
+                    if should_anchor_to_bottom {
+                        origin.y += padding;
+                    }
 
                     // Snap to device pixels to avoid subpixel jitter while resizing.
                     // Terminal rendering is grid-based; allowing fractional origins can cause the
@@ -1403,7 +1397,9 @@ impl Element for TerminalElement {
                         let (shape, text) = match cursor.shape {
                             CursorShape::Block if !focused => (TerminalCursorShape::Hollow, None),
                             CursorShape::Block => (TerminalCursorShape::Block, Some(cursor_text)),
-                            CursorShape::Underline if !focused => (TerminalCursorShape::Hollow, None),
+                            CursorShape::Underline if !focused => {
+                                (TerminalCursorShape::Hollow, None)
+                            }
                             CursorShape::Underline => (TerminalCursorShape::Underline, None),
                             CursorShape::Bar if !focused => (TerminalCursorShape::Hollow, None),
                             CursorShape::Bar => (TerminalCursorShape::Bar, None),
@@ -1462,8 +1458,11 @@ impl Element for TerminalElement {
             };
             let origin = point(snap_px(origin.x), snap_px(origin.y));
 
-            let marked_text_cloned: Option<String> =
-                self.terminal_view.read(cx).marked_text().map(str::to_string);
+            let marked_text_cloned: Option<String> = self
+                .terminal_view
+                .read(cx)
+                .marked_text()
+                .map(str::to_string);
 
             let terminal_input_handler = TerminalInputHandler {
                 terminal_view: self.terminal_view.clone(),
