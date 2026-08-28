@@ -58,6 +58,24 @@ pub(crate) enum SplitNode {
     },
 }
 
+thread_local! {
+    /// The tab of the leaf under the cursor when a right-click lands on a
+    /// split pane. Consumed by the window's right-click handler so the
+    /// context menu acts on the clicked pane, not just the focused one.
+    static CLICKED_LEAF: std::cell::Cell<Option<Entity<TerminalTab>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Records which leaf a right-click landed on.
+pub(crate) fn set_clicked_leaf(tab: Entity<TerminalTab>) {
+    CLICKED_LEAF.with(|cell| cell.set(Some(tab)));
+}
+
+/// Returns and clears the recorded right-clicked leaf, if any.
+pub(crate) fn take_clicked_leaf() -> Option<Entity<TerminalTab>> {
+    CLICKED_LEAF.with(|cell| cell.take())
+}
+
 impl SplitNode {
     pub(crate) fn leaf(tab: Entity<TerminalTab>) -> Self {
         Self::Leaf { tab }
@@ -80,7 +98,8 @@ impl SplitNode {
 
     /// Splits the leaf holding `old_tab` by inserting `new_tab` next to it in
     /// `direction`. Returns false when `old_tab` is not in this subtree.
-    /// Mirrors Zed's `PaneAxis::split` (workspace/pane_group.rs).
+    /// Mirrors Zed's `PaneAxis::split` (workspace/pane_group.rs). A single
+    /// leaf is promoted in place to a two-leaf axis in `direction`'s axis.
     pub(crate) fn split(
         &mut self,
         old_tab: &Entity<TerminalTab>,
@@ -88,6 +107,12 @@ impl SplitNode {
         direction: SplitDirection,
     ) -> bool {
         match self {
+            Self::Leaf { tab } if tab == old_tab => {
+                // First split: promote the lone leaf to a two-leaf axis.
+                let tab = tab.clone();
+                *self = Self::new_axis(direction.axis(), tab, new_tab);
+                true
+            }
             Self::Leaf { .. } => false,
             Self::Axis {
                 axis,
@@ -191,7 +216,18 @@ impl SplitNode {
         leaf_renderer: &mut dyn FnMut(&Entity<TerminalTab>) -> AnyElement,
     ) -> AnyElement {
         match self {
-            Self::Leaf { tab } => leaf_renderer(tab),
+            Self::Leaf { tab } => gpui::div()
+                .size_full()
+                .on_mouse_down(MouseButton::Right, {
+                    let tab = tab.clone();
+                    move |_event: &MouseDownEvent, _window: &mut gpui::Window, _cx: &mut App| {
+                        // Remember which pane the right-click hit so the
+                        // context menu acts on it (split layout).
+                        set_clicked_leaf(tab.clone());
+                    }
+                })
+                .child(leaf_renderer(tab))
+                .into_any_element(),
             Self::Axis {
                 axis,
                 flexes,

@@ -662,11 +662,24 @@ impl TerminalWindowView {
         let Some(tab) = self.tabs.get(self.active_tab_index).cloned() else {
             return;
         };
+        let in_split_layout = self.split_root.is_some();
         self.show_context_menu(position, window, cx, |menu, _, cx| {
-            menu.context(tab.read(cx).focus_handle.clone())
+            let menu = menu
+                .context(tab.read(cx).focus_handle.clone())
                 .action("New Terminal", Box::new(NewTab))
-                .separator()
-                .action("Copy", Box::new(terminal_core::Copy))
+                .separator();
+            let menu = if in_split_layout {
+                // Split actions apply to the pane the right-click landed on
+                // (now the active pane).
+                menu.action("Split Right", Box::new(SplitRight))
+                    .action("Split Down", Box::new(SplitDown))
+                    .separator()
+                    .action("Close Pane", Box::new(ClosePane))
+                    .separator()
+            } else {
+                menu
+            };
+            menu.action("Copy", Box::new(terminal_core::Copy))
                 .action("Paste", Box::new(terminal_core::Paste))
                 .action("Paste Text", Box::new(terminal_core::PasteText))
                 .action("Select All", Box::new(terminal_core::SelectAll))
@@ -974,6 +987,17 @@ impl Render for TerminalWindowView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    // In split layout the right-click may land on any pane;
+                    // make the clicked leaf the active pane so the menu (and
+                    // its split/closing actions) act on it.
+                    if this.split_root.is_some()
+                        && let Some(clicked) = split::take_clicked_leaf()
+                    {
+                        this.active_pane_tab = Some(clicked.clone());
+                        if let Some(index) = this.tabs.iter().position(|tab| *tab == clicked) {
+                            this.active_tab_index = index;
+                        }
+                    }
                     let Some(tab) = this.tabs.get(this.active_tab_index) else {
                         return;
                     };
