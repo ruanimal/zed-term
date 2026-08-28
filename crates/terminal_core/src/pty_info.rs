@@ -1,6 +1,6 @@
 use gpui::{Context, Task};
 use parking_lot::{MappedRwLockReadGuard, Mutex, RwLock, RwLockReadGuard};
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 #[cfg(target_os = "windows")]
 use windows::Win32::{Foundation::HANDLE, System::Threading::GetProcessId};
@@ -8,6 +8,13 @@ use windows::Win32::{Foundation::HANDLE, System::Threading::GetProcessId};
 use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use crate::{Event, Terminal};
+
+/// How long a newly observed foreground process must stay in the foreground
+/// before it earns a title update. Short-lived commands (`ls`, `cat`, ...)
+/// hold the PTY's foreground process group for a few tens of milliseconds;
+/// committing their process info makes the tab title flicker between the
+/// shell and the command (e.g. `zed — zsh` → `zed — ls -al` → `zed — zsh`).
+const STABLE_TITLE_DELAY: Duration = Duration::from_millis(750);
 
 #[derive(Clone, Copy)]
 pub struct ProcessIdGetter {
@@ -78,6 +85,9 @@ pub(crate) struct PtyProcessInfo {
     refresh_kind: ProcessRefreshKind,
     pid_getter: ProcessIdGetter,
     last_foreground_pid: Mutex<Option<Pid>>,
+    /// Foreground pid whose info was last committed to `current`; used to
+    /// detect foreground transitions that require stability confirmation.
+    last_committed_pid: Mutex<Option<Pid>>,
     pub(crate) current: RwLock<Option<ProcessInfo>>,
     task: Mutex<Option<Task<()>>>,
 }
@@ -109,6 +119,7 @@ impl PtyProcessInfo {
             refresh_kind: process_refresh_kind,
             pid_getter,
             last_foreground_pid: Mutex::new(None),
+            last_committed_pid: Mutex::new(None),
             current: RwLock::new(None),
             task: Mutex::new(None),
         }
@@ -189,23 +200,48 @@ impl PtyProcessInfo {
             return;
         }
         let this = self.clone();
-        let change_task = cx.background_executor().spawn(async move {
-            let previous = this.current.read().clone();
-            let current = this.load();
-            let has_changed = match (previous.as_ref(), current.as_ref()) {
-                (None, None) => false,
-                (Some(prev), Some(now)) => prev.cwd != now.cwd || prev.name != now.name,
-                _ => true,
-            };
-            if has_changed {
-                *this.current.write() = current.clone();
+        let executor = cx.background_executor().clone();
+        let change_task = executor.spawn({
+            let executor = executor.clone();
+            async move {
+                let previous = this.current.read().clone();
+                let foreground_pid = this.pid();
+                // A foreground change needs a stable-confirmation pass: commands
+                // that only run for a few tens of milliseconds would otherwise
+                // flip the title twice (shell → command → shell) while the pid
+                // dance is invisible to the user anyway.
+                let wait_for_stability = match (previous.as_ref(), foreground_pid) {
+                    (Some(_), Some(pid)) => Some(pid) != *this.last_committed_pid.lock(),
+                    _ => false,
+                };
+                if wait_for_stability {
+                    executor.timer(STABLE_TITLE_DELAY).await;
+                    // If the short-lived command is gone, the Wakeup loop will
+                    // resample with the shell back in the foreground; skip this
+                    // transient snapshot entirely.
+                    if this.pid() != foreground_pid {
+                        return (false, None);
+                    }
+                }
+                let current = this.load();
+                let has_changed = match (previous.as_ref(), current.as_ref()) {
+                    (None, None) => false,
+                    (Some(prev), Some(now)) => prev.cwd != now.cwd || prev.name != now.name,
+                    _ => true,
+                };
+                if has_changed {
+                    *this.current.write() = current.clone();
+                }
+                if let Some(pid) = foreground_pid {
+                    *this.last_committed_pid.lock() = Some(pid);
+                }
+                let changed_cwd = match (previous.as_ref(), current.as_ref()) {
+                    (Some(prev), Some(now)) if prev.cwd != now.cwd => Some(now.cwd.clone()),
+                    (None, Some(now)) => Some(now.cwd.clone()),
+                    _ => None,
+                };
+                (has_changed, changed_cwd)
             }
-            let changed_cwd = match (previous.as_ref(), current.as_ref()) {
-                (Some(prev), Some(now)) if prev.cwd != now.cwd => Some(now.cwd.clone()),
-                (None, Some(now)) => Some(now.cwd.clone()),
-                _ => None,
-            };
-            (has_changed, changed_cwd)
         });
         let this = Arc::downgrade(self);
         *self.task.lock() = Some(cx.spawn(async move |term, cx| {
