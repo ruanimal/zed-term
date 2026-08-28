@@ -11,11 +11,10 @@ use gpui::{
     AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, ScrollHandle,
-    StatefulInteractiveElement as _, Subscription, Styled as _, WeakEntity, Window, anchored,
+    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, anchored,
     deferred, div, prelude::FluentBuilder, px,
 };
 use settings::Settings as _;
-use theme::ActiveTheme as _;
 use terminal_core::terminal_settings::TerminalSettings;
 use terminal_core::{
     Clear as TerminalClear, Copy as TerminalCopyAction, Paste as TerminalPasteAction,
@@ -23,20 +22,31 @@ use terminal_core::{
     ScrollPageUp, ScrollToBottom, ScrollToTop, SearchTest, SelectAll as TerminalSelectAll,
     ShowCharacterPalette, TerminalBuilder,
 };
+use theme::ActiveTheme as _;
 use ui::utils::{TRAFFIC_LIGHT_PADDING, platform_title_bar_height};
 use ui::{
-    Clickable as _, ContextMenu, IconButton, IconName, IconSize, Tab, TabBar, TabPosition,
-    Toggleable as _,
+    Clickable as _, ContextMenu, IconButton, IconName, IconSize, Label, LabelCommon as _,
+    LabelSize, Tab, TabBar, TabPosition, Toggleable as _,
 };
-use util::paths::PathStyle;
 use util::ResultExt;
+use util::paths::PathStyle;
 
+use crate::terminal::tab::ScrollAction;
+use crate::terminal::{TerminalElement, TerminalSearchBar, TerminalTab};
 use crate::{
     CloseAll, CloseLeft, CloseOtherTabs, CloseRight, CloseTab, NewTab, NewWindow, NextTab,
     OpenSettings, PreviousTab, SendKeystroke, SendText,
 };
-use crate::terminal::{TerminalElement, TerminalSearchBar, TerminalTab};
-use crate::terminal::tab::ScrollAction;
+
+/// Fixed content width for every tab so the tab bar does not reflow while
+/// the title follows the foreground process (e.g. `zsh` → `ls -al` → `zsh`).
+/// Titles longer than this are cut off with an ellipsis, like editor tabs
+/// (`MAX_TAB_TITLE_LEN` in the editor crate).
+const TAB_TITLE_WIDTH: gpui::Pixels = px(140.);
+/// Character cap applied to the title string itself, mirroring the editor's
+/// `MAX_TAB_TITLE_LEN`; keeps tooltips and copy-paste from carrying absurd
+/// titles even though the layout already truncates visually.
+const TAB_TITLE_MAX_CHARS: usize = 24;
 
 /// A window in the standalone terminal app.
 pub struct TerminalWindowView {
@@ -71,15 +81,17 @@ impl TerminalWindowView {
         // TerminalWindowView) plus the TitleChanged subscription; the heartbeat
         // remains as a fallback for cursor blink and any path that does not
         // notify.
-        cx.spawn(async move |_, cx| loop {
-            cx.background_executor().timer(Duration::from_millis(250)).await;
-            cx.update(|cx| {
-                for handle in cx.windows() {
-                    handle
-                        .update(cx, |_, window, _| window.refresh())
-                        .log_err();
-                }
-            });
+        cx.spawn(async move |_, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
+                cx.update(|cx| {
+                    for handle in cx.windows() {
+                        handle.update(cx, |_, window, _| window.refresh()).log_err();
+                    }
+                });
+            }
         })
         .detach();
 
@@ -149,7 +161,12 @@ impl TerminalWindowView {
         self.with_active_tab(cx, |tab, cx| tab.paste_clipboard(cx));
     }
 
-    fn paste_text(&mut self, _: &TerminalPasteTextAction, _window: &mut Window, cx: &mut Context<Self>) {
+    fn paste_text(
+        &mut self,
+        _: &TerminalPasteTextAction,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.with_active_tab(cx, |tab, cx| tab.paste_clipboard(cx));
     }
 
@@ -165,7 +182,12 @@ impl TerminalWindowView {
         self.with_active_tab(cx, |tab, cx| tab.scroll(ScrollAction::LineUp, cx));
     }
 
-    fn scroll_line_down(&mut self, _: &ScrollLineDown, _window: &mut Window, cx: &mut Context<Self>) {
+    fn scroll_line_down(
+        &mut self,
+        _: &ScrollLineDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.with_active_tab(cx, |tab, cx| tab.scroll(ScrollAction::LineDown, cx));
     }
 
@@ -173,7 +195,12 @@ impl TerminalWindowView {
         self.with_active_tab(cx, |tab, cx| tab.scroll(ScrollAction::PageUp, cx));
     }
 
-    fn scroll_page_down(&mut self, _: &ScrollPageDown, _window: &mut Window, cx: &mut Context<Self>) {
+    fn scroll_page_down(
+        &mut self,
+        _: &ScrollPageDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.with_active_tab(cx, |tab, cx| tab.scroll(ScrollAction::PageDown, cx));
     }
 
@@ -199,7 +226,12 @@ impl TerminalWindowView {
         self.with_active_tab(cx, |tab, cx| tab.scroll(ScrollAction::Top, cx));
     }
 
-    fn scroll_to_bottom(&mut self, _: &ScrollToBottom, _window: &mut Window, cx: &mut Context<Self>) {
+    fn scroll_to_bottom(
+        &mut self,
+        _: &ScrollToBottom,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.with_active_tab(cx, |tab, cx| tab.scroll(ScrollAction::Bottom, cx));
     }
 
@@ -225,7 +257,12 @@ impl TerminalWindowView {
 
     /// Sends raw text straight to the PTY (the keymap's escape-sequence
     /// conveniences, e.g. `alt-delete` → ESC d).
-    fn send_text(&mut self, SendText(text): &SendText, _window: &mut Window, cx: &mut Context<Self>) {
+    fn send_text(
+        &mut self,
+        SendText(text): &SendText,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if text.is_empty() {
             return;
         }
@@ -292,7 +329,12 @@ impl TerminalWindowView {
         crate::open_new_window(cx);
     }
 
-    fn close_other_tabs(&mut self, _: &CloseOtherTabs, _window: &mut Window, cx: &mut Context<Self>) {
+    fn close_other_tabs(
+        &mut self,
+        _: &CloseOtherTabs,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(active) = self.tabs.get(self.active_tab_index) else {
             return;
         };
@@ -476,6 +518,7 @@ impl TerminalWindowView {
                     .enumerate()
                     .map(|(idx, tab)| {
                         let title = tab.read(cx).title(cx);
+                        let title = util::truncate_and_trailoff(&title, TAB_TITLE_MAX_CHARS);
                         let position = if idx == 0 {
                             TabPosition::First
                         } else if idx == tab_count - 1 {
@@ -509,7 +552,14 @@ impl TerminalWindowView {
                                     cx.stop_propagation();
                                 }),
                             )
-                            .child(title)
+                            .child(
+                                div().w(TAB_TITLE_WIDTH).child(
+                                    Label::new(title)
+                                        .single_line()
+                                        .truncate()
+                                        .size(LabelSize::Small),
+                                ),
+                            )
                     })
                     .collect::<Vec<_>>(),
             )
@@ -519,9 +569,7 @@ impl TerminalWindowView {
 impl Render for TerminalWindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active_tab = self.tabs.get(self.active_tab_index).cloned();
-        let terminal = active_tab
-            .as_ref()
-            .map(|tab| tab.read(cx).terminal.clone());
+        let terminal = active_tab.as_ref().map(|tab| tab.read(cx).terminal.clone());
         let search_active = active_tab
             .as_ref()
             .map(|tab| tab.read(cx).search_active)
@@ -543,14 +591,8 @@ impl Render for TerminalWindowView {
                 terminal
                     .zip(active_tab)
                     .map(|(terminal, tab)| {
-                        TerminalElement::new(
-                            terminal,
-                            tab,
-                            self.focus_handle.clone(),
-                            true,
-                            true,
-                        )
-                        .into_any_element()
+                        TerminalElement::new(terminal, tab, self.focus_handle.clone(), true, true)
+                            .into_any_element()
                     })
                     .unwrap_or_else(|| {
                         div()
@@ -592,8 +634,11 @@ impl Render for TerminalWindowView {
                     let Some(tab) = this.tabs.get(this.active_tab_index) else {
                         return;
                     };
-                    let in_mouse_mode =
-                        tab.read(cx).terminal.read(cx).mouse_mode(event.modifiers.shift);
+                    let in_mouse_mode = tab
+                        .read(cx)
+                        .terminal
+                        .read(cx)
+                        .mouse_mode(event.modifiers.shift);
                     if !in_mouse_mode {
                         // Mirrors Zed: right-click selects the word under the
                         // cursor before showing the context menu.

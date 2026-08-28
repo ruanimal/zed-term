@@ -70,6 +70,7 @@ Zed 的做法：系统标题栏透明化（`appears_transparent: true` + `traffi
 ### G6. 字体渲染瑕疵
 用户早期反馈"字体渲染有小瑕疵"，现象至今未复现确认。待定位（可能方向：font fallback 链、连字开关、line_height 取整）。
 - 已修复相关项（2026-08-28，commit 6aa63569b7）：**tab 标题闪烁**——用户报告"输入命令时标题闪一下（如 ls -al）"。根因：`title()` 读前台进程信息，敲回车时 PTY 前台进程组瞬间从 shell 切给命令（pty-fork 实验实测 ~40ms 后切换），每次 Wakeup 采样都把瞬时快照提交，标题两连跳（`zed — zsh` → `zed — ls -al --color=auto` → `zed — zsh`）。修复：`pty_info.rs` 增加稳定确认——前台 pid 变化时延迟 750ms 复采，期间命令退出则跳过该快照；长驻程序（vim/top/ssh）标题照常更新，仅延迟 750ms。注意：这属于标题稳定性问题，与 G6 原指的"字体渲染"是两回事，G6 字体问题仍待复现。
+- 已修复相关项（2026-08-28）：**tab 宽度不固定放大闪烁感知**——用户指出 tab 宽度随标题长度伸缩，即使标题微变整条 tab 栏也会抖动。修复（window.rs）：tab 内容区固定 `TAB_TITLE_WIDTH`(140px)，标题字符串先 `truncate_and_trailoff`（24 字符，对齐编辑器 `MAX_TAB_TITLE_LEN`），再经 `Label.single_line().truncate()` 布局级 ellipsis 兜底；标题变化只换文字不动宽度。
 ### G7. bell 无声音/视觉提示
 内核有 bell 事件路径，但 app 层无任何呈现（响铃或标题栏闪动）。
 ### G8. hover tooltip 路径预览
