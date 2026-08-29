@@ -82,7 +82,7 @@ impl RenderOnce for TerminalSearchBar {
                 move |event: &KeyDownEvent, window, cx| {
                     window_view
                         .update(cx, |this, cx| {
-                            let Some(tab) = this.tabs.get(this.active_tab_index) else {
+                            let Some(tab) = this.active_tab() else {
                                 return;
                             };
                             match event.keystroke.key.as_ref() {

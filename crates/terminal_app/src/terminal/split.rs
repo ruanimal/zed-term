@@ -46,6 +46,7 @@ impl SplitDirection {
 
 /// A node in the split tree: either a leaf holding one terminal tab or an
 /// axis holding children along one direction.
+#[derive(Clone)]
 pub(crate) enum SplitNode {
     Leaf {
         tab: Entity<TerminalTab>,

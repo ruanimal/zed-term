@@ -18,6 +18,14 @@
 - 待用户真机验收：cmd-d 分屏、拖 divider、cmd-} 循环焦点、关 pane 收缩。
 - 备注：zoom split（激活 pane 独占）与方向性跳转（ActivatePaneInDirection 几何相邻）未做，属增量项，若用户需要再补录。
 - 补充修复（2026-08-28）：**cmd-d 首次按不出分屏、只是新建 tab**——`SplitNode::split` 原来只处理 Axis，首个 split 时树是单个 Leaf，split 返回 false 而 `tabs.push` 已执行。修复：Leaf 分支原地提升为两叶 Axis（`Self::Leaf { tab } if tab == old_tab` → `new_axis`）。同 commit 补了分屏右键菜单：split 布局下终端右键菜单增加 Split Right/Split Down/Close Pane 项；右键命中哪个 pane，该 pane 即成为 active pane（`CLICKED_LEAF` thread_local，split.rs 叶子 div 的 on_mouse_down(Right) 记录，窗口右键 handler 消费），菜单的 Copy/Paste/Split/Close 均作用于被点中的 pane 而非仅焦点 pane。
+- 补充修复（2026-08-28，用户反馈"分屏出现两个 tab + 输入路由 bug"）：原先 split 出的 pane 也 push 进 `tabs`，导致 tab 栏出现两个 tab，且 `active_tab_index` 被 split pane 抢占后输入发错 pane。**模型重构为 per-tab 分屏组（iTerm2 模型，用户确认）**：
+  - 顶层单元是 tab：`TerminalWindowView` 持 `Vec<WindowTab>`，每个 `WindowTab` 有自己的 split 树（`split_root`）与焦点 pane（`active_pane_tab`）。
+  - **cmd-t = 新建 tab**（一个初始 pane）；**cmd-d = 在当前 tab 内分屏**（不新建 tab），split pane 只存在于当前 tab 的 split 树中，tab 栏不新增。
+  - tab 栏每 tab 一项，**标题取该 tab 焦点 pane 的标题**（用户补充）。
+  - 输入/动作路由：`active_tab()` 返回当前 tab 的焦点 pane；`on_key_down` 兜底用 `focused_tab()`（按 window 真实焦点反查，回退 active_tab），保证按键落在用户实际输入的目标 pane。
+  - 每个 `TerminalTab` 自持独立 focus_handle；`activate_tab`/`focus_pane` 显式 focus 对应 pane。
+  - 移除单 pane 的 pane 即关闭该 tab；split 树的 collapse 与焦点循环（cmd-}）都作用于当前 tab。
+  - 验证：cargo check/test/clippy（terminal_app 26 通过，clippy --deny warnings 全绿）。待真机验收：cmd-t 多 tab、cmd-d 当前 tab 分屏且 tab 栏不增、tab 标题跟随焦点 pane、输入落在点击 pane。
 - 方案草稿（2026-08-28）：
   - **数据结构**（新文件 `terminal/split.rs`）：`enum SplitNode { Leaf { tab: Entity<TerminalTab> }, Axis { axis: Axis, flexes: Vec<f32>, children: Vec<SplitNode> } }`，窗口持有 `root: SplitNode` + `active_leaf_path`。语义对齐 Zed `Member`/`PaneAxis`（pane_group.rs:296/648）但砍掉 workspace 依赖：无 bounding_boxes 缓存、无持久化。
   - **split 语义**：沿 Zed `PaneAxis::split`（pane_group.rs:686）——找到目标 Leaf；若其父 Axis 与 split 方向同轴则插入兄弟 Leaf（flexes 重置为 1），否则把 Leaf 原位替换为新的二元 Axis。新 Leaf 新建 terminal（走既有 `spawn_new_terminal` 的 builder 路径）并持有焦点。

@@ -36,14 +36,12 @@ pub struct TerminalTab {
 }
 
 impl TerminalTab {
-    pub fn new(
-        terminal: Entity<Terminal>,
-        focus_handle: FocusHandle,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(terminal: Entity<Terminal>, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             terminal,
-            focus_handle,
+            // Each terminal gets its own focus handle so pane focus is
+            // distinguishable in split layouts.
+            focus_handle: cx.focus_handle(),
             search_focus_handle: cx.focus_handle(),
             scroll_top: Pixels::ZERO,
             ime_state: None,
