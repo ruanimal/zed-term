@@ -5,13 +5,21 @@
 
 use std::ops::Range as StdRange;
 
-use gpui::{App, Context, Entity, FocusHandle, Pixels, ScrollWheelEvent, Window};
+use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Pixels, ScrollWheelEvent, Window};
 use settings::Settings as _;
 use terminal_core::{
     Event, MaybeNavigationTarget, Search, Terminal, TerminalBounds,
     terminal_settings::TerminalSettings,
 };
 use util::ResultExt;
+
+/// Events emitted by a [`TerminalTab`] for the window to act on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TerminalTabEvent {
+    /// The pane's shell exited (typed `exit`, `Ctrl+D`, ...); the pane (and
+    /// if it was its tab's only pane, the tab) should be closed.
+    CloseTerminal,
+}
 
 struct ImeState {
     marked_text: String,
@@ -66,6 +74,10 @@ impl TerminalTab {
                             cx.open_url(&format!("file://{}", target.maybe_path));
                         }
                     },
+                    // The shell exited on its own (`exit`, `Ctrl+D`): tell the
+                    // window to tear this pane down rather than leaving a dead
+                    // shell accepting no input.
+                    Event::CloseTerminal => cx.emit(TerminalTabEvent::CloseTerminal),
                     _ => {}
                 }),
             );
@@ -277,6 +289,8 @@ impl TerminalTab {
         .detach();
     }
 }
+
+impl EventEmitter<TerminalTabEvent> for TerminalTab {}
 
 /// Which direction the `scroll` action family should scroll.
 #[derive(Clone, Copy)]

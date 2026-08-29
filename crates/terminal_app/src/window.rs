@@ -10,7 +10,7 @@ use collections::HashMap;
 use gpui::{
     AnyElement, AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, ScrollHandle,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, PromptLevel, Render, ScrollHandle,
     StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, anchored,
     deferred, div, prelude::FluentBuilder, px,
 };
@@ -32,7 +32,7 @@ use util::ResultExt;
 use util::paths::PathStyle;
 
 use crate::terminal::split::{self, SplitDirection, SplitNode};
-use crate::terminal::tab::ScrollAction;
+use crate::terminal::tab::{ScrollAction, TerminalTabEvent};
 use crate::terminal::{TerminalElement, TerminalSearchBar, TerminalTab};
 use crate::{
     ActivateNextPane, ActivatePreviousPane, CloseAll, CloseLeft, CloseOtherTabs, ClosePane,
@@ -159,12 +159,35 @@ impl TerminalWindowView {
     }
 
     /// Registers the window to repaint when the tab notifies (its terminal
-    /// updated). Must run on the foreground thread after the tab exists.
+    /// updated). Also listens for the pane's shell exiting so the pane (or its
+    /// whole tab) can be torn down. Must run on the foreground thread after the
+    /// tab exists.
     fn observe_tab(&mut self, tab: &Entity<TerminalTab>, cx: &mut Context<Self>) {
         self._subscriptions.push(cx.observe(tab, |this, _, cx| {
             this.active_tab_index = this.active_tab_index.min(this.tabs.len().saturating_sub(1));
             cx.notify();
         }));
+        self._subscriptions
+            .push(cx.subscribe(tab, |_this, pane, event, cx| {
+                // A pane's shell exited and must be torn down. The subscribe
+                // callback runs while `TerminalWindowView` is already being
+                // updated, so update it again (which `window.update` on the
+                // root view would do) can't be done inline — it would double
+                // lease the entity. Defer the teardown until the current update
+                // has finished.
+                let TerminalTabEvent::CloseTerminal = event;
+                let this = cx.entity();
+                let pane = pane.clone();
+                cx.defer(move |cx| {
+                    let Some(window) = cx.active_window() else {
+                        return;
+                    };
+                    window.update(cx, |_, window, cx| {
+                        this.update(cx, |this, cx| this.close_exited_pane(&pane, window, cx));
+                    })
+                    .log_err();
+                });
+            }));
     }
 
     /// Activates the tab at `index` and keeps it visible in the tab bar even
@@ -470,42 +493,90 @@ impl TerminalWindowView {
     /// the tree like Zed's `PaneAxis::remove`. If it was that tab's last pane,
     /// the tab is closed (and the window closes on the last tab).
     fn close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
-        self.remove_focused_pane(window, cx);
-    }
-
-    fn remove_focused_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(anchor) = self.active_tab() else {
             return;
         };
-        let active_index = self.active_tab_index;
-        let mut should_close_tab = false;
-        if let Some(active) = self.tabs.get_mut(active_index) {
+        self.remove_pane(&anchor, window, cx);
+    }
+
+    /// Removes `anchor` (a specific pane) from whichever tab houses it,
+    /// collapsing the tree like Zed's `PaneAxis::remove`. If it was that tab's
+    /// last pane, the tab is closed (and the window closes on the last tab).
+    /// Used both for `ClosePane` and for a shell that exited on its own.
+    fn remove_pane(&mut self, anchor: &Entity<TerminalTab>, window: &mut Window, cx: &mut Context<Self>) {
+        // Locate the tab that contains this pane. A pane is a leaf in a tab's
+        // split tree, or the only pane of a single-pane tab.
+        let tab_index = self.tabs.iter().position(|tab| {
+            if let Some(root) = tab.split_root.as_ref() {
+                let mut leaves = Vec::new();
+                root.collect_tabs(&mut leaves);
+                leaves.contains(&anchor)
+            } else {
+                tab.active_pane_tab.as_ref().is_some_and(|pane| pane == anchor)
+            }
+        });
+        let Some(tab_index) = tab_index else {
+            return;
+        };
+        let was_active = tab_index == self.active_tab_index;
+        let should_close_tab = {
+            let Some(active) = self.tabs.get_mut(tab_index) else {
+                return;
+            };
             if let Some(root) = active.split_root.as_mut() {
-                if let Some(replacement) = root.remove(&anchor) {
+                if let Some(replacement) = root.remove(anchor) {
                     *root = replacement;
                 }
                 let mut leaves = Vec::new();
                 root.collect_tabs(&mut leaves);
                 if leaves.is_empty() {
                     // This pane was the last one: the whole tab goes away.
-                    should_close_tab = true;
+                    true
                 } else {
                     active.active_pane_tab = Some(leaves[leaves.len() - 1].clone());
+                    false
                 }
             } else {
-                // Single-pane tab: closing its only pane closes the tab.
-                should_close_tab = true;
+                // Single-pane tab: removing its only pane closes the tab.
+                true
             }
-        }
+        };
         if should_close_tab {
-            self.tabs.remove(active_index);
+            self.tabs.remove(tab_index);
             if self.tabs.is_empty() {
                 window.remove_window();
             } else {
+                // If the removed tab sat before the active index, shift it.
+                if tab_index < self.active_tab_index {
+                    self.active_tab_index -= 1;
+                }
                 self.active_tab_index = self.active_tab_index.min(self.tabs.len() - 1);
+                // Focus the surviving tab's pane so keyboard input lands there
+                // instead of a dropped focus handle (only if the active tab
+                // moved, so tabs behind the active one keep their focus).
+                if was_active {
+                    self.focus_pane(window, cx);
+                }
             }
+        } else if was_active {
+            // The pane was removed but the tab lives on (split layout); the
+            // closed pane's focus handle is gone. Move focus to the pane the
+            // tree chose as the new active pane.
+            self.focus_pane(window, cx);
         }
         cx.notify();
+    }
+
+    /// Removes the pane whose shell exited on its own, so a dead pane does not
+    /// linger as an unresponsive terminal. Falls back to closing the pane (or,
+    /// when it was its tab's only pane, the tab) without a confirmation prompt.
+    fn close_exited_pane(
+        &mut self,
+        pane: &Entity<TerminalTab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.remove_pane(pane, window, cx);
     }
 
     /// Sends raw text straight to the PTY (the keymap's escape-sequence
@@ -549,16 +620,66 @@ impl TerminalWindowView {
     }
 
     fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
-        // The active tab's split is closed via its own pane-close semantics;
-        // cmd-w on a tab with multiple panes closes the focused pane, and on
-        // the last pane closes the tab. Note: closing the active tab's *last*
-        // pane is handled by `remove_focused_pane`.
-        if let Some(active) = self.tabs.get(self.active_tab_index)
-            && active.split_root.is_some()
-        {
-            self.remove_focused_pane(window, cx);
+        // `CloseTab` (cmd-w), the tab-bar close button and the tab context
+        // menu all close the whole tab. When a tab has multiple panes the
+        // user confirms first; closing a split tab tears down every pane.
+        self.close_tab_entire(window, cx);
+    }
+
+    /// Closes the active tab as a whole (all of its panes). If the tab has
+    /// multiple panes (a split layout), the user is first asked to confirm;
+    /// closing a split tab tears down every pane and the tab itself.
+    fn close_tab_entire(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(active) = self.tabs.get(self.active_tab_index) else {
             return;
+        };
+        if active.split_root.is_some() {
+            // Closing a split tab kills every pane in it; confirm first so the
+            // user does not lose a whole shell group by accident.
+            let pane_count = {
+                let mut leaves = Vec::new();
+                if let Some(root) = active.split_root.as_ref() {
+                    root.collect_tabs(&mut leaves);
+                }
+                leaves.len()
+            };
+            cx.spawn(async move |this: WeakEntity<Self>, cx| {
+                let Some(window) = cx.update(|cx| cx.active_window()) else {
+                    return;
+                };
+                // `window.prompt` returns a oneshot receiver; resolve it and
+                // only proceed to tear down the tab when the user confirms.
+                let answer = match window.update(cx, |_, window, cx| {
+                    window.prompt(
+                        PromptLevel::Warning,
+                        &format!("Close terminal tab with {pane_count} panes?"),
+                        None,
+                        &["Close All", "Cancel"],
+                        cx,
+                    )
+                }) {
+                    Ok(receiver) => receiver.await,
+                    Err(_) => return,
+                };
+                match answer {
+                    Ok(0) => {}
+                    _ => return,
+                }
+                window
+                    .update(cx, |_, window, cx| {
+                        this.update(cx, |this, cx| this.close_tab_entire_inner(window, cx))
+                            .log_err();
+                    })
+                    .log_err();
+            })
+            .detach();
+        } else {
+            self.close_tab_entire_inner(window, cx);
         }
+    }
+
+    /// Removes the active tab wholesale, regardless of how many panes it has.
+    fn close_tab_entire_inner(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.is_empty() {
             window.remove_window();
             return;
@@ -571,11 +692,15 @@ impl TerminalWindowView {
             self.closed_tab_cwds.insert(0, cwd);
             self.closed_tab_cwds.truncate(MAX_REMEMBERED_CLOSED_TABS);
         }
-        self.tabs.remove(self.active_tab_index);
-        if self.tabs.is_empty() {
+        if self.tabs.len() == 1 {
+            self.tabs.clear();
             window.remove_window();
         } else {
+            self.tabs.remove(self.active_tab_index);
             self.active_tab_index = self.active_tab_index.min(self.tabs.len() - 1);
+            // Refocus the surviving tab's terminal; the closed tab's focus
+            // handle is gone and keyboard input must land in a live pane.
+            self.focus_pane(window, cx);
             cx.notify();
         }
     }
@@ -713,18 +838,23 @@ impl TerminalWindowView {
             .unwrap_or(false);
         let focus_handle = tab.read(cx).focus_handle.clone();
         self.show_context_menu(position, window, cx, |menu, _, _| {
+            // Split entries are always shown so a pane can be split again
+            // (into a horizontal/vertical pair) from any pane, not just one
+            // that already has splits. `Split*` actions target the active
+            // pane the right-click selected.
             let menu = menu
                 .context(focus_handle)
                 .action("New Terminal", Box::new(NewTab))
+                .separator()
+                .action("Split Right", Box::new(SplitRight))
+                .action("Split Down", Box::new(SplitDown))
                 .separator();
             let menu = if in_split_layout {
-                // Split actions apply to the pane the right-click landed on
-                // (now the active pane).
-                menu.action("Split Right", Box::new(SplitRight))
-                    .action("Split Down", Box::new(SplitDown))
-                    .separator()
-                    .action("Close Pane", Box::new(ClosePane))
-                    .separator()
+                // A pane with splits can also close its focused pane. When
+                // this is available it is the per-pane close entry; `Close
+                // Terminal Tab` is omitted so the two don't overlap (closing
+                // a split tab's last pane closes the tab anyway).
+                menu.action("Close Pane", Box::new(ClosePane)).separator()
             } else {
                 menu
             };
@@ -734,7 +864,11 @@ impl TerminalWindowView {
                 .action("Select All", Box::new(terminal_core::SelectAll))
                 .action("Clear", Box::new(terminal_core::Clear))
                 .separator()
-                .action("Close Terminal Tab", Box::new(CloseTab))
+                // Single-pane tab (no split): the only close entry is the tab.
+                // In split layout `Close Pane` above is the per-pane close.
+                .when(!in_split_layout, |menu| {
+                    menu.action("Close Terminal Tab", Box::new(CloseTab))
+                })
         });
     }
 
@@ -897,6 +1031,31 @@ impl TerminalWindowView {
                         }),
                     )
                     .child(self.render_tab_label(title))
+                    .end_slot(
+                        // Per-tab close button. Clicking a tab's x closes that
+                        // whole tab (confirming first when it holds a split).
+                        // The wrapping div stops the press from starting the
+                        // titlebar-drag gesture and from toggling the tab.
+                        div()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .child(
+                                IconButton::new(
+                                    format!("close-tab-{tab_idx}"),
+                                    IconName::Close,
+                                )
+                                .icon_size(IconSize::XSmall)
+                                .on_click(cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    this.activate_tab(tab_idx, window, cx);
+                                    this.close_tab_entire(window, cx);
+                                })),
+                            ),
+                    )
                     .into_any_element()
             })
             .collect()

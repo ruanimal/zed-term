@@ -26,6 +26,14 @@
   - 每个 `TerminalTab` 自持独立 focus_handle；`activate_tab`/`focus_pane` 显式 focus 对应 pane。
   - 移除单 pane 的 pane 即关闭该 tab；split 树的 collapse 与焦点循环（cmd-}）都作用于当前 tab。
   - 验证：cargo check/test/clippy（terminal_app 26 通过，clippy --deny warnings 全绿）。待真机验收：cmd-t 多 tab、cmd-d 当前 tab 分屏且 tab 栏不增、tab 标题跟随焦点 pane、输入落在点击 pane。
+- 补充修复（2026-08-29，真机试用反馈）：
+  - **close pane 后剩余 pane 卡住无法输入**——`remove_pane` 移除 pane/tab 后只更新 `active_pane_tab`/`active_tab_index`，未重新聚焦存活 pane；字符输入走 `TerminalElement` 的 `window.handle_input(&self.focus, ...)`，仅持有焦点的 `focus_handle` 能收到，移除后焦点留在已销毁 handle 上。修复：`remove_pane` 及 `close_tab_entire_inner` 移除后调 `focus_pane` 重新聚焦。
+  - **右键菜单始终提供 Split（横向/竖向）**——原来是 `in_split_layout` 才显示 Split/Close Pane，单 pane 时无 split 入口。修复：任何 pane 的终端右键菜单都显示 Split Right/Split Down（支持二次 split）；`Close Pane` 仍仅 split 布局显示。
+  - **Close Pane 与 Close Terminal Tab 去重**——split 布局下菜单同时出现两项语义重叠。修复：split 布局只显示 `Close Pane`，单 pane 才显示 `Close Terminal Tab`，两者互斥。
+  - **tab 栏 x 关闭按钮 + 多 pane 确认**——每个 tab 通过 `Tab::end_slot` 挂 `IconButton(Close)`，点击关闭整个 tab；关闭时若该 tab 为 split（多 pane），先经 `window.prompt` 弹「Close terminal tab with N panes?」（Close All/Cancel）确认后关闭所有 pane。tab 栏 x、cmd-w、tab 右键菜单的 Close 统一走 `close_tab_entire`（关闭整个 tab，多 pane 先确认）。
+  - **shell 主动退出（exit / ctrl+d）未处理**——内核在 shell 退出时 emit `Event::CloseTerminal`，app 层原落入 `_ => {}` 被忽略，死终端无法输入仍占位。修复：`TerminalTab` 新增 `TerminalTabEvent::CloseTerminal`（实现 `EventEmitter`），订阅到 `Event::CloseTerminal` 时向上 emit；window 层 `observe_tab` 订阅并调 `close_exited_pane` → 泛化的 `remove_pane` 关闭该 pane（唯一 pane 时关整个 tab）。原 `remove_focused_pane` 泛化为 `remove_pane(anchor)`：按任意 pane 定位所属 tab 并移除。
+  - **shell 退出事件重入崩溃**——`cx.subscribe` 回调运行时 `TerminalWindowView` 已处于更新中，回调内再 `window.update` root view 触发 `double_lease_panic`（`cannot update ... while it is already being updated`），整个应用 abort。修复：回调改为 `cx.defer` 将关闭操作延迟到当前更新结束后执行。
+  - 验证：cargo build/test/clippy（terminal_app 26 通过、clippy --deny warnings 全绿）；`cargo run` 后台稳定运行无 panic。待真机验收：close pane 后可在剩余 pane 输入、右键菜单单 pane 可 split、tab x 关闭多 pane 确认、shell `exit`/`ctrl+d` 后自动关 pane。
 - 方案草稿（2026-08-28）：
   - **数据结构**（新文件 `terminal/split.rs`）：`enum SplitNode { Leaf { tab: Entity<TerminalTab> }, Axis { axis: Axis, flexes: Vec<f32>, children: Vec<SplitNode> } }`，窗口持有 `root: SplitNode` + `active_leaf_path`。语义对齐 Zed `Member`/`PaneAxis`（pane_group.rs:296/648）但砍掉 workspace 依赖：无 bounding_boxes 缓存、无持久化。
   - **split 语义**：沿 Zed `PaneAxis::split`（pane_group.rs:686）——找到目标 Leaf；若其父 Axis 与 split 方向同轴则插入兄弟 Leaf（flexes 重置为 1），否则把 Leaf 原位替换为新的二元 Axis。新 Leaf 新建 terminal（走既有 `spawn_new_terminal` 的 builder 路径）并持有焦点。
