@@ -88,6 +88,22 @@ Zed 的做法：系统标题栏透明化（`appears_transparent: true` + `traffi
 - 反馈：写入成功/失败无 toast 或状态提示；非法值校验缺失
 - 方案约束：不引入 settings_ui crate 的表驱动体系（依赖面大，PLAN §4.3 已决策），在现有自绘路线上补齐控件类型（text input 用 ui::TextInput）与布局层级。
 - 注：原 G10（设置页覆盖面）已并入本条，G10 撤销。
+- **本轮（2026-08-29）**：查询 Zed 设置 UI 可复用性——`settings_ui` 整体不可复用（拖入 editor/picker/project/workspace 重依赖），`picker`/`number_field`/`input_field` 依赖 editor 亦不可复用；可复用点仅为 `ui::DropdownMenu`（轻量）与控件设计。经用户确认：**借鉴 Zed 控件设计自实现轻量版**。本轮落地：
+  - 重构为 Zed 风格**节标题 + 行控件**布局（Appearance / Cursor / Behavior 分组）。
+  - 新增 **DropdownMenu 下拉控件**（`ui::DropdownMenu` + `ContextMenu::build`，选项以 `Box<dyn Fn(&mut App)>` 闭包按需写入 settings.json）。
+  - **主题选择入口（G13 待办）**：下拉列出 `ThemeRegistry::global(cx).list_names()`，选中写顶层 `theme` 节（`theme_settings::set_theme`，正确处理静态/动态 selection），当前主题名由 `ThemeSettings::theme.name(SystemAppearance)` 读取。
+  - 补齐高频项：font size、scroll multiplier、max scrollback lines（stepper）；cursor shape、blinking、alternate scroll、bell（下拉）；option as meta、copy on select（toggle）。
+  - 验证：cargo build/test/clippy（terminal_app 26 通过、clippy --deny warnings 全绿）；`cargo run` 启动正常。
+- 视觉升级（2026-08-29，用户反馈"实现过于粗糙，太丑，不能参考 zed 原有风格吗"）：参考 Zed `settings_ui`（`render_settings_item_layout`/`SettingsSectionHeader`/`render_toggle_button`）的真实视觉规范重写样式，去除此前所有硬编码 `rgb(0x...)` 与裸 `div().child("text")`：
+  - 窗口背景用主题色 `cx.theme().colors().panel_background`。
+  - 节标题 = `Label::size(Small).color(Muted).buffer_font()` + `Divider::horizontal().color(BorderFaded)`；设置行 = `v_flex().px_8().py_2()`，行内 `h_flex().justify_between()`，左 `v_flex`（`Label` 标题 + `Label::size(Small).color(Muted)` 描述），右控件，行下 `Divider::horizontal().color(BorderFaded)`（对齐 Zed `render_settings_item_layout`）。
+  - toggle 改用 `ui::Switch`（`ToggleState::Selected/Unselected`），替代裸 div。
+  - 数字 stepper 改用 `IconButton`（`IconName::SquareMinus/SquarePlus`）+ `IconSize::Small`，主题色。
+  - 为满足 clippy `too_many_arguments`，行方法移除 `id` 参数、用 `element_id_for(title)` 派生稳定 id；下拉选项用 `opt(label, closure)` 把闭包 coerce 到 `Box<dyn Fn(&mut App)>`（`OptionAction` trait object）。
+  - 分组：Appearance / Cursor / Behavior / Input & Scroll；每项带描述文案（如 Zed 设置行）。
+  - 验证：cargo build/test/clippy（terminal_app 26 通过、clippy --deny warnings 全绿）；`cargo run` 启动正常。待用户视觉验收。
+  - 修复（2026-08-29，用户截图反馈"设置窗口的标题被遮挡"）：设置窗口复用了主窗口的 `window_options`（透明标题栏 + 红绿灯悬浮在左上角 `traffic_light_position (9,9)`），导致页面顶部 "Terminal Settings" 标题被红绿灯遮挡。先尝试系统标准标题栏（用户反馈"太丑，还是应该用自绘标题栏"），最终**采用自绘标题栏**（与主窗口一致）：`SettingsPage` 顶部加 `render_title_bar`——`h(platform_title_bar_height(window))` + `pl(TRAFFIC_LIGHT_PADDING)`（为悬浮红绿灯预留左侧空间） + `bg(tab_bar_background)` + 鼠标按下/移动 `start_window_move` 拖拽；标题 "ZedTerm — Settings" 用 `Label(Color::Muted)` 显示在红绿灯右侧，不再被遮挡。设置窗口仍用 `window_options`（透明标题栏，红绿灯悬浮），内容从自绘标题栏下方开始。验证：cargo build/test/clippy 通过；`cargo run` 启动正常。待用户视觉验收。
+  - **尚缺（后续增量）**：文本输入类设置（shell/env/font_family）需 TextInput 控件；toast/状态提示；非法值校验；恢复默认值入口；line_height（Custom f32 组合控件）。
 
 ### G13. Zed 主题支持（复用 Zed 主题，用户提出）
 现状核实（2026-08-27）：**终端配色已经主题化**——内核 `get_color_at_index` 读 `theme.colors().terminal_ansi_*`，`terminal_element.rs` 已用 `cx.theme()` 取前景/背景/搜索高亮色，且 `theme_settings::init`（app.rs:151）已注册 One Dark/Light 内置主题并读取 settings.json 的 `theme` 节。缺的只是：用户主题加载、主题切换入口、UI 硬编码色收尾。
