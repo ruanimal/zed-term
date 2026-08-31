@@ -190,6 +190,22 @@ impl SplitNode {
         None
     }
 
+    /// Returns whether this subtree contains `tab`.
+    pub(crate) fn contains_tab(&self, tab: &Entity<TerminalTab>) -> bool {
+        match self {
+            Self::Leaf { tab: leaf_tab } => leaf_tab == tab,
+            Self::Axis { children, .. } => children.iter().any(|child| child.contains_tab(tab)),
+        }
+    }
+
+    /// Returns the number of terminal panes in this subtree.
+    pub(crate) fn leaf_count(&self) -> usize {
+        match self {
+            Self::Leaf { .. } => 1,
+            Self::Axis { children, .. } => children.iter().map(Self::leaf_count).sum(),
+        }
+    }
+
     /// Flattened leaf tabs in visual order (left→right / top→bottom).
     pub(crate) fn collect_tabs<'a>(&'a self, out: &mut Vec<&'a Entity<TerminalTab>>) {
         match self {

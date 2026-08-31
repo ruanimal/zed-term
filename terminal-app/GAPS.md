@@ -13,10 +13,11 @@
 - window.rs：`split_root`（None=单窗格 tab 布局）+ `active_pane_tab`（焦点 pane 的 tab）；SplitRight/Left/Up/Down 四向 action（cmd-d、ctrl-alt-四向），首次 split 自动把单窗格布局提升为 split 树；新终端经 `build_terminal_in` 异步进入新叶子；ActivateNext/PreviousPane（cmd-{ / cmd-}、cmd-alt-left/right）按叶子视觉序循环并同步 tab 栏选中。
 - divider 拖拽：divider 元素 mouse_down latch（thread_local anchor+axis），窗口级 on_mouse_move 每帧调 `resize_flexes`（相邻 flex 对守恒分配、MIN_FLEX=0.05 兜底），mouse_up 清 anchor——解决 divider 局部 on_mouse_move 移出 6px 命中区丢事件的问题（Zed 同样在 element 层做窗口级拖拽）。
 - 渲染：`SplitNode::render` 递归 flex_row/col，flex_grow 权重布局，divider 1px 主题色 border；叶子渲染复用现有 `TerminalElement`。
-- ClosePane 已实现（关 pane 收缩树 + 同步 tab 栏；最后一个叶子保留 tab 栏语义）。zoom（pane 独占内容区）留待后续，见下方备注。
+- ClosePane 已实现（关 pane 收缩树 + 同步 tab 栏；最后一个叶子保留 tab 栏语义）；pane zoom 已实现（活动 pane 独占内容区，split 树与 divider 比例保持不变）。
 - 验证：cargo check/test/clippy（terminal_app 26 通过、terminal_core 99 通过、clippy --deny warnings 全绿）。
-- 待用户真机验收：cmd-d 分屏、拖 divider、cmd-} 循环焦点、关 pane 收缩。
-- 备注：zoom split（激活 pane 独占）与方向性跳转（ActivatePaneInDirection 几何相邻）未做，属增量项，若用户需要再补录。
+- 待用户真机验收：cmd-d 分屏、拖 divider、cmd-} 循环焦点、关 pane 收缩、shift-escape zoom/还原。
+- 备注：方向性跳转（ActivatePaneInDirection 几何相邻）未做，属增量项，若用户需要再补录。
+- 补充实现（2026-08-31）：**pane zoom**——`WindowTab` 以 `maximized_pane_tab` 按 tab 保存独占 pane，render 时只绘制该 `TerminalElement` 而不改写 `SplitNode`，还原后 divider 比例不变；`ToggleZoom` 绑定 `shift-escape`，终端右键菜单提供 Zoom Pane/Restore Panes；zoom 内容区右上角显示 `Minimize` 图标标识当前最大化状态，悬停提示 Restore Panes，点击可直接还原。toggle 以窗口真实焦点确定目标；新建 split 或切换相邻 pane 时自动退出 zoom；zoom pane 被关闭/退出时清除状态，隐藏 pane 退出时保持 zoom；split 收缩到单叶时归一化回单 pane。验证：`cargo test -p terminal_app`（26 通过）与 `./script/clippy -p terminal_app`（`--deny warnings`）全绿。
 - 补充修复（2026-08-28）：**cmd-d 首次按不出分屏、只是新建 tab**——`SplitNode::split` 原来只处理 Axis，首个 split 时树是单个 Leaf，split 返回 false 而 `tabs.push` 已执行。修复：Leaf 分支原地提升为两叶 Axis（`Self::Leaf { tab } if tab == old_tab` → `new_axis`）。同 commit 补了分屏右键菜单：split 布局下终端右键菜单增加 Split Right/Split Down/Close Pane 项；右键命中哪个 pane，该 pane 即成为 active pane（`CLICKED_LEAF` thread_local，split.rs 叶子 div 的 on_mouse_down(Right) 记录，窗口右键 handler 消费），菜单的 Copy/Paste/Split/Close 均作用于被点中的 pane 而非仅焦点 pane。
 - 补充修复（2026-08-28，用户反馈"分屏出现两个 tab + 输入路由 bug"）：原先 split 出的 pane 也 push 进 `tabs`，导致 tab 栏出现两个 tab，且 `active_tab_index` 被 split pane 抢占后输入发错 pane。**模型重构为 per-tab 分屏组（iTerm2 模型，用户确认）**：
   - 顶层单元是 tab：`TerminalWindowView` 持 `Vec<WindowTab>`，每个 `WindowTab` 有自己的 split 树（`split_root`）与焦点 pane（`active_pane_tab`）。

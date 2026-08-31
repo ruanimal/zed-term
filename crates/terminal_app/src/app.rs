@@ -55,6 +55,8 @@ actions!(
         ActivatePreviousPane,
         /// Closes the focused pane; the last pane closes the window.
         ClosePane,
+        /// Toggles the focused pane between split layout and full content area.
+        ToggleZoom,
         /// Reopens the most recently closed tab (cwd preserved).
         ReopenClosedTab
     ]
@@ -335,6 +337,7 @@ pub fn run(cx: &mut App) {
         KeyBinding::new("cmd-{", ActivatePreviousPane, Some("TerminalWindow")),
         KeyBinding::new("cmd-alt-left", ActivatePreviousPane, Some("TerminalWindow")),
         KeyBinding::new("cmd-alt-right", ActivateNextPane, Some("TerminalWindow")),
+        KeyBinding::new("shift-escape", ToggleZoom, Some("TerminalWindow")),
     ]);
 
     open_first_window(cx);

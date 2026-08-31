@@ -25,8 +25,8 @@ use terminal_core::{
 use theme::ActiveTheme as _;
 use ui::utils::{TRAFFIC_LIGHT_PADDING, platform_title_bar_height};
 use ui::{
-    Clickable as _, ContextMenu, IconButton, IconName, IconSize, Label, LabelCommon as _,
-    LabelSize, Tab, TabBar, TabPosition, Toggleable as _,
+    ButtonCommon as _, Clickable as _, ContextMenu, IconButton, IconName, IconSize, Label,
+    LabelCommon as _, LabelSize, Tab, TabBar, TabPosition, Toggleable as _, Tooltip,
 };
 use util::ResultExt;
 use util::paths::PathStyle;
@@ -37,7 +37,7 @@ use crate::terminal::{TerminalElement, TerminalSearchBar, TerminalTab};
 use crate::{
     ActivateNextPane, ActivatePreviousPane, CloseAll, CloseLeft, CloseOtherTabs, ClosePane,
     CloseRight, CloseTab, NewTab, NewWindow, NextTab, OpenSettings, PreviousTab, ReopenClosedTab,
-    SendKeystroke, SendText, SplitDown, SplitLeft, SplitRight, SplitUp,
+    SendKeystroke, SendText, SplitDown, SplitLeft, SplitRight, SplitUp, ToggleZoom,
 };
 
 /// Fixed content width for every tab so the tab bar does not reflow while
@@ -83,6 +83,9 @@ pub(crate) struct WindowTab {
     pub(crate) split_root: Option<SplitNode>,
     /// The tab shown in the focused pane of this tab. Anchors pane actions.
     pub(crate) active_pane_tab: Option<Entity<TerminalTab>>,
+    /// The pane temporarily occupying the entire content area. The split tree
+    /// remains intact so restoring zoom preserves its layout and flexes.
+    pub(crate) maximized_pane_tab: Option<Entity<TerminalTab>>,
 }
 
 impl WindowTab {
@@ -91,12 +94,23 @@ impl WindowTab {
         Self {
             split_root: None,
             active_pane_tab: Some(tab),
+            maximized_pane_tab: None,
         }
     }
 
     /// The pane currently holding focus within this tab.
     fn focused_tab(&self) -> Option<Entity<TerminalTab>> {
         self.active_pane_tab.clone()
+    }
+
+    fn is_split_layout(&self) -> bool {
+        self.split_root
+            .as_ref()
+            .is_some_and(|root| root.leaf_count() > 1)
+    }
+
+    fn is_pane_maximized(&self) -> bool {
+        self.maximized_pane_tab.is_some()
     }
 }
 
@@ -182,10 +196,11 @@ impl TerminalWindowView {
                     let Some(window) = cx.active_window() else {
                         return;
                     };
-                    window.update(cx, |_, window, cx| {
-                        this.update(cx, |this, cx| this.close_exited_pane(&pane, window, cx));
-                    })
-                    .log_err();
+                    window
+                        .update(cx, |_, window, cx| {
+                            this.update(cx, |this, cx| this.close_exited_pane(&pane, window, cx));
+                        })
+                        .log_err();
                 });
             }));
     }
@@ -388,6 +403,7 @@ impl TerminalWindowView {
                         && root.split(&anchor_tab, tab.clone(), direction)
                     {
                         active.active_pane_tab = Some(tab);
+                        active.maximized_pane_tab = None;
                     } else {
                         // The active tab or anchor vanished meanwhile; fall
                         // back to a normal tab so the shell is never lost.
@@ -458,6 +474,7 @@ impl TerminalWindowView {
             }
         };
         self.tabs[active_index].active_pane_tab = Some(leaves[next].clone());
+        self.tabs[active_index].maximized_pane_tab = None;
         self.focus_pane(window, cx);
         cx.notify();
     }
@@ -478,6 +495,31 @@ impl TerminalWindowView {
         cx: &mut Context<Self>,
     ) {
         self.activate_adjacent_pane(false, window, cx);
+    }
+
+    fn toggle_zoom(&mut self, _: &ToggleZoom, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pane) = self.focused_tab(window, cx) else {
+            return;
+        };
+        let Some(active) = self.tabs.get_mut(self.active_tab_index) else {
+            return;
+        };
+        let Some(root) = active.split_root.as_ref() else {
+            return;
+        };
+        if root.leaf_count() < 2 || !root.contains_tab(&pane) {
+            return;
+        }
+
+        active.active_pane_tab = Some(pane.clone());
+        if active.maximized_pane_tab.as_ref() == Some(&pane) {
+            active.maximized_pane_tab = None;
+        } else {
+            active.maximized_pane_tab = Some(pane.clone());
+        }
+
+        pane.read(cx).focus_handle.clone().focus(window, cx);
+        cx.notify();
     }
 
     /// Focuses the terminal of the active tab's focused pane.
@@ -503,16 +545,21 @@ impl TerminalWindowView {
     /// collapsing the tree like Zed's `PaneAxis::remove`. If it was that tab's
     /// last pane, the tab is closed (and the window closes on the last tab).
     /// Used both for `ClosePane` and for a shell that exited on its own.
-    fn remove_pane(&mut self, anchor: &Entity<TerminalTab>, window: &mut Window, cx: &mut Context<Self>) {
+    fn remove_pane(
+        &mut self,
+        anchor: &Entity<TerminalTab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Locate the tab that contains this pane. A pane is a leaf in a tab's
         // split tree, or the only pane of a single-pane tab.
         let tab_index = self.tabs.iter().position(|tab| {
             if let Some(root) = tab.split_root.as_ref() {
-                let mut leaves = Vec::new();
-                root.collect_tabs(&mut leaves);
-                leaves.contains(&anchor)
+                root.contains_tab(anchor)
             } else {
-                tab.active_pane_tab.as_ref().is_some_and(|pane| pane == anchor)
+                tab.active_pane_tab
+                    .as_ref()
+                    .is_some_and(|pane| pane == anchor)
             }
         });
         let Some(tab_index) = tab_index else {
@@ -529,11 +576,27 @@ impl TerminalWindowView {
                 }
                 let mut leaves = Vec::new();
                 root.collect_tabs(&mut leaves);
-                if leaves.is_empty() {
+                let surviving_panes = leaves.into_iter().cloned().collect::<Vec<_>>();
+                if surviving_panes.is_empty() {
                     // This pane was the last one: the whole tab goes away.
                     true
                 } else {
-                    active.active_pane_tab = Some(leaves[leaves.len() - 1].clone());
+                    active.active_pane_tab = active
+                        .active_pane_tab
+                        .take()
+                        .filter(|pane| surviving_panes.contains(pane))
+                        .or_else(|| surviving_panes.last().cloned());
+                    if active
+                        .maximized_pane_tab
+                        .as_ref()
+                        .is_some_and(|pane| !surviving_panes.contains(pane))
+                    {
+                        active.maximized_pane_tab = None;
+                    }
+                    if surviving_panes.len() == 1 {
+                        active.split_root = None;
+                        active.maximized_pane_tab = None;
+                    }
                     false
                 }
             } else {
@@ -633,7 +696,7 @@ impl TerminalWindowView {
         let Some(active) = self.tabs.get(self.active_tab_index) else {
             return;
         };
-        if active.split_root.is_some() {
+        if active.is_split_layout() {
             // Closing a split tab kills every pane in it; confirm first so the
             // user does not lose a whole shell group by accident.
             let pane_count = {
@@ -831,11 +894,11 @@ impl TerminalWindowView {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        let in_split_layout = self
+        let (in_split_layout, is_pane_maximized) = self
             .tabs
             .get(self.active_tab_index)
-            .map(|t| t.split_root.is_some())
-            .unwrap_or(false);
+            .map(|tab| (tab.is_split_layout(), tab.is_pane_maximized()))
+            .unwrap_or((false, false));
         let focus_handle = tab.read(cx).focus_handle.clone();
         self.show_context_menu(position, window, cx, |menu, _, _| {
             // Split entries are always shown so a pane can be split again
@@ -850,11 +913,16 @@ impl TerminalWindowView {
                 .action("Split Down", Box::new(SplitDown))
                 .separator();
             let menu = if in_split_layout {
-                // A pane with splits can also close its focused pane. When
-                // this is available it is the per-pane close entry; `Close
-                // Terminal Tab` is omitted so the two don't overlap (closing
-                // a split tab's last pane closes the tab anyway).
-                menu.action("Close Pane", Box::new(ClosePane)).separator()
+                // Zoom keeps the split tree alive but lets the selected pane
+                // temporarily occupy the full terminal content area.
+                let zoom_label = if is_pane_maximized {
+                    "Restore Panes"
+                } else {
+                    "Zoom Pane"
+                };
+                menu.action(zoom_label, Box::new(ToggleZoom))
+                    .action("Close Pane", Box::new(ClosePane))
+                    .separator()
             } else {
                 menu
             };
@@ -1044,16 +1112,15 @@ impl TerminalWindowView {
                                 }),
                             )
                             .child(
-                                IconButton::new(
-                                    format!("close-tab-{tab_idx}"),
-                                    IconName::Close,
-                                )
-                                .icon_size(IconSize::XSmall)
-                                .on_click(cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
-                                    cx.stop_propagation();
-                                    this.activate_tab(tab_idx, window, cx);
-                                    this.close_tab_entire(window, cx);
-                                })),
+                                IconButton::new(format!("close-tab-{tab_idx}"), IconName::Close)
+                                    .icon_size(IconSize::XSmall)
+                                    .on_click(cx.listener(
+                                        move |this, _: &gpui::ClickEvent, window, cx| {
+                                            cx.stop_propagation();
+                                            this.activate_tab(tab_idx, window, cx);
+                                            this.close_tab_entire(window, cx);
+                                        },
+                                    )),
                             ),
                     )
                     .into_any_element()
@@ -1074,23 +1141,50 @@ impl TerminalWindowView {
 
 impl Render for TerminalWindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Content area: the active tab's split tree (or single terminal when
-        // that tab has no splits yet). Pre-clone the pane handles so the
-        // recursive render borrows the tree exclusively.
+        // Content area: the active tab's split tree, a zoomed pane, or a
+        // single terminal when that tab has no splits yet. Zoom does not
+        // mutate the tree, so restoring it preserves divider positions.
         let active_tab = self.active_tab();
-        let in_split_layout = self
-            .tabs
-            .get(self.active_tab_index)
-            .map(|t| t.split_root.is_some())
+        let active_window_tab = self.tabs.get(self.active_tab_index);
+        let in_split_layout = active_window_tab
+            .map(WindowTab::is_split_layout)
             .unwrap_or(false);
+        let maximized_pane = active_window_tab.and_then(|tab| {
+            tab.maximized_pane_tab.clone().filter(|pane| {
+                tab.split_root
+                    .as_ref()
+                    .is_some_and(|root| root.contains_tab(pane))
+            })
+        });
         let search_active = active_tab
             .as_ref()
             .map(|pane| pane.read(cx).search_active)
             .unwrap_or(false);
-        let content = if let Some(root) = self
+        let content = if let Some(tab) = maximized_pane {
+            let terminal = tab.read(cx).terminal.clone();
+            let focus = tab.read(cx).focus_handle.clone();
+            div()
+                .relative()
+                .size_full()
+                .child(TerminalElement::new(terminal, tab, focus, true, true))
+                .child(
+                    div().absolute().top_2().right_2().child(
+                        IconButton::new("restore-zoomed-pane", IconName::Minimize)
+                            .icon_size(IconSize::Small)
+                            .tooltip(|_window, cx| {
+                                Tooltip::for_action("Restore Panes", &ToggleZoom, cx)
+                            })
+                            .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.toggle_zoom(&ToggleZoom, window, cx);
+                            })),
+                    ),
+                )
+                .into_any_element()
+        } else if let Some(root) = self
             .tabs
             .get_mut(self.active_tab_index)
-            .and_then(|t| t.split_root.as_mut())
+            .and_then(|tab| tab.split_root.as_mut())
         {
             let mut panes: Vec<(Entity<Terminal>, Entity<TerminalTab>, FocusHandle)> = Vec::new();
             {
@@ -1176,6 +1270,7 @@ impl Render for TerminalWindowView {
             .on_action(cx.listener(Self::split_left))
             .on_action(cx.listener(Self::split_up))
             .on_action(cx.listener(Self::split_down))
+            .on_action(cx.listener(Self::toggle_zoom))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 // Titlebar drag gesture first (it owns the flag-based latch).
                 if this.titlebar_mouse_down.get() {
@@ -1225,7 +1320,7 @@ impl Render for TerminalWindowView {
                     // make the clicked leaf the active tab's focused pane so
                     // the menu (and its split/closing actions) act on it.
                     if let Some(active) = this.tabs.get_mut(this.active_tab_index)
-                        && active.split_root.is_some()
+                        && active.is_split_layout()
                         && let Some(clicked) = split::take_clicked_leaf()
                     {
                         active.active_pane_tab = Some(clicked.clone());
