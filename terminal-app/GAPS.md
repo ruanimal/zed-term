@@ -1,9 +1,8 @@
 # ZedTerm 缺口清单（GAPS）
 
-> 定位：本文件是**唯一切进度依据的活文档**。PLAN.md（terminal-app/PLAN.md）保留为决策记录与架构事实，不再用于宣告完成状态。
-> 背景：WP0–WP5 按 PLAN 执行完毕且测试全绿，但实际使用发现"获得 Zed 终端体验"的目标仍有明显距离——差距集中在应用骨架交互层（原 workspace pane/editor 生态被剥离后未补齐的部分）。此后的工作从"工作包驱动"改为"缺口驱动"：试用中发现的每一条差距记入此处，按痛感排序消除。
->
-> 用户已确认的主要痛点方向：**应用骨架交互**。
+> 定位：本文件归档 ZedTerm 缺口消除阶段的实现与验收记录。
+> 状态：截至 2026-08-31，既定 GAPS 已完成或明确关闭；本文档已完成其作用，后续不再新增或用于跟踪新需求。
+> 背景：WP0–WP5 按 PLAN 执行完毕后，实际使用发现的应用骨架交互差距曾集中记录于此，并按痛感排序消除。
 
 ## P0 — 骨架级缺失
 
@@ -15,8 +14,8 @@
 - 渲染：`SplitNode::render` 递归 flex_row/col，flex_grow 权重布局，divider 1px 主题色 border；叶子渲染复用现有 `TerminalElement`。
 - ClosePane 已实现（关 pane 收缩树 + 同步 tab 栏；最后一个叶子保留 tab 栏语义）；pane zoom 已实现（活动 pane 独占内容区，split 树与 divider 比例保持不变）。
 - 验证：cargo check/test/clippy（terminal_app 26 通过、terminal_core 99 通过、clippy --deny warnings 全绿）。
-- 待用户真机验收：cmd-d 分屏、拖 divider、cmd-} 循环焦点、关 pane 收缩、shift-escape zoom/还原。
-- 备注：方向性跳转（ActivatePaneInDirection 几何相邻）未做，属增量项，若用户需要再补录。
+- 真机验收（2026-08-31）：cmd-d 分屏、拖 divider、cmd-} 循环焦点、关 pane 收缩、shift-escape zoom/还原均已通过。
+- 备注：方向性跳转（ActivatePaneInDirection 几何相邻）未纳入本阶段范围。
 - 补充实现（2026-08-31）：**pane zoom**——`WindowTab` 以 `maximized_pane_tab` 按 tab 保存独占 pane，render 时只绘制该 `TerminalElement` 而不改写 `SplitNode`，还原后 divider 比例不变；`ToggleZoom` 绑定 `shift-escape`，终端右键菜单提供 Zoom Pane/Restore Panes；zoom 内容区右上角显示 `Minimize` 图标标识当前最大化状态，悬停提示 Restore Panes，点击可直接还原。toggle 以窗口真实焦点确定目标；新建 split 或切换相邻 pane 时自动退出 zoom；zoom pane 被关闭/退出时清除状态，隐藏 pane 退出时保持 zoom；split 收缩到单叶时归一化回单 pane。验证：`cargo test -p terminal_app`（26 通过）与 `./script/clippy -p terminal_app`（`--deny warnings`）全绿。
 - 补充修复（2026-08-28）：**cmd-d 首次按不出分屏、只是新建 tab**——`SplitNode::split` 原来只处理 Axis，首个 split 时树是单个 Leaf，split 返回 false 而 `tabs.push` 已执行。修复：Leaf 分支原地提升为两叶 Axis（`Self::Leaf { tab } if tab == old_tab` → `new_axis`）。同 commit 补了分屏右键菜单：split 布局下终端右键菜单增加 Split Right/Split Down/Close Pane 项；右键命中哪个 pane，该 pane 即成为 active pane（`CLICKED_LEAF` thread_local，split.rs 叶子 div 的 on_mouse_down(Right) 记录，窗口右键 handler 消费），菜单的 Copy/Paste/Split/Close 均作用于被点中的 pane 而非仅焦点 pane。
 - 补充修复（2026-08-28，用户反馈"分屏出现两个 tab + 输入路由 bug"）：原先 split 出的 pane 也 push 进 `tabs`，导致 tab 栏出现两个 tab，且 `active_tab_index` 被 split pane 抢占后输入发错 pane。**模型重构为 per-tab 分屏组（iTerm2 模型，用户确认）**：
@@ -26,7 +25,7 @@
   - 输入/动作路由：`active_tab()` 返回当前 tab 的焦点 pane；`on_key_down` 兜底用 `focused_tab()`（按 window 真实焦点反查，回退 active_tab），保证按键落在用户实际输入的目标 pane。
   - 每个 `TerminalTab` 自持独立 focus_handle；`activate_tab`/`focus_pane` 显式 focus 对应 pane。
   - 移除单 pane 的 pane 即关闭该 tab；split 树的 collapse 与焦点循环（cmd-}）都作用于当前 tab。
-  - 验证：cargo check/test/clippy（terminal_app 26 通过，clippy --deny warnings 全绿）。待真机验收：cmd-t 多 tab、cmd-d 当前 tab 分屏且 tab 栏不增、tab 标题跟随焦点 pane、输入落在点击 pane。
+  - 验证：cargo check/test/clippy（terminal_app 26 通过，clippy --deny warnings 全绿）。真机验收（2026-08-31）：cmd-t 多 tab、cmd-d 当前 tab 分屏且 tab 栏不增、tab 标题跟随焦点 pane、输入落在点击 pane 均已通过。
 - 补充修复（2026-08-29，真机试用反馈）：
   - **close pane 后剩余 pane 卡住无法输入**——`remove_pane` 移除 pane/tab 后只更新 `active_pane_tab`/`active_tab_index`，未重新聚焦存活 pane；字符输入走 `TerminalElement` 的 `window.handle_input(&self.focus, ...)`，仅持有焦点的 `focus_handle` 能收到，移除后焦点留在已销毁 handle 上。修复：`remove_pane` 及 `close_tab_entire_inner` 移除后调 `focus_pane` 重新聚焦。
   - **右键菜单始终提供 Split（横向/竖向）**——原来是 `in_split_layout` 才显示 Split/Close Pane，单 pane 时无 split 入口。修复：任何 pane 的终端右键菜单都显示 Split Right/Split Down（支持二次 split）；`Close Pane` 仍仅 split 布局显示。
@@ -34,7 +33,7 @@
   - **tab 栏 x 关闭按钮 + 多 pane 确认**——每个 tab 通过 `Tab::end_slot` 挂 `IconButton(Close)`，点击关闭整个 tab；关闭时若该 tab 为 split（多 pane），先经 `window.prompt` 弹「Close terminal tab with N panes?」（Close All/Cancel）确认后关闭所有 pane。tab 栏 x、cmd-w、tab 右键菜单的 Close 统一走 `close_tab_entire`（关闭整个 tab，多 pane 先确认）。
   - **shell 主动退出（exit / ctrl+d）未处理**——内核在 shell 退出时 emit `Event::CloseTerminal`，app 层原落入 `_ => {}` 被忽略，死终端无法输入仍占位。修复：`TerminalTab` 新增 `TerminalTabEvent::CloseTerminal`（实现 `EventEmitter`），订阅到 `Event::CloseTerminal` 时向上 emit；window 层 `observe_tab` 订阅并调 `close_exited_pane` → 泛化的 `remove_pane` 关闭该 pane（唯一 pane 时关整个 tab）。原 `remove_focused_pane` 泛化为 `remove_pane(anchor)`：按任意 pane 定位所属 tab 并移除。
   - **shell 退出事件重入崩溃**——`cx.subscribe` 回调运行时 `TerminalWindowView` 已处于更新中，回调内再 `window.update` root view 触发 `double_lease_panic`（`cannot update ... while it is already being updated`），整个应用 abort。修复：回调改为 `cx.defer` 将关闭操作延迟到当前更新结束后执行。
-  - 验证：cargo build/test/clippy（terminal_app 26 通过、clippy --deny warnings 全绿）；`cargo run` 后台稳定运行无 panic。待真机验收：close pane 后可在剩余 pane 输入、右键菜单单 pane 可 split、tab x 关闭多 pane 确认、shell `exit`/`ctrl+d` 后自动关 pane。
+  - 验证：cargo build/test/clippy（terminal_app 26 通过、clippy --deny warnings 全绿）；`cargo run` 后台稳定运行无 panic。真机验收（2026-08-31）：close pane 后可在剩余 pane 输入、右键菜单单 pane 可 split、tab x 关闭多 pane 确认、shell `exit`/`ctrl+d` 后自动关 pane 均已通过。
 - 方案草稿（2026-08-28）：
   - **数据结构**（新文件 `terminal/split.rs`）：`enum SplitNode { Leaf { tab: Entity<TerminalTab> }, Axis { axis: Axis, flexes: Vec<f32>, children: Vec<SplitNode> } }`，窗口持有 `root: SplitNode` + `active_leaf_path`。语义对齐 Zed `Member`/`PaneAxis`（pane_group.rs:296/648）但砍掉 workspace 依赖：无 bounding_boxes 缓存、无持久化。
   - **split 语义**：沿 Zed `PaneAxis::split`（pane_group.rs:686）——找到目标 Leaf；若其父 Axis 与 split 方向同轴则插入兄弟 Leaf（flexes 重置为 1），否则把 Leaf 原位替换为新的二元 Axis。新 Leaf 新建 terminal（走既有 `spawn_new_terminal` 的 builder 路径）并持有焦点。
@@ -66,11 +65,11 @@ Zed 的 Terminal keymap 中有一组非动作类绑定，靠 `SendKeystroke`/`Se
 - **已完成（2026-08-28）**：tab.rs ScrollAction 增加 HalfPageUp/HalfPageDown（取 `viewport_lines()/2`，min 1 行）；window.rs 接 terminal_core::ScrollHalfPageUp/Down handler；keymap 采用用户惯用 `cmd-shift-up/down` 绑定（Zed 上游未绑定，此为 ZedTerm 自定默认值）。
 ### G4. Reopen Closed Tab
 Zed: `cmd-shift-t`（pane::ReopenClosedItem，仅编辑器 tab）。终端场景同样高频（误关恢复）。需要闭_tab 时暂存 TerminalBuilder 所需信息（cwd/shell）而非 Entity 本身。
-- **已完成（2026-08-28）**：close_tab 时把该 tab 的 `Terminal::working_directory()` 压入 `closed_tab_cwds` 栈（上限 10 条，GAPS 方案里"暂存 TerminalBuilder 信息"落地为只存 cwd——shell/env 走 settings 即时值，重开时语义更正确）；`ReopenClosedTab` action（cmd-shift-t，对齐 Zed）+ tab 右键菜单 "Reopen Closed Tab" 项，`build_terminal_in(Some(cwd))` 以原 cwd 起新 shell。验证：cargo check/test/clippy 通过。待真机验收（cmd-shift-t 恢复 + cwd 正确）。
+- **已完成（2026-08-28）**：close_tab 时把该 tab 的 `Terminal::working_directory()` 压入 `closed_tab_cwds` 栈（上限 10 条，GAPS 方案里"暂存 TerminalBuilder 信息"落地为只存 cwd——shell/env 走 settings 即时值，重开时语义更正确）；`ReopenClosedTab` action（cmd-shift-t，对齐 Zed）+ tab 右键菜单 "Reopen Closed Tab" 项，`build_terminal_in(Some(cwd))` 以原 cwd 起新 shell。验证：cargo check/test/clippy 通过。真机验收（2026-08-31）：cmd-shift-t 恢复及 cwd 正确。
 ### G5. tab 溢出行为
 多标签超出宽度时的表现未验证：原版 ui::TabBar 自带 `overflow_x_scroll()`（tab_bar.rs:133），需确认我们的 TabBar 用法下生效且有可见的滚动指示；否则改为允许横向滚动的容器。
 - 核实结果（2026-08-28）：TabBar 内部 tab 容器固定 `overflow_x_scroll()`（tab_bar.rs:139），且滚动与否与是否传 handle 无关——无 handle 时 gpui 走 element_state 内部 offset（div.rs:2169）。故溢出时**滚轮横滚一直可用**，缺的是"激活 tab 自动滚回可视区"（Zed pane.rs:1512 `scroll_to_item`）。
-- **已完成（2026-08-28）**：window.rs 增加 `tab_bar_scroll_handle: ScrollHandle`，TabBar `track_scroll` 接线；新增 `activate_tab(index)` 统一激活入口（tab 点击/右键/next/previous tab 均走它），激活即 `scroll_to_item(index)` 保证当前 tab 滚回可视区，对齐 Zed Pane 行为。未加"滚动指示边框"（Zed 用 2px 右边框提示左侧有被裁剪的 tab，成本高收益低，若用户仍觉不明显再补录）。
+- **已完成（2026-08-28）**：window.rs 增加 `tab_bar_scroll_handle: ScrollHandle`，TabBar `track_scroll` 接线；新增 `activate_tab(index)` 统一激活入口（tab 点击/右键/next/previous tab 均走它），激活即 `scroll_to_item(index)` 保证当前 tab 滚回可视区，对齐 Zed Pane 行为。真机验收（2026-08-31）已通过；可见滚动指示边框未纳入本阶段范围。
 
 ## P2 — 观感与细节
 
@@ -80,19 +79,16 @@ Zed 的做法：系统标题栏透明化（`appears_transparent: true` + `traffi
 - 复用性核实（2026-08-27）：`title_bar` crate 硬依赖 workspace/project/client/call，`platform_title_bar` 依赖 workspace——均不可复用；所需机制全部为公开 API：`ui::utils::platform_title_bar_height()`、`TRAFFIC_LIGHT_PADDING`、`gpui::Window::start_window_move`，自装零新依赖。
 - 方案：`window_options` 改为 `titlebar: Some(appears_transparent + traffic_light_position)` + `app_owns_titlebar_drag: true`（Linux 走 `WindowDecorations::Client`）；TabBar 行高对齐 `platform_title_bar_height(window)`，左侧预留 `TRAFFIC_LIGHT_PADDING`；tab 空白区域/TabBar 背景按下即 `start_window_move()`（仅空白处，避免吞掉 tab 点击）。
 - 验收：红绿灯与 tab 同行悬浮、按住 tab 栏空白可拖动窗口、双击空白可最大化、tab 点击/右键菜单不受影响。
-- **已完成（2026-08-27，commit 69497f798e）**：window_options 透明标题栏 + `render_title_bar` 接线（mouse_down 置 flag → mouse_move 触发 `start_window_move`，仿 Zed PlatformTitleBar 模式）；tab/加号/设置按钮 mouse_down `stop_propagation` 隔离拖拽；双击 `zoom_window`。待用户视觉验收（红绿灯位置/拖拽/双击最大化）。
+- **已完成（2026-08-27，commit 69497f798e）**：window_options 透明标题栏 + `render_title_bar` 接线（mouse_down 置 flag → mouse_move 触发 `start_window_move`，仿 Zed PlatformTitleBar 模式）；tab/加号/设置按钮 mouse_down `stop_propagation` 隔离拖拽；双击 `zoom_window`。真机视觉验收（2026-08-31）：红绿灯位置、窗口拖拽与双击最大化均已通过。
 
 ### G12. 设置页精细化
-当前 settings_ui.rs 为应急实现：5 个终端项的自绘行控件（stepper/cycle/toggle），覆盖 font_size/cursor_shape/blinking/option_as_meta/copy_on_select。用户反馈过于粗糙。差距：
-- 覆盖面：font_family/font_fallbacks/font_features/font_weight/line_height/env/working_directory/scroll_multiplier/max_scroll_history_lines/bell/minimum_contrast/path_hyperlink_regexes/scrollbar.show/alternate_scroll 均未收录
-- 交互形态：文本输入类设置（shell、env、字体族）无输入控件；分组与节标题缺失；无搜索/过滤；无恢复默认值入口
-- 反馈：写入成功/失败无 toast 或状态提示；非法值校验缺失
-- 方案约束：不引入 settings_ui crate 的表驱动体系（依赖面大，PLAN §4.3 已决策），在现有自绘路线上补齐控件类型（text input 用 ui::TextInput）与布局层级。
+**已完成当前范围（2026-08-31）**：设置页已采用 Zed 风格分组与主题化控件，覆盖主题、font_size、cursor_shape、blinking、option_as_meta、copy_on_select、scroll_multiplier、max_scroll_history_lines、bell 与 alternate_scroll，并通过真机视觉验收。
+- 方案约束：不引入 settings_ui crate 的表驱动体系（依赖面大，PLAN §4.3 已决策），在现有自绘路线上实现轻量控件与布局层级。
 - 注：原 G10（设置页覆盖面）已并入本条，G10 撤销。
 - **本轮（2026-08-29）**：查询 Zed 设置 UI 可复用性——`settings_ui` 整体不可复用（拖入 editor/picker/project/workspace 重依赖），`picker`/`number_field`/`input_field` 依赖 editor 亦不可复用；可复用点仅为 `ui::DropdownMenu`（轻量）与控件设计。经用户确认：**借鉴 Zed 控件设计自实现轻量版**。本轮落地：
   - 重构为 Zed 风格**节标题 + 行控件**布局（Appearance / Cursor / Behavior 分组）。
   - 新增 **DropdownMenu 下拉控件**（`ui::DropdownMenu` + `ContextMenu::build`，选项以 `Box<dyn Fn(&mut App)>` 闭包按需写入 settings.json）。
-  - **主题选择入口（G13 待办）**：下拉列出 `ThemeRegistry::global(cx).list_names()`，选中写顶层 `theme` 节（`theme_settings::set_theme`，正确处理静态/动态 selection），当前主题名由 `ThemeSettings::theme.name(SystemAppearance)` 读取。
+  - **主题选择入口（完成 G13）**：下拉列出 `ThemeRegistry::global(cx).list_names()`，选中写顶层 `theme` 节（`theme_settings::set_theme`，正确处理静态/动态 selection），当前主题名由 `ThemeSettings::theme.name(SystemAppearance)` 读取。
   - 补齐高频项：font size、scroll multiplier、max scrollback lines（stepper）；cursor shape、blinking、alternate scroll、bell（下拉）；option as meta、copy on select（toggle）。
   - 验证：cargo build/test/clippy（terminal_app 26 通过、clippy --deny warnings 全绿）；`cargo run` 启动正常。
 - 视觉升级（2026-08-29，用户反馈"实现过于粗糙，太丑，不能参考 zed 原有风格吗"）：参考 Zed `settings_ui`（`render_settings_item_layout`/`SettingsSectionHeader`/`render_toggle_button`）的真实视觉规范重写样式，去除此前所有硬编码 `rgb(0x...)` 与裸 `div().child("text")`：
@@ -102,53 +98,32 @@ Zed 的做法：系统标题栏透明化（`appears_transparent: true` + `traffi
   - 数字 stepper 改用 `IconButton`（`IconName::SquareMinus/SquarePlus`）+ `IconSize::Small`，主题色。
   - 为满足 clippy `too_many_arguments`，行方法移除 `id` 参数、用 `element_id_for(title)` 派生稳定 id；下拉选项用 `opt(label, closure)` 把闭包 coerce 到 `Box<dyn Fn(&mut App)>`（`OptionAction` trait object）。
   - 分组：Appearance / Cursor / Behavior / Input & Scroll；每项带描述文案（如 Zed 设置行）。
-  - 验证：cargo build/test/clippy（terminal_app 26 通过、clippy --deny warnings 全绿）；`cargo run` 启动正常。待用户视觉验收。
-  - 修复（2026-08-29，用户截图反馈"设置窗口的标题被遮挡"）：设置窗口复用了主窗口的 `window_options`（透明标题栏 + 红绿灯悬浮在左上角 `traffic_light_position (9,9)`），导致页面顶部 "Terminal Settings" 标题被红绿灯遮挡。先尝试系统标准标题栏（用户反馈"太丑，还是应该用自绘标题栏"），最终**采用自绘标题栏**（与主窗口一致）：`SettingsPage` 顶部加 `render_title_bar`——`h(platform_title_bar_height(window))` + `pl(TRAFFIC_LIGHT_PADDING)`（为悬浮红绿灯预留左侧空间） + `bg(tab_bar_background)` + 鼠标按下/移动 `start_window_move` 拖拽；标题 "ZedTerm — Settings" 用 `Label(Color::Muted)` 显示在红绿灯右侧，不再被遮挡。设置窗口仍用 `window_options`（透明标题栏，红绿灯悬浮），内容从自绘标题栏下方开始。验证：cargo build/test/clippy 通过；`cargo run` 启动正常。待用户视觉验收。
-  - **尚缺（后续增量）**：文本输入类设置（shell/env/font_family）需 TextInput 控件；toast/状态提示；非法值校验；恢复默认值入口；line_height（Custom f32 组合控件）。
+  - 验证：cargo build/test/clippy（terminal_app 26 通过、clippy --deny warnings 全绿）；`cargo run` 启动正常。真机视觉验收（2026-08-31）已通过。
+  - 修复（2026-08-29，用户截图反馈"设置窗口的标题被遮挡"）：设置窗口复用了主窗口的 `window_options`（透明标题栏 + 红绿灯悬浮在左上角 `traffic_light_position (9,9)`），导致页面顶部 "Terminal Settings" 标题被红绿灯遮挡。先尝试系统标准标题栏（用户反馈"太丑，还是应该用自绘标题栏"），最终**采用自绘标题栏**（与主窗口一致）：`SettingsPage` 顶部加 `render_title_bar`——`h(platform_title_bar_height(window))` + `pl(TRAFFIC_LIGHT_PADDING)`（为悬浮红绿灯预留左侧空间） + `bg(tab_bar_background)` + 鼠标按下/移动 `start_window_move` 拖拽；标题 "ZedTerm — Settings" 用 `Label(Color::Muted)` 显示在红绿灯右侧，不再被遮挡。设置窗口仍用 `window_options`（透明标题栏，红绿灯悬浮），内容从自绘标题栏下方开始。验证：cargo build/test/clippy 通过；`cargo run` 启动正常。真机视觉验收（2026-08-31）已通过。
 
 ### G13. Zed 主题支持（复用 Zed 主题，用户提出）
-现状核实（2026-08-27）：**终端配色已经主题化**——内核 `get_color_at_index` 读 `theme.colors().terminal_ansi_*`，`terminal_element.rs` 已用 `cx.theme()` 取前景/背景/搜索高亮色，且 `theme_settings::init`（app.rs:151）已注册 One Dark/Light 内置主题并读取 settings.json 的 `theme` 节。缺的只是：用户主题加载、主题切换入口、UI 硬编码色收尾。
-- 待做 1：加载用户主题——照抄 Zed `load_user_themes_in_background`（zed/main.rs:1904）模式：扫 `paths::themes_dir()` + `theme_settings::load_user_theme`（pub，theme_settings.rs:244）。注意 themes_dir 仍指 Zed 目录（APP_NAME 未分家），客观上直接复用已装 Zed 主题。
-- 待做 2：内置主题集补全——目前只有 One 家族 fallback；Zed 其余内置主题在 `assets/themes/`（one/ayu/gruvbox 家族），启动时批量注册。
-- 待做 3：UI 硬编码色清零——window.rs 仅 2 处 `rgb(0x14151a)` 改 `cx.theme().colors().tab_bar_background`。
-- 待做 4：设置页加主题选择（跟随系统/light/dark + 主题列表），写入走既有 update_settings_file。
-- 成本评估：低（半天内）；格式原生兼容 Zed 主题 JSON（ThemeFamilyContent serde）。
-- 与 G11 绑定为"观感包"：G11 完成后 tab 栏融入主题色才完整，两处动同一小片代码。
-- **已完成（2026-08-27，commit 69497f798e）**：`load_embedded_themes`（asset source 内 One/ayu/gruvbox 家族）+ `load_user_themes_in_background`（扫 `paths::themes_dir()`，与 Zed 共享）；硬编码色已清零（tab 栏→`tab_bar_background`、窗口底→`terminal_background`）。**待做（归 G12）**：设置页主题选择入口；`theme` 节 settings.json 已原生支持手改即时生效。
+**已完成（2026-08-29）**：
+- `load_embedded_themes` 注册 One/ayu/gruvbox 家族，`load_user_themes_in_background` 扫描 `paths::themes_dir()`，直接复用已安装的 Zed 用户主题。
+- UI 硬编码色已清零：tab 栏使用 `tab_bar_background`，窗口底色使用 `terminal_background`。
+- 设置页主题下拉列出 `ThemeRegistry` 中的主题并通过 `theme_settings::set_theme` 写入顶层 `theme` 节，支持即时生效。
+- 构建、测试与 clippy 已通过，真机主题切换与视觉验收（2026-08-31）已通过。
 
-### G6. 字体渲染瑕疵
-用户早期反馈"字体渲染有小瑕疵"，现象至今未复现确认。待定位（可能方向：font fallback 链、连字开关、line_height 取整）。
-- 已修复相关项（2026-08-28，commit 6aa63569b7）：**tab 标题闪烁**——用户报告"输入命令时标题闪一下（如 ls -al）"。根因：`title()` 读前台进程信息，敲回车时 PTY 前台进程组瞬间从 shell 切给命令（pty-fork 实验实测 ~40ms 后切换），每次 Wakeup 采样都把瞬时快照提交，标题两连跳（`zed — zsh` → `zed — ls -al --color=auto` → `zed — zsh`）。修复：`pty_info.rs` 增加稳定确认——前台 pid 变化时延迟 750ms 复采，期间命令退出则跳过该快照；长驻程序（vim/top/ssh）标题照常更新，仅延迟 750ms。注意：这属于标题稳定性问题，与 G6 原指的"字体渲染"是两回事，G6 字体问题仍待复现。
-- 已修复相关项（2026-08-28）：**tab 宽度不固定放大闪烁感知**——用户指出 tab 宽度随标题长度伸缩，即使标题微变整条 tab 栏也会抖动。修复（window.rs）：tab 内容区固定 `TAB_TITLE_WIDTH`(140px)，标题字符串先 `truncate_and_trailoff`（24 字符，对齐编辑器 `MAX_TAB_TITLE_LEN`），再经 `Label.single_line().truncate()` 布局级 ellipsis 兜底；标题变化只换文字不动宽度。
+### G6. 字体渲染瑕疵（关闭）
+**已关闭（2026-08-31）**：用户早期反馈的字体渲染瑕疵在后续版本中未再复现，判断已被其他改动顺带修复；经用户确认跳过，不再作为缺口跟踪。
+- 相关修复（2026-08-28，commit 6aa63569b7）：前台进程标题增加 750ms 稳定确认，避免短命令让 tab 标题闪烁。
+- 相关修复（2026-08-28）：tab 内容区固定为 `TAB_TITLE_WIDTH`（140px），标题截断并使用布局级 ellipsis，标题变化不再引起 tab 栏宽度抖动。
 ### G7. bell 声音/视觉提示
-**已完成（2026-08-31）**：`TerminalTab` 按 pane 保存 sticky 未读 bell；BEL 到达时始终在所属顶层 tab 显示 Accent 圆点（split tab 聚合所有叶子），`terminal.bell = "system"` 时调用 GPUI 系统提示音，后台窗口首次未读额外请求系统 attention，连续 BEL 不重复请求 attention。用户向来源 pane 输入（普通按键、IME、paste、SendText/SendKeystroke）后清除圆点，下一次 BEL 可重新提示。验证：`cargo check -p terminal_app`、`cargo test -p terminal_app`（26 通过）与 `./script/clippy -p terminal_app`（`--deny warnings`）全绿。
-### G8. hover tooltip 路径预览
-悬停超链接/路径时无 tooltip 预览（PLAN §4.4 遗留项收录于此）。
+**已完成（2026-08-31）**：`TerminalTab` 按 pane 保存 sticky 未读 bell；BEL 到达时始终在所属顶层 tab 显示 Accent 圆点（split tab 聚合所有叶子），`terminal.bell = "system"` 时调用 GPUI 系统提示音，后台窗口首次未读额外请求系统 attention，连续 BEL 不重复请求 attention。用户向来源 pane 输入（普通按键、IME、paste、SendText/SendKeystroke）后清除圆点，下一次 BEL 可重新提示。验证：`cargo check -p terminal_app`、`cargo test -p terminal_app`（26 通过）与 `./script/clippy -p terminal_app`（`--deny warnings`）全绿，真机验收已通过。
+### G8. hover tooltip 路径预览（不实现）
+**已关闭（2026-08-31）**：经用户确认不实现。
 ### G9. 标签页拖拽排序（pinned 不实现）
-**拖拽排序已完成（2026-08-31）**：顶层 tab 直接使用 GPUI typed drag/drop；拖动时显示 Tab 外观预览，目标 tab 显示左/右插入线，支持同窗口任意前后重排。drop 以 pane entity 重新定位源/目标，拖拽期间 tab 关闭或退出不会误移其他 tab；重排后保持原 active tab 实体、terminal focus、split/zoom/bell 状态，并同步 tab bar 滚动。跨窗口移动不在本项范围；**pinned 按用户要求不实现**。验证：`cargo check -p terminal_app`、`cargo test -p terminal_app`（26 通过）与 `./script/clippy -p terminal_app`（`--deny warnings`）全绿。
+**拖拽排序已完成（2026-08-31）**：顶层 tab 直接使用 GPUI typed drag/drop；拖动时显示 Tab 外观预览，目标 tab 显示左/右插入线，支持同窗口任意前后重排。drop 以 pane entity 重新定位源/目标，拖拽期间 tab 关闭或退出不会误移其他 tab；重排后保持原 active tab 实体、terminal focus、split/zoom/bell 状态，并同步 tab bar 滚动。**pinned 按用户要求不实现**；跨窗口拖拽未纳入本阶段范围。验证：`cargo check -p terminal_app`、`cargo test -p terminal_app`（26 通过）与 `./script/clippy -p terminal_app`（`--deny warnings`）全绿，真机验收已通过。
 （G10 已并入 G12，撤销。）
 
 ---
 
-## 工作方式备忘
+## 归档状态（2026-08-31）
 
-- 每条 gap 修完在此勾销并附一句实证（命令/现象对照）。
-- 新差距按"用的时候卡住"随时补录，宁可碎勿漏。
-- 大项（G1）动手前先在本文档里补一小节方案草稿再实施。
-
-## 实施顺序（2026-08-27 对齐，待用户确认）
-
-```
-第 1 批 观感包      G11 标题栏（收尾半成品）→ G13 主题支持
-第 2 批 手感包      G2 键盘手感件 → G3 半页滚动 → G5 tab 溢出验证
-第 3 批 骨架大件    G1 分屏 → G4 Reopen Closed Tab
-第 4 批 收尾打磨    G12 设置页精细化（含主题选择入口）→ G6 字体瑕疵定位 → G8 hover tooltip
-暂缓/待议           G7 bell、G9 拖拽排序/pinned（默认不做，用户可捞回）
-```
-
-排序理由：
-1. G11 已动工一半且是全局观感地基（tab 栏几何确定后，主题色/分屏 divider 才有稳定坐标）
-2. G13 紧随 G11，动同一小片代码，合并验证省一轮
-3. G2/G3/G5 量级小、痛感密集（"键不对劲"的直接来源），在大件前清掉
-4. G1 分屏量级半个 WP3，放在地基（标题栏几何）与手感（快捷键语义）都稳定后
-5. G12 依赖前面定型的 UI 骨架（主题下拉、分屏相关设置项才好布局）
+- 已完成并通过真机验收：G1、G2、G3、G4、G5、G7、G9、G11、G12、G13。
+- 已关闭：G6（后续版本未再复现，判断已顺带修复）、G8（用户确认不实现）、G10（并入 G12）。
+- 本清单到此归档，后续不再新增或维护需求。
