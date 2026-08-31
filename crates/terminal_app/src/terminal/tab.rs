@@ -19,6 +19,9 @@ pub(crate) enum TerminalTabEvent {
     /// The pane's shell exited (typed `exit`, `Ctrl+D`, ...); the pane (and
     /// if it was its tab's only pane, the tab) should be closed.
     CloseTerminal,
+    /// The terminal emitted BEL. `newly_notified` distinguishes the first
+    /// unread bell from repeats so window attention is requested only once.
+    Bell { newly_notified: bool },
 }
 
 struct ImeState {
@@ -40,6 +43,8 @@ pub struct TerminalTab {
     pub search_active: bool,
     /// Index into `terminal.matches` of the match the user last activated.
     pub active_match: Option<usize>,
+    /// Sticky unread bell state, cleared when input is sent to this pane.
+    has_bell: bool,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -56,6 +61,7 @@ impl TerminalTab {
             search_query: String::new(),
             search_active: false,
             active_match: None,
+            has_bell: false,
             _subscriptions: Vec::new(),
         };
 
@@ -63,7 +69,7 @@ impl TerminalTab {
         // pick them up; the element reads `title()` every frame.
         this._subscriptions
             .push(
-                cx.subscribe(&this.terminal, |_this, _terminal, event, cx| match event {
+                cx.subscribe(&this.terminal, |this, _terminal, event, cx| match event {
                     // PTY output arrives as a Wakeup event, not an `Entity::notify`;
                     // repaint immediately (this is the no-heartbeat path).
                     Event::Wakeup | Event::TitleChanged | Event::BreadcrumbsChanged => cx.notify(),
@@ -74,6 +80,12 @@ impl TerminalTab {
                             cx.open_url(&format!("file://{}", target.maybe_path));
                         }
                     },
+                    Event::Bell => {
+                        let newly_notified = !this.has_bell;
+                        this.has_bell = true;
+                        cx.notify();
+                        cx.emit(TerminalTabEvent::Bell { newly_notified });
+                    }
                     // The shell exited on its own (`exit`, `Ctrl+D`): tell the
                     // window to tear this pane down rather than leaving a dead
                     // shell accepting no input.
@@ -96,6 +108,17 @@ impl TerminalTab {
 
     pub fn title(&self, cx: &App) -> String {
         self.terminal.read(cx).title(false)
+    }
+
+    pub(crate) fn has_bell(&self) -> bool {
+        self.has_bell
+    }
+
+    pub(crate) fn clear_bell(&mut self, cx: &mut Context<Self>) {
+        if self.has_bell {
+            self.has_bell = false;
+            cx.notify();
+        }
     }
 
     pub(crate) fn scroll_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
@@ -144,6 +167,7 @@ impl TerminalTab {
     /// Commits (sends) the given text to the PTY. Called by `InputHandler::replace_text_in_range`.
     pub(crate) fn commit_text(&mut self, text: &str, cx: &mut Context<Self>) {
         if !text.is_empty() {
+            self.clear_bell(cx);
             self.terminal.update(cx, |term, _| {
                 term.input(text.to_string().into_bytes());
             });
@@ -164,6 +188,7 @@ impl TerminalTab {
             return;
         };
         if !text.is_empty() {
+            self.clear_bell(cx);
             self.terminal.update(cx, |term, _| term.paste(&text));
             cx.notify();
         }

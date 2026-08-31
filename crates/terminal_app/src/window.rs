@@ -8,13 +8,14 @@ use std::time::Duration;
 
 use collections::HashMap;
 use gpui::{
-    AnyElement, AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _,
+    AnyElement, App, AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, PromptLevel, Render, ScrollHandle,
     StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, anchored,
     deferred, div, prelude::FluentBuilder, px,
 };
 use settings::Settings as _;
+use settings::settings_content::TerminalBell;
 use terminal_core::terminal_settings::TerminalSettings;
 use terminal_core::{
     Clear as TerminalClear, Copy as TerminalCopyAction, Paste as TerminalPasteAction,
@@ -25,8 +26,9 @@ use terminal_core::{
 use theme::ActiveTheme as _;
 use ui::utils::{TRAFFIC_LIGHT_PADDING, platform_title_bar_height};
 use ui::{
-    ButtonCommon as _, Clickable as _, ContextMenu, IconButton, IconName, IconSize, Label,
-    LabelCommon as _, LabelSize, Tab, TabBar, TabPosition, Toggleable as _, Tooltip,
+    ButtonCommon as _, Clickable as _, Color, ContextMenu, IconButton, IconName, IconSize,
+    Indicator, Label, LabelCommon as _, LabelSize, Tab, TabBar, TabPosition, Toggleable as _,
+    Tooltip,
 };
 use util::ResultExt;
 use util::paths::PathStyle;
@@ -103,6 +105,25 @@ impl WindowTab {
         self.active_pane_tab.clone()
     }
 
+    fn contains_pane(&self, pane: &Entity<TerminalTab>) -> bool {
+        self.split_root.as_ref().map_or_else(
+            || self.active_pane_tab.as_ref() == Some(pane),
+            |root| root.contains_tab(pane),
+        )
+    }
+
+    fn has_bell(&self, cx: &App) -> bool {
+        if let Some(root) = self.split_root.as_ref() {
+            let mut panes = Vec::new();
+            root.collect_tabs(&mut panes);
+            panes.into_iter().any(|pane| pane.read(cx).has_bell())
+        } else {
+            self.active_pane_tab
+                .as_ref()
+                .is_some_and(|pane| pane.read(cx).has_bell())
+        }
+    }
+
     fn is_split_layout(&self) -> bool {
         self.split_root
             .as_ref()
@@ -111,6 +132,53 @@ impl WindowTab {
 
     fn is_pane_maximized(&self) -> bool {
         self.maximized_pane_tab.is_some()
+    }
+}
+
+#[derive(Clone)]
+struct DraggedTerminalTab {
+    source_window: gpui::EntityId,
+    source_view: WeakEntity<TerminalWindowView>,
+    pane: Entity<TerminalTab>,
+    title: String,
+    is_active: bool,
+}
+
+impl DraggedTerminalTab {
+    fn ordering_relative_to(
+        &self,
+        target_pane: &Entity<TerminalTab>,
+        cx: &App,
+    ) -> Option<Ordering> {
+        self.source_view
+            .read_with(cx, |source_view, _| {
+                let source_index = source_view
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.contains_pane(&self.pane))?;
+                let target_index = source_view
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.contains_pane(target_pane))?;
+                Some(target_index.cmp(&source_index))
+            })
+            .ok()
+            .flatten()
+    }
+}
+
+impl Render for DraggedTerminalTab {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        Tab::new("dragged-terminal-tab")
+            .toggle_state(self.is_active)
+            .child(
+                div().w(TAB_TITLE_WIDTH).child(
+                    Label::new(self.title.clone())
+                        .single_line()
+                        .truncate()
+                        .size(LabelSize::Small),
+                ),
+            )
     }
 }
 
@@ -183,26 +251,49 @@ impl TerminalWindowView {
         }));
         self._subscriptions
             .push(cx.subscribe(tab, |_this, pane, event, cx| {
-                // A pane's shell exited and must be torn down. The subscribe
-                // callback runs while `TerminalWindowView` is already being
-                // updated, so update it again (which `window.update` on the
-                // root view would do) can't be done inline — it would double
-                // lease the entity. Defer the teardown until the current update
-                // has finished.
-                let TerminalTabEvent::CloseTerminal = event;
-                let this = cx.entity();
+                // The callback runs while `TerminalWindowView` is already
+                // being updated, so defer window-level handling to avoid a
+                // double lease. Resolve the window by its root entity rather
+                // than using the active window, because a background terminal
+                // window may be the source of the event.
+                let event = *event;
+                let source = cx.entity();
                 let pane = pane.clone();
                 cx.defer(move |cx| {
-                    let Some(window) = cx.active_window() else {
-                        return;
-                    };
-                    window
-                        .update(cx, |_, window, cx| {
-                            this.update(cx, |this, cx| this.close_exited_pane(&pane, window, cx));
-                        })
-                        .log_err();
+                    for any_window in cx.windows() {
+                        let Some(window_handle) = any_window.downcast::<Self>() else {
+                            continue;
+                        };
+                        let Ok(window_entity) = window_handle.entity(cx) else {
+                            continue;
+                        };
+                        if window_entity != source {
+                            continue;
+                        }
+                        window_handle
+                            .update(cx, |this, window, cx| match event {
+                                TerminalTabEvent::CloseTerminal => {
+                                    this.close_exited_pane(&pane, window, cx);
+                                }
+                                TerminalTabEvent::Bell { newly_notified } => {
+                                    this.handle_bell(newly_notified, window, cx);
+                                }
+                            })
+                            .log_err();
+                        break;
+                    }
                 });
             }));
+    }
+
+    fn handle_bell(&mut self, newly_notified: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if TerminalSettings::get_global(cx).bell == TerminalBell::System {
+            window.play_system_bell();
+        }
+        if newly_notified && !window.is_window_active() {
+            window.request_attention();
+        }
+        cx.notify();
     }
 
     /// Activates the tab at `index` and keeps it visible in the tab bar even
@@ -221,6 +312,52 @@ impl TerminalWindowView {
         cx.notify();
     }
 
+    fn reorder_tab(
+        &mut self,
+        dragged: &DraggedTerminalTab,
+        target_pane: &Entity<TerminalTab>,
+        cx: &mut Context<Self>,
+    ) {
+        if dragged.source_window != cx.entity_id() {
+            return;
+        }
+        let Some(source_index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.contains_pane(&dragged.pane))
+        else {
+            return;
+        };
+        let Some(target_index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.contains_pane(target_pane))
+        else {
+            return;
+        };
+        if source_index == target_index {
+            return;
+        }
+
+        let active_pane = self
+            .tabs
+            .get(self.active_tab_index)
+            .and_then(WindowTab::focused_tab);
+        let moved_tab = self.tabs.remove(source_index);
+        let destination_index = target_index.min(self.tabs.len());
+        self.tabs.insert(destination_index, moved_tab);
+        self.active_tab_index = active_pane
+            .and_then(|active_pane| {
+                self.tabs
+                    .iter()
+                    .position(|tab| tab.contains_pane(&active_pane))
+            })
+            .unwrap_or_else(|| self.active_tab_index.min(self.tabs.len().saturating_sub(1)));
+        self.tab_bar_scroll_handle
+            .scroll_to_item(self.active_tab_index);
+        cx.notify();
+    }
+
     /// Runs `f` against the active tab's focused pane. Actions like
     /// copy/paste/scroll target whichever pane the user is actually typing in.
     fn with_active_tab(
@@ -231,6 +368,21 @@ impl TerminalWindowView {
         let Some(tab) = self.active_tab() else {
             return;
         };
+        tab.update(cx, f);
+    }
+
+    fn with_focused_tab(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut TerminalTab, &mut Context<TerminalTab>),
+    ) {
+        let Some(tab) = self.focused_tab(window, cx) else {
+            return;
+        };
+        if let Some(active) = self.tabs.get_mut(self.active_tab_index) {
+            active.active_pane_tab = Some(tab.clone());
+        }
         tab.update(cx, f);
     }
 
@@ -267,17 +419,17 @@ impl TerminalWindowView {
         self.with_active_tab(cx, |tab, cx| tab.copy_selection(cx));
     }
 
-    fn paste(&mut self, _: &TerminalPasteAction, _window: &mut Window, cx: &mut Context<Self>) {
-        self.with_active_tab(cx, |tab, cx| tab.paste_clipboard(cx));
+    fn paste(&mut self, _: &TerminalPasteAction, window: &mut Window, cx: &mut Context<Self>) {
+        self.with_focused_tab(window, cx, |tab, cx| tab.paste_clipboard(cx));
     }
 
     fn paste_text(
         &mut self,
         _: &TerminalPasteTextAction,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.with_active_tab(cx, |tab, cx| tab.paste_clipboard(cx));
+        self.with_focused_tab(window, cx, |tab, cx| tab.paste_clipboard(cx));
     }
 
     fn clear(&mut self, _: &TerminalClear, _window: &mut Window, cx: &mut Context<Self>) {
@@ -647,13 +799,14 @@ impl TerminalWindowView {
     fn send_text(
         &mut self,
         SendText(text): &SendText,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if text.is_empty() {
             return;
         }
-        self.with_active_tab(cx, |tab, cx| {
+        self.with_focused_tab(window, cx, |tab, cx| {
+            tab.clear_bell(cx);
             tab.terminal.update(cx, |term, _| {
                 term.input(text.clone().into_bytes());
             });
@@ -667,7 +820,7 @@ impl TerminalWindowView {
     fn send_keystroke(
         &mut self,
         SendKeystroke(key): &SendKeystroke,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Ok(keystroke) = gpui::Keystroke::parse(key) else {
@@ -675,7 +828,8 @@ impl TerminalWindowView {
             return;
         };
         let option_as_meta = TerminalSettings::get_global(cx).option_as_meta;
-        self.with_active_tab(cx, |tab, cx| {
+        self.with_focused_tab(window, cx, |tab, cx| {
+            tab.clear_bell(cx);
             tab.terminal.update(cx, |term, _| {
                 term.try_keystroke(&keystroke, option_as_meta);
             });
@@ -1055,15 +1209,26 @@ impl TerminalWindowView {
     /// its title).
     fn render_tab_children(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let tab_count = self.tabs.len();
+        let source_window = cx.entity_id();
+        let source_view = cx.weak_entity();
         self.tabs
             .iter()
             .enumerate()
             .map(|(idx, tab)| {
-                let title = tab
-                    .focused_tab()
+                let has_bell = tab.has_bell(cx);
+                let pane = tab.focused_tab();
+                let title = pane
+                    .as_ref()
                     .map(|pane| pane.read(cx).title(cx))
                     .unwrap_or_else(|| "Terminal".to_string());
                 let title = util::truncate_and_trailoff(&title, TAB_TITLE_MAX_CHARS);
+                let dragged_tab = pane.map(|pane| DraggedTerminalTab {
+                    source_window,
+                    source_view: source_view.clone(),
+                    pane,
+                    title: title.clone(),
+                    is_active: idx == self.active_tab_index,
+                });
                 let position = if idx == 0 {
                     TabPosition::First
                 } else if idx == tab_count - 1 {
@@ -1098,6 +1263,9 @@ impl TerminalWindowView {
                             cx.stop_propagation();
                         }),
                     )
+                    .start_slot::<Indicator>(
+                        has_bell.then(|| Indicator::dot().color(Color::Accent)),
+                    )
                     .child(self.render_tab_label(title))
                     .end_slot(
                         // Per-tab close button. Clicking a tab's x closes that
@@ -1123,6 +1291,37 @@ impl TerminalWindowView {
                                     )),
                             ),
                     )
+                    .when_some(dragged_tab, |this, dragged_tab| {
+                        let target_pane = dragged_tab.pane.clone();
+                        let drag_over_target_pane = target_pane.clone();
+                        let source_window = dragged_tab.source_window;
+                        this.on_drag(dragged_tab, |dragged_tab, _, _, cx| {
+                            cx.new(|_| dragged_tab.clone())
+                        })
+                        .drag_over::<DraggedTerminalTab>(move |style, dragged_tab, _window, cx| {
+                            let style = style
+                                .bg(cx.theme().colors().drop_target_background)
+                                .border_color(cx.theme().colors().drop_target_border)
+                                .border_0();
+                            match dragged_tab.ordering_relative_to(&drag_over_target_pane, cx) {
+                                Some(Ordering::Less) => style.border_l_2(),
+                                Some(Ordering::Greater) => style.border_r_2(),
+                                Some(Ordering::Equal) | None => style,
+                            }
+                        })
+                        .can_drop(move |value, _window, _cx| {
+                            value
+                                .downcast_ref::<DraggedTerminalTab>()
+                                .is_some_and(|dragged_tab| {
+                                    dragged_tab.source_window == source_window
+                                })
+                        })
+                        .on_drop(cx.listener(
+                            move |this, dragged_tab: &DraggedTerminalTab, _window, cx| {
+                                this.reorder_tab(dragged_tab, &target_pane, cx);
+                            },
+                        ))
+                    })
                     .into_any_element()
             })
             .collect()
@@ -1377,6 +1576,7 @@ impl Render for TerminalWindowView {
                     return;
                 };
                 let handled = tab.update(cx, |tab, cx| {
+                    tab.clear_bell(cx);
                     tab.terminal.update(cx, |term, cx| {
                         term.try_keystroke(
                             &event.keystroke,
