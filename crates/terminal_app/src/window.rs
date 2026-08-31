@@ -38,8 +38,8 @@ use crate::terminal::tab::{ScrollAction, TerminalTabEvent};
 use crate::terminal::{TerminalElement, TerminalSearchBar, TerminalTab};
 use crate::{
     ActivateNextPane, ActivatePreviousPane, CloseAll, CloseLeft, CloseOtherTabs, ClosePane,
-    CloseRight, CloseTab, NewTab, NewWindow, NextTab, OpenSettings, PreviousTab, ReopenClosedTab,
-    SendKeystroke, SendText, SplitDown, SplitLeft, SplitRight, SplitUp, ToggleZoom,
+    CloseRight, CloseTab, NewTab, NewWindow, NextTab, OpenSettings, PreviousTab, SendKeystroke,
+    SendText, SplitDown, SplitLeft, SplitRight, SplitUp, ToggleZoom,
 };
 
 /// Fixed content width for every tab so the tab bar does not reflow while
@@ -51,9 +51,6 @@ const TAB_TITLE_WIDTH: gpui::Pixels = px(140.);
 /// `MAX_TAB_TITLE_LEN`; keeps tooltips and copy-paste from carrying absurd
 /// titles even though the layout already truncates visually.
 const TAB_TITLE_MAX_CHARS: usize = 24;
-/// How many recently closed tabs' working directories to remember for
-/// `ReopenClosedTab`.
-const MAX_REMEMBERED_CLOSED_TABS: usize = 10;
 
 /// A window in the standalone terminal app.
 pub struct TerminalWindowView {
@@ -62,11 +59,6 @@ pub struct TerminalWindowView {
     /// a tab is the top-level unit; cmd-d splits within the active tab).
     pub(crate) tabs: Vec<WindowTab>,
     pub(crate) active_tab_index: usize,
-    /// Working directories of recently closed tabs, most recent first, for
-    /// `ReopenClosedTab` (G4). Zed keeps the whole item around; keeping just
-    /// the cwd matches this app's no-history-policy while restoring the
-    /// "continue where I was" experience.
-    closed_tab_cwds: Vec<std::path::PathBuf>,
     /// Right-click context menu for the active terminal, if open.
     context_menu: Option<(Entity<ContextMenu>, gpui::Point<Pixels>, Subscription)>,
     /// Left-button state for the titlebar strip drag gesture.
@@ -188,7 +180,6 @@ impl TerminalWindowView {
             focus_handle: cx.focus_handle(),
             tabs: Vec::new(),
             active_tab_index: 0,
-            closed_tab_cwds: Vec::new(),
             context_menu: None,
             titlebar_mouse_down: std::cell::Cell::new(false),
             tab_bar_scroll_handle: ScrollHandle::new(),
@@ -901,14 +892,6 @@ impl TerminalWindowView {
             window.remove_window();
             return;
         }
-        // Remember the cwd so `ReopenClosedTab` can restore it (G4).
-        if let Some(active) = self.tabs.get(self.active_tab_index)
-            && let Some(pane) = active.focused_tab()
-            && let Some(cwd) = pane.read(cx).terminal.read(cx).working_directory()
-        {
-            self.closed_tab_cwds.insert(0, cwd);
-            self.closed_tab_cwds.truncate(MAX_REMEMBERED_CLOSED_TABS);
-        }
         if self.tabs.len() == 1 {
             self.tabs.clear();
             window.remove_window();
@@ -920,37 +903,6 @@ impl TerminalWindowView {
             self.focus_pane(window, cx);
             cx.notify();
         }
-    }
-
-    /// Reopens the most recently closed tab, starting its shell in that tab's
-    /// former working directory (mirrors Zed's `pane::ReopenClosedItem`).
-    fn reopen_closed_tab(
-        &mut self,
-        _: &ReopenClosedTab,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(cwd) = self.closed_tab_cwds.first().cloned() else {
-            return;
-        };
-        self.closed_tab_cwds.remove(0);
-        cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let Some(builder) = build_terminal_in(Some(cwd), cx).await else {
-                return;
-            };
-            let terminal = cx.new(|cx| builder.subscribe(cx));
-            let tab = cx.new(|cx| TerminalTab::new(terminal, cx));
-            cx.update(|cx| {
-                this.update(cx, |this, cx| {
-                    this.observe_tab(&tab, cx);
-                    this.tabs.push(WindowTab::new(tab));
-                    this.active_tab_index = this.tabs.len() - 1;
-                    cx.notify();
-                })
-                .log_err();
-            });
-        })
-        .detach();
     }
 
     fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -1107,8 +1059,6 @@ impl TerminalWindowView {
         let focus_handle = tab.read(cx).focus_handle.clone();
         self.show_context_menu(position, window, cx, |menu, _, _| {
             menu.context(focus_handle)
-                .action("Reopen Closed Tab", Box::new(ReopenClosedTab))
-                .separator()
                 .action("Close", Box::new(CloseTab))
                 .action("Close Others", Box::new(CloseOtherTabs))
                 .action("Close Left", Box::new(CloseLeft))
@@ -1448,7 +1398,6 @@ impl Render for TerminalWindowView {
             .on_action(cx.listener(Self::toggle_search))
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::new_tab))
-            .on_action(cx.listener(Self::reopen_closed_tab))
             .on_action(cx.listener(Self::send_text))
             .on_action(cx.listener(Self::send_keystroke))
             .on_action(cx.listener(Self::close_tab))
@@ -1593,19 +1542,10 @@ impl Render for TerminalWindowView {
 
 /// Builds a PTY-backed terminal on the foreground executor.
 async fn build_terminal(cx: &gpui::AsyncApp) -> Option<TerminalBuilder> {
-    build_terminal_in(None, cx).await
-}
-
-/// Builds a PTY-backed terminal, optionally rooted at `cwd` (used by
-/// `ReopenClosedTab` to restore the closed tab's working directory).
-async fn build_terminal_in(
-    cwd: Option<std::path::PathBuf>,
-    cx: &gpui::AsyncApp,
-) -> Option<TerminalBuilder> {
     let settings = cx.update(|cx| TerminalSettings::get_global(cx).clone());
     let builder = cx.update(|cx| {
         TerminalBuilder::new(
-            cwd,
+            None,
             settings.shell.clone(),
             HashMap::<String, String>::default(),
             settings.cursor_shape,

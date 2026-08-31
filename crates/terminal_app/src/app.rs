@@ -56,9 +56,7 @@ actions!(
         /// Closes the focused pane; the last pane closes the window.
         ClosePane,
         /// Toggles the focused pane between split layout and full content area.
-        ToggleZoom,
-        /// Reopens the most recently closed tab (cwd preserved).
-        ReopenClosedTab
+        ToggleZoom
     ]
 );
 
@@ -242,7 +240,6 @@ pub fn run(cx: &mut App) {
     cx.bind_keys([
         // Window / tab management.
         KeyBinding::new("cmd-t", NewTab, Some("TerminalWindow")),
-        KeyBinding::new("cmd-shift-t", ReopenClosedTab, Some("TerminalWindow")),
         KeyBinding::new("cmd-w", CloseTab, Some("TerminalWindow")),
         KeyBinding::new("ctrl-tab", NextTab, Some("TerminalWindow")),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some("TerminalWindow")),
