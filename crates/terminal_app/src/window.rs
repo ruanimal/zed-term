@@ -1394,6 +1394,7 @@ fn render_terminal_pane(
 ) -> AnyElement {
     let cursor_visible = tab.read(cx).cursor_visible(cx);
     let scroll_handle = tab.read(cx).scroll_handle.clone();
+    let scrollbar_id = tab.entity_id();
     let colors = cx.theme().colors();
     div()
         .id(("terminal-pane", tab.entity_id()))
@@ -1409,6 +1410,7 @@ fn render_terminal_pane(
         ))
         .custom_scrollbars(
             Scrollbars::for_settings::<TerminalScrollbarSettingsWrapper>()
+                .id(("terminal-scrollbar", scrollbar_id))
                 .show_along(ScrollAxes::Vertical)
                 .with_stable_track_along(ScrollAxes::Vertical, colors.terminal_background)
                 .tracked_scroll_handle(&scroll_handle),
