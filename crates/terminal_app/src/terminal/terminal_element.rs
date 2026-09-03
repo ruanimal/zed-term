@@ -16,10 +16,12 @@ use std::time::Instant;
 use terminal_core::{
     Cell, Color, Content, CursorShape, IndexedCell, Modes, NamedColor, Point, Range, Terminal,
     TerminalBounds, is_app_chosen_exact_color as terminal_is_app_chosen_exact_color,
-    is_default_background_color, terminal_settings::TerminalSettings,
+    is_default_background_color,
+    terminal_settings::{
+        DEFAULT_TERMINAL_FONT_FAMILY, DEFAULT_TERMINAL_FONT_SIZE, TerminalSettings,
+    },
 };
 use theme::{ActiveTheme, Theme};
-use theme_settings::ThemeSettings;
 use ui::utils::ensure_minimum_contrast;
 use util::ResultExt;
 
@@ -1133,23 +1135,15 @@ impl Element for TerminalElement {
             cx,
             |_, _, hitbox, window, cx| {
                 let hitbox = hitbox.unwrap();
-                let settings = ThemeSettings::get_global(cx).clone();
-
-                let buffer_font_size = settings.buffer_font_size(cx);
-
                 let terminal_settings = TerminalSettings::get_global(cx);
                 let minimum_contrast = terminal_settings.minimum_contrast;
 
                 let font_family = terminal_settings.font_family.as_ref().map_or_else(
-                    || settings.buffer_font.family.clone(),
+                    || DEFAULT_TERMINAL_FONT_FAMILY.into(),
                     |font_family| font_family.0.clone().into(),
                 );
 
-                let font_fallbacks = terminal_settings
-                    .font_fallbacks
-                    .as_ref()
-                    .or(settings.buffer_font.fallbacks.as_ref())
-                    .cloned();
+                let font_fallbacks = terminal_settings.font_fallbacks.as_ref().cloned();
 
                 let font_features = terminal_settings
                     .font_features
@@ -1163,7 +1157,7 @@ impl Element for TerminalElement {
 
                 let font_size = terminal_settings
                     .font_size
-                    .map_or(buffer_font_size, |size| {
+                    .map_or(px(DEFAULT_TERMINAL_FONT_SIZE), |size| {
                         theme_settings::adjusted_font_size(size, cx)
                     });
 
@@ -1263,9 +1257,15 @@ impl Element for TerminalElement {
 
                 let background_color = theme.colors().terminal_background;
 
+                self.terminal_view.update(cx, |terminal_view, cx| {
+                    terminal_view.apply_pending_scrollbar_offset(cx);
+                });
                 self.terminal.update(cx, |terminal, cx| {
                     terminal.set_size(dimensions);
                     terminal.sync(window, cx);
+                });
+                self.terminal_view.update(cx, |terminal_view, cx| {
+                    terminal_view.update_scrollbar(cx);
                 });
 
                 let Content {

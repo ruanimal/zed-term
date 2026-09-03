@@ -85,3 +85,82 @@ impl ScrollableHandle for TerminalScrollHandle {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scroll_handle(
+        line_height: f32,
+        total_lines: usize,
+        viewport_lines: usize,
+        display_offset: usize,
+    ) -> TerminalScrollHandle {
+        TerminalScrollHandle {
+            state: Rc::new(RefCell::new(ScrollHandleState {
+                line_height: px(line_height),
+                total_lines,
+                viewport_lines,
+                display_offset,
+            })),
+            future_display_offset: Rc::new(Cell::new(None)),
+        }
+    }
+
+    #[test]
+    fn content_smaller_than_viewport_has_zero_offsets() {
+        let handle = scroll_handle(8.0, 4, 10, 3);
+
+        assert_eq!(handle.max_offset(), point(px(0.0), px(0.0)));
+        assert_eq!(handle.offset(), point(px(0.0), px(0.0)));
+        assert_eq!(handle.viewport().size.height, px(80.0));
+
+        handle.set_offset(point(px(0.0), px(-10_000.0)));
+        assert_eq!(handle.future_display_offset.get(), Some(0));
+        handle.set_offset(point(px(0.0), px(10_000.0)));
+        assert_eq!(handle.future_display_offset.get(), Some(0));
+    }
+
+    #[test]
+    fn top_and_bottom_offsets_map_to_display_offset_bounds() {
+        let top = scroll_handle(10.0, 100, 20, 80);
+        let bottom = scroll_handle(10.0, 100, 20, 0);
+
+        assert_eq!(top.max_offset(), point(px(0.0), px(800.0)));
+        assert_eq!(top.offset(), point(px(0.0), px(0.0)));
+        assert_eq!(bottom.offset(), point(px(0.0), px(-800.0)));
+
+        bottom.set_offset(point(px(0.0), px(0.0)));
+        assert_eq!(bottom.future_display_offset.get(), Some(80));
+        bottom.set_offset(point(px(0.0), px(-800.0)));
+        assert_eq!(bottom.future_display_offset.get(), Some(0));
+    }
+
+    #[test]
+    fn fractional_offsets_round_and_clamp_to_valid_display_offsets() {
+        let handle = scroll_handle(10.0, 100, 20, 0);
+
+        handle.set_offset(point(px(0.0), px(-14.9)));
+        assert_eq!(handle.future_display_offset.get(), Some(79));
+        handle.set_offset(point(px(0.0), px(-15.0)));
+        assert_eq!(handle.future_display_offset.get(), Some(78));
+        handle.set_offset(point(px(0.0), px(-10_000.0)));
+        assert_eq!(handle.future_display_offset.get(), Some(0));
+        handle.set_offset(point(px(0.0), px(10_000.0)));
+        assert_eq!(handle.future_display_offset.get(), Some(80));
+    }
+
+    #[test]
+    fn pending_offset_is_shared_replaced_and_consumed_once() {
+        let handle = scroll_handle(10.0, 100, 20, 0);
+        let cloned_handle = handle.clone();
+
+        assert_eq!(handle.future_display_offset.get(), None);
+        handle.set_offset(point(px(0.0), px(-200.0)));
+        assert_eq!(cloned_handle.future_display_offset.get(), Some(60));
+
+        cloned_handle.set_offset(point(px(0.0), px(-300.0)));
+        assert_eq!(handle.future_display_offset.take(), Some(50));
+        assert_eq!(cloned_handle.future_display_offset.get(), None);
+    }
+}

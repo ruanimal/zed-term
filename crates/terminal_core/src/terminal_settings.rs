@@ -9,8 +9,11 @@ use settings::{
     IntoGpui, PathHyperlinkRegex, RegisterSetting, ShowScrollbar, TerminalBell, TerminalBlink,
     TerminalLineHeight, VenvSettings, WorkingDirectory,
 };
-use util::shell::Shell;
 use theme_settings::FontFamilyName;
+use util::shell::Shell;
+
+pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = ".ZedMono";
+pub const DEFAULT_TERMINAL_FONT_SIZE: f32 = 15.0;
 
 #[derive(Clone, Debug, Deserialize, RegisterSetting)]
 pub struct TerminalSettings {

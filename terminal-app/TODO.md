@@ -6,16 +6,28 @@
 
 ### 待实现
 
-- 修复现有 `cursor blinking` 设置，为终端光标接入实际闪烁状态。
-- 增加 `font_family`、`font_weight`、`line_height`、`minimum_contrast` 设置控件。
-- 增加 `keep_selection_on_copy`、`open_links_in_mouse_mode` 开关。
-- 增加结构化 `shell` 设置，支持系统 shell、自定义程序及参数，不使用单一文本输入框。
-- 增加 `env` 键值编辑 UI，并将配置接入 PTY builder，使其对新终端生效。
-- 增加 standalone `working_directory` 设置，仅支持 Home 和固定目录。
-- 实现终端滚动条，并接入 `scrollbar.show` 设置。
-- 核对并统一 standalone 设置默认值；参考 Zed 时以 `assets/settings/default.json` 的实际配置为准，重点确认 `line_height = "standard"`、`bell = "off"` 和 `alternate_scroll = "on"`，不采用可能过期的 Rust 文档默认值。
-- 增加搜索/过滤和恢复默认值入口。
-- 增加写入成功/失败状态及非法值校验。
+- 增加搜索/过滤。
+
+### 已完成
+
+| 支持项 | Control | Persistence | Runtime | Tests |
+|---|---|---|---|---|
+| `cursor blinking` | 已验证 | 已验证 | 已验证：既有 pane 实时生效 | 已验证：Properties 2、7、8 |
+| `font_family` | 已验证 | 已验证 | 已验证：既有 pane 实时生效 | 已验证：Properties 2、7 |
+| `font_weight` | 已验证 | 已验证 | 已验证：既有 pane 实时生效 | 已验证：Properties 1、2、7 |
+| `line_height` | 已验证 | 已验证 | 已验证：既有 pane 实时生效 | 已验证：Properties 1、2、7 |
+| `minimum_contrast` | 已验证 | 已验证 | 已验证：既有 pane 实时生效 | 已验证：Properties 1、2、7 |
+| `keep_selection_on_copy` | 已验证 | 已验证 | 已验证：既有 pane 后续交互生效 | 已验证：Properties 2、7 |
+| `open_links_in_mouse_mode` | 已验证 | 已验证 | 已验证：既有 pane 后续交互生效 | 已验证：Properties 2、7 |
+| 结构化 `shell` | 已验证 | 已验证 | 已验证：后续新建 pane 生效 | 已验证：Properties 2、3、4、10 |
+| `env` 键值编辑 | 已验证 | 已验证 | 已验证：后续新建 pane 生效 | 已验证：Properties 2、5、10 |
+| standalone `working_directory` | 已验证 | 已验证 | 已验证：后续新建 pane 生效 | 已验证：Properties 2、6、10 |
+| `scrollbar.show` | 已验证 | 已验证 | 已验证：既有 pane 实时生效 | 已验证：Properties 2、9 |
+| standalone 默认值（`line_height = "standard"`、`bell = "off"`、`alternate_scroll = "on"`） | 已验证 | 已验证：无覆盖时采用实际默认配置 | 已验证：运行时投影采用 `assets/settings/default.json` | 已验证：默认资源专项测试、Property 2 |
+| Reset Terminal Defaults | 已验证 | 已验证：删除 terminal 覆盖并保留其余 JSONC 内容 | 已验证：既有 pane 恢复 live 默认值，后续 pane 采用 construction 默认值 | 已验证：Properties 7、10、11、12、13 |
+| 写入状态及非法值校验 | 已验证：保存中、成功、失败及校验原因可见 | 已验证：差异写入、失败原子性及非法值写入前拒绝 | 已验证：revision-aware 保存/重置状态 | 已验证：Properties 1、4、5、6、12、13 |
+
+验证基线：Properties 1–13 全部通过，每项 128 cases；`cargo test -p terminal_app --lib` 61 passed / 0 failed；目标 `terminal_core` alternate-scroll 测试 1 passed / 0 failed；`./script/clippy` 与 `cargo fmt --all -- --check` 通过。
 
 ### 低优先级
 

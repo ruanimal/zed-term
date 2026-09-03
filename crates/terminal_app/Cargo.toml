@@ -34,3 +34,9 @@ theme.workspace = true
 theme_settings.workspace = true
 ui.workspace = true
 util.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+proptest.workspace = true
+settings = { workspace = true, features = ["test-support"] }
+terminal_core = { path = "../terminal_core", features = ["test-support"] }

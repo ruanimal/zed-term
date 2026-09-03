@@ -3,10 +3,8 @@
 //! Each window owns its own set of tabs; multiple windows share the app-level
 //! keymap defined in `app.rs`.
 
-use std::cmp::Ordering;
-use std::time::Duration;
+use std::{cmp::Ordering, path::PathBuf, time::Duration};
 
-use collections::HashMap;
 use gpui::{
     AnyElement, App, AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
@@ -24,11 +22,12 @@ use terminal_core::{
     ShowCharacterPalette, Terminal, TerminalBuilder,
 };
 use theme::ActiveTheme as _;
+use ui::scrollbars::{ScrollbarVisibility, ShowScrollbar};
 use ui::utils::{TRAFFIC_LIGHT_PADDING, platform_title_bar_height};
 use ui::{
     ButtonCommon as _, Clickable as _, Color, ContextMenu, IconButton, IconName, IconSize,
-    Indicator, Label, LabelCommon as _, LabelSize, Tab, TabBar, TabPosition, Toggleable as _,
-    Tooltip,
+    Indicator, Label, LabelCommon as _, LabelSize, ScrollAxes, Scrollbars, Tab, TabBar,
+    TabPosition, Toggleable as _, Tooltip, WithScrollbar,
 };
 use util::ResultExt;
 use util::paths::PathStyle;
@@ -52,6 +51,39 @@ const TAB_TITLE_WIDTH: gpui::Pixels = px(140.);
 /// titles even though the layout already truncates visually.
 const TAB_TITLE_MAX_CHARS: usize = 24;
 
+#[derive(Default)]
+struct TerminalScrollbarSettingsWrapper;
+
+impl ScrollbarVisibility for TerminalScrollbarSettingsWrapper {
+    fn visibility(&self, cx: &App) -> ShowScrollbar {
+        match TerminalSettings::get_global(cx)
+            .scrollbar
+            .show
+            .unwrap_or(settings::ShowScrollbar::Auto)
+        {
+            settings::ShowScrollbar::Auto => ShowScrollbar::Auto,
+            settings::ShowScrollbar::System => ShowScrollbar::System,
+            settings::ShowScrollbar::Always => ShowScrollbar::Always,
+            settings::ShowScrollbar::Never => ShowScrollbar::Never,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LiveTerminalSettings {
+    cursor_shape: terminal_core::terminal_settings::CursorShape,
+    alternate_scroll: settings::AlternateScroll,
+}
+
+impl LiveTerminalSettings {
+    fn from_settings(settings: &TerminalSettings) -> Self {
+        Self {
+            cursor_shape: settings.cursor_shape,
+            alternate_scroll: settings.alternate_scroll,
+        }
+    }
+}
+
 /// A window in the standalone terminal app.
 pub struct TerminalWindowView {
     pub focus_handle: FocusHandle,
@@ -66,6 +98,8 @@ pub struct TerminalWindowView {
     /// Tracks the tab bar's horizontal scroll so an activated tab can be
     /// scrolled back into view when the tabs overflow.
     tab_bar_scroll_handle: ScrollHandle,
+    terminal_error: Option<String>,
+    live_settings: LiveTerminalSettings,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -176,6 +210,9 @@ impl Render for DraggedTerminalTab {
 
 impl TerminalWindowView {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let live_settings = LiveTerminalSettings::from_settings(TerminalSettings::get_global(cx));
+        let settings_subscription =
+            cx.observe_global::<settings::SettingsStore>(Self::settings_changed);
         let mut view = Self {
             focus_handle: cx.focus_handle(),
             tabs: Vec::new(),
@@ -183,7 +220,9 @@ impl TerminalWindowView {
             context_menu: None,
             titlebar_mouse_down: std::cell::Cell::new(false),
             tab_bar_scroll_handle: ScrollHandle::new(),
-            _subscriptions: Vec::new(),
+            terminal_error: None,
+            live_settings,
+            _subscriptions: vec![settings_subscription],
         };
         view.spawn_new_tab(cx);
 
@@ -209,17 +248,66 @@ impl TerminalWindowView {
         view
     }
 
+    fn all_panes(&self) -> Vec<Entity<TerminalTab>> {
+        let mut panes = Vec::new();
+        for tab in &self.tabs {
+            if let Some(split_root) = tab.split_root.as_ref() {
+                let mut split_panes = Vec::new();
+                split_root.collect_tabs(&mut split_panes);
+                panes.extend(split_panes.into_iter().cloned());
+            } else if let Some(pane) = tab.active_pane_tab.as_ref() {
+                panes.push(pane.clone());
+            }
+        }
+        panes
+    }
+
+    fn settings_changed(&mut self, cx: &mut Context<Self>) {
+        let live_settings = LiveTerminalSettings::from_settings(TerminalSettings::get_global(cx));
+        let cursor_shape_changed = self.live_settings.cursor_shape != live_settings.cursor_shape;
+        let alternate_scroll_changed =
+            self.live_settings.alternate_scroll != live_settings.alternate_scroll;
+
+        if cursor_shape_changed || alternate_scroll_changed {
+            for pane in self.all_panes() {
+                let terminal = pane.read(cx).terminal.clone();
+                terminal.update(cx, |terminal, cx| {
+                    if cursor_shape_changed {
+                        terminal.set_cursor_shape(live_settings.cursor_shape);
+                    }
+                    if alternate_scroll_changed {
+                        terminal.set_alternate_scroll(live_settings.alternate_scroll);
+                    }
+                    cx.notify();
+                });
+                pane.update(cx, |_, cx| cx.notify());
+            }
+            self.live_settings = live_settings;
+        }
+
+        cx.notify();
+    }
+
     /// Starts a PTY-backed shell as a brand-new tab (each tab owns its own
     /// split-pane group; cmd-d later splits within it).
     fn spawn_new_tab(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let Some(builder) = build_terminal(cx).await else {
-                return;
+            let builder = match build_terminal(cx).await {
+                Ok(builder) => builder,
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.terminal_error = Some(format!("Could not start terminal: {error:#}"));
+                        cx.notify();
+                    })
+                    .log_err();
+                    return;
+                }
             };
             let terminal = cx.new(|cx| builder.subscribe(cx));
             let tab = cx.new(|cx| TerminalTab::new(terminal, cx));
             cx.update(|cx| {
                 this.update(cx, |this, cx| {
+                    this.terminal_error = None;
                     this.observe_tab(&tab, cx);
                     this.tabs.push(WindowTab::new(tab));
                     this.active_tab_index = this.tabs.len() - 1;
@@ -531,13 +619,22 @@ impl TerminalWindowView {
             self.tabs[active_index].split_root = Some(SplitNode::leaf(anchor_tab.clone()));
         }
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let Some(builder) = build_terminal(cx).await else {
-                return;
+            let builder = match build_terminal(cx).await {
+                Ok(builder) => builder,
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.terminal_error = Some(format!("Could not start terminal: {error:#}"));
+                        cx.notify();
+                    })
+                    .log_err();
+                    return;
+                }
             };
             let terminal = cx.new(|cx| builder.subscribe(cx));
             let tab = cx.new(|cx| TerminalTab::new(terminal, cx));
             cx.update(|cx| {
                 this.update(cx, |this, cx| {
+                    this.terminal_error = None;
                     this.observe_tab(&tab, cx);
                     // The split lives inside the active tab's pane group only;
                     // it never becomes a separate tab in the tab bar.
@@ -1288,6 +1385,39 @@ impl TerminalWindowView {
     }
 }
 
+fn render_terminal_pane(
+    terminal: Entity<Terminal>,
+    tab: Entity<TerminalTab>,
+    focus: FocusHandle,
+    window: &mut Window,
+    cx: &mut Context<TerminalWindowView>,
+) -> AnyElement {
+    let cursor_visible = tab.read(cx).cursor_visible(cx);
+    let scroll_handle = tab.read(cx).scroll_handle.clone();
+    let colors = cx.theme().colors();
+    div()
+        .id(("terminal-pane", tab.entity_id()))
+        .relative()
+        .size_full()
+        .bg(colors.terminal_background)
+        .child(TerminalElement::new(
+            terminal,
+            tab,
+            focus.clone(),
+            focus.is_focused(window),
+            cursor_visible,
+        ))
+        .custom_scrollbars(
+            Scrollbars::for_settings::<TerminalScrollbarSettingsWrapper>()
+                .show_along(ScrollAxes::Vertical)
+                .with_stable_track_along(ScrollAxes::Vertical, colors.terminal_background)
+                .tracked_scroll_handle(&scroll_handle),
+            window,
+            cx,
+        )
+        .into_any_element()
+}
+
 impl Render for TerminalWindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Content area: the active tab's split tree, a zoomed pane, or a
@@ -1315,7 +1445,7 @@ impl Render for TerminalWindowView {
             div()
                 .relative()
                 .size_full()
-                .child(TerminalElement::new(terminal, tab, focus, true, true))
+                .child(render_terminal_pane(terminal, tab, focus, window, cx))
                 .child(
                     div().absolute().top_2().right_2().child(
                         IconButton::new("restore-zoomed-pane", IconName::Minimize)
@@ -1330,36 +1460,50 @@ impl Render for TerminalWindowView {
                     ),
                 )
                 .into_any_element()
-        } else if let Some(root) = self
+        } else if self
             .tabs
-            .get_mut(self.active_tab_index)
-            .and_then(|tab| tab.split_root.as_mut())
+            .get(self.active_tab_index)
+            .and_then(|tab| tab.split_root.as_ref())
+            .is_some()
         {
-            let mut panes: Vec<(Entity<Terminal>, Entity<TerminalTab>, FocusHandle)> = Vec::new();
+            let mut pane_tabs: Vec<Entity<TerminalTab>> = Vec::new();
+            if let Some(root) = self
+                .tabs
+                .get(self.active_tab_index)
+                .and_then(|tab| tab.split_root.as_ref())
             {
                 let mut pane_out: Vec<&Entity<TerminalTab>> = Vec::new();
                 root.collect_tabs(&mut pane_out);
-                for pane in pane_out {
-                    let terminal = pane.read(cx).terminal.clone();
-                    let focus = pane.read(cx).focus_handle.clone();
-                    panes.push((terminal, pane.clone(), focus));
-                }
+                pane_tabs.extend(pane_out.into_iter().cloned());
             }
-            let mut pane_iter = panes.into_iter();
-            root.render(window, cx, &mut |_pane| {
-                if let Some((terminal, tab, focus)) = pane_iter.next() {
-                    TerminalElement::new(terminal, tab, focus, true, true).into_any_element()
-                } else {
-                    div().into_any_element()
-                }
-            })
+
+            let pane_elements: Vec<_> = pane_tabs
+                .into_iter()
+                .map(|tab| {
+                    let terminal = tab.read(cx).terminal.clone();
+                    let focus = tab.read(cx).focus_handle.clone();
+                    render_terminal_pane(terminal, tab, focus, window, cx)
+                })
+                .collect();
+            let mut pane_elements = pane_elements.into_iter();
+            self.tabs
+                .get_mut(self.active_tab_index)
+                .and_then(|tab| tab.split_root.as_mut())
+                .map(|root| {
+                    root.render(window, cx, &mut |_pane| {
+                        pane_elements
+                            .next()
+                            .unwrap_or_else(|| div().into_any_element())
+                    })
+                })
+                .unwrap_or_else(|| div().into_any_element())
         } else {
             active_tab
                 .clone()
                 .map(|tab| {
                     let terminal = tab.read(cx).terminal.clone();
                     let focus = tab.read(cx).focus_handle.clone();
-                    TerminalElement::new(terminal, tab, focus, true, true).into_any_element()
+                    render_terminal_pane(terminal, tab, focus, window, cx)
                 })
                 .unwrap_or_else(|| {
                     div()
@@ -1378,6 +1522,15 @@ impl Render for TerminalWindowView {
             .flex_col()
             .bg(cx.theme().colors().terminal_background)
             .child(self.render_title_bar(window, cx))
+            .when_some(self.terminal_error.clone(), |this, error| {
+                this.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .bg(cx.theme().colors().element_background)
+                        .child(Label::new(error).size(LabelSize::Small).color(Color::Error)),
+                )
+            })
             .when_some(active_tab.clone().filter(|_| search_active), |this, tab| {
                 this.child(TerminalSearchBar::new(tab, cx.weak_entity()).into_any_element())
             })
@@ -1541,25 +1694,1165 @@ impl Render for TerminalWindowView {
 }
 
 /// Builds a PTY-backed terminal on the foreground executor.
-async fn build_terminal(cx: &gpui::AsyncApp) -> Option<TerminalBuilder> {
+#[cfg(test)]
+struct TestTerminalLaunchFailure {
+    reason: String,
+}
+
+#[cfg(test)]
+impl gpui::Global for TestTerminalLaunchFailure {}
+
+async fn build_terminal(cx: &gpui::AsyncApp) -> anyhow::Result<TerminalBuilder> {
     let settings = cx.update(|cx| TerminalSettings::get_global(cx).clone());
     let builder = cx.update(|cx| {
-        TerminalBuilder::new(
-            None,
-            settings.shell.clone(),
-            HashMap::<String, String>::default(),
+        launch_terminal_with(settings, cx, |launch, cx| {
+            #[cfg(test)]
+            if let Some(failure) = cx.try_global::<TestTerminalLaunchFailure>() {
+                return gpui::Task::ready(Err(anyhow::anyhow!(failure.reason.clone())));
+            }
+
+            TerminalBuilder::new(
+                launch.working_directory,
+                launch.shell,
+                launch.environment,
+                launch.cursor_shape,
+                launch.alternate_scroll,
+                launch.max_scroll_history_lines,
+                launch.path_hyperlink_regexes,
+                launch.path_hyperlink_timeout,
+                false,
+                0,
+                None,
+                cx,
+                Vec::new(),
+                PathStyle::local(),
+            )
+        })
+    });
+    builder.await
+}
+
+struct TerminalLaunchArguments {
+    working_directory: Option<PathBuf>,
+    shell: util::shell::Shell,
+    environment: collections::HashMap<String, String>,
+    cursor_shape: terminal_core::terminal_settings::CursorShape,
+    alternate_scroll: settings::AlternateScroll,
+    max_scroll_history_lines: Option<usize>,
+    path_hyperlink_regexes: Vec<String>,
+    path_hyperlink_timeout: Duration,
+}
+
+fn launch_terminal_with<T>(
+    settings: TerminalSettings,
+    cx: &App,
+    launcher: impl FnOnce(TerminalLaunchArguments, &App) -> T,
+) -> T {
+    let launch = TerminalLaunchArguments {
+        working_directory: standalone_working_directory(&settings.working_directory),
+        shell: settings.shell,
+        environment: settings.env,
+        cursor_shape: settings.cursor_shape,
+        alternate_scroll: settings.alternate_scroll,
+        max_scroll_history_lines: settings.max_scroll_history_lines,
+        path_hyperlink_regexes: settings.path_hyperlink_regexes,
+        path_hyperlink_timeout: Duration::from_millis(settings.path_hyperlink_timeout_ms),
+    };
+    launcher(launch, cx)
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FakeLaunchSnapshot {
+    pub(crate) shell: util::shell::Shell,
+    pub(crate) environment: collections::HashMap<String, String>,
+    pub(crate) working_directory: Option<PathBuf>,
+    pub(crate) max_scroll_history_lines: Option<usize>,
+    pub(crate) cursor_shape: terminal_core::terminal_settings::CursorShape,
+    pub(crate) alternate_scroll: settings::AlternateScroll,
+}
+
+#[cfg(test)]
+pub(crate) fn fake_launch_snapshot(cx: &App) -> FakeLaunchSnapshot {
+    let settings = TerminalSettings::get_global(cx).clone();
+    launch_terminal_with(settings, cx, |launch, _| FakeLaunchSnapshot {
+        shell: launch.shell,
+        environment: launch.environment,
+        working_directory: launch.working_directory,
+        max_scroll_history_lines: launch.max_scroll_history_lines,
+        cursor_shape: launch.cursor_shape,
+        alternate_scroll: launch.alternate_scroll,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn fake_launch_shell_snapshot(cx: &App) -> util::shell::Shell {
+    fake_launch_snapshot(cx).shell
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EffectiveLiveSettingsSnapshot {
+    pub(crate) font_family: Option<String>,
+    pub(crate) font_weight: Option<f32>,
+    pub(crate) line_height: settings::TerminalLineHeight,
+    pub(crate) minimum_contrast: f32,
+    pub(crate) blinking: settings::TerminalBlink,
+    pub(crate) scrollbar: Option<settings::ShowScrollbar>,
+    pub(crate) option_as_meta: bool,
+    pub(crate) copy_on_select: bool,
+    pub(crate) keep_selection_on_copy: bool,
+    pub(crate) open_links_in_mouse_mode: bool,
+    pub(crate) scroll_multiplier: f32,
+    pub(crate) bell: settings::TerminalBell,
+    pub(crate) cursor_shape: terminal_core::terminal_settings::CursorShape,
+    pub(crate) alternate_scroll: settings::AlternateScroll,
+}
+
+#[cfg(test)]
+impl EffectiveLiveSettingsSnapshot {
+    pub(crate) fn capture(cx: &App) -> Self {
+        let settings = TerminalSettings::get_global(cx);
+        Self {
+            font_family: settings
+                .font_family
+                .as_ref()
+                .map(|font_family| font_family.0.to_string()),
+            font_weight: settings.font_weight.map(|font_weight| font_weight.0),
+            line_height: settings.line_height.clone(),
+            minimum_contrast: settings.minimum_contrast,
+            blinking: settings.blinking,
+            scrollbar: settings.scrollbar.show,
+            option_as_meta: settings.option_as_meta,
+            copy_on_select: settings.copy_on_select,
+            keep_selection_on_copy: settings.keep_selection_on_copy,
+            open_links_in_mouse_mode: settings.open_links_in_mouse_mode,
+            scroll_multiplier: settings.scroll_multiplier,
+            bell: settings.bell,
+            cursor_shape: settings.cursor_shape,
+            alternate_scroll: settings.alternate_scroll,
+        }
+    }
+}
+
+fn standalone_working_directory(working_directory: &settings::WorkingDirectory) -> Option<PathBuf> {
+    match working_directory {
+        settings::WorkingDirectory::Always { directory } => {
+            let directory = expand_home_directory(directory);
+            directory
+                .is_dir()
+                .then_some(directory)
+                .or_else(|| Some(paths::home_dir().clone()))
+        }
+        settings::WorkingDirectory::AlwaysHome
+        | settings::WorkingDirectory::CurrentFileDirectory
+        | settings::WorkingDirectory::CurrentProjectDirectory
+        | settings::WorkingDirectory::FirstProjectDirectory => Some(paths::home_dir().clone()),
+    }
+}
+
+fn expand_home_directory(directory: &str) -> PathBuf {
+    if directory == "~" {
+        return paths::home_dir().clone();
+    }
+    if let Some(path) = directory.strip_prefix("~/") {
+        return paths::home_dir().join(path);
+    }
+    PathBuf::from(directory)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::UpdateGlobal as _;
+    use proptest::strategy::Strategy as _;
+    use settings::SettingsStore;
+
+    const LAUNCH_FAILURE_REASON: &str = "injected launcher failure: executable unavailable";
+    const VISIBLE_LAUNCH_FAILURE: &str =
+        "Could not start terminal: injected launcher failure: executable unavailable";
+
+    fn test_window_without_initial_launch(
+        tabs: Vec<WindowTab>,
+        active_tab_index: usize,
+        cx: &mut App,
+    ) -> Entity<TerminalWindowView> {
+        cx.new(|cx| {
+            let live_settings =
+                LiveTerminalSettings::from_settings(TerminalSettings::get_global(cx));
+            let settings_subscription =
+                cx.observe_global::<settings::SettingsStore>(TerminalWindowView::settings_changed);
+            TerminalWindowView {
+                focus_handle: cx.focus_handle(),
+                tabs,
+                active_tab_index,
+                context_menu: None,
+                titlebar_mouse_down: std::cell::Cell::new(false),
+                tab_bar_scroll_handle: ScrollHandle::new(),
+                terminal_error: None,
+                live_settings,
+                _subscriptions: vec![settings_subscription],
+            }
+        })
+    }
+
+    fn pane_entity_ids(window_view: &Entity<TerminalWindowView>, cx: &App) -> Vec<gpui::EntityId> {
+        window_view
+            .read(cx)
+            .all_panes()
+            .into_iter()
+            .map(|pane| pane.entity_id())
+            .collect()
+    }
+
+    /// **Validates: Requirements 4.10, 8.10**
+    #[gpui::test]
+    fn new_tab_launch_failure_is_visible_and_preserves_existing_tabs(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let window_view = cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            cx.set_global(TestTerminalLaunchFailure {
+                reason: LAUNCH_FAILURE_REASON.to_string(),
+            });
+            let settings = TerminalSettings::get_global(cx).clone();
+            let existing_pane = new_test_pane(&settings, 40_000, cx);
+            test_window_without_initial_launch(vec![WindowTab::new(existing_pane)], 0, cx)
+        });
+        let (tab_count_before, panes_before) = cx.update(|cx| {
+            (
+                window_view.read(cx).tabs.len(),
+                pane_entity_ids(&window_view, cx),
+            )
+        });
+
+        cx.update(|cx| {
+            window_view.update(cx, |window_view, cx| window_view.spawn_new_tab(cx));
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let state = window_view.read(cx);
+            assert_eq!(
+                state.terminal_error.as_deref(),
+                Some(VISIBLE_LAUNCH_FAILURE)
+            );
+            assert_eq!(state.tabs.len(), tab_count_before);
+            assert_eq!(pane_entity_ids(&window_view, cx), panes_before);
+        });
+    }
+
+    /// **Validates: Requirements 4.10, 8.10**
+    #[gpui::test]
+    fn split_pane_launch_failure_is_visible_and_preserves_existing_split(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let window_view = cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            cx.set_global(TestTerminalLaunchFailure {
+                reason: LAUNCH_FAILURE_REASON.to_string(),
+            });
+            let settings = TerminalSettings::get_global(cx).clone();
+            let first_pane = new_test_pane(&settings, 50_000, cx);
+            let second_pane = new_test_pane(&settings, 50_001, cx);
+            let mut split_root = SplitNode::leaf(first_pane.clone());
+            assert!(split_root.split(&first_pane, second_pane.clone(), SplitDirection::Right,));
+            test_window_without_initial_launch(
+                vec![WindowTab {
+                    split_root: Some(split_root),
+                    active_pane_tab: Some(second_pane),
+                    maximized_pane_tab: None,
+                }],
+                0,
+                cx,
+            )
+        });
+        let (tab_count_before, panes_before, active_pane_before) = cx.update(|cx| {
+            let state = window_view.read(cx);
+            (
+                state.tabs.len(),
+                pane_entity_ids(&window_view, cx),
+                state.active_tab().map(|pane| pane.entity_id()),
+            )
+        });
+
+        cx.update(|cx| {
+            window_view.update(cx, |window_view, cx| {
+                window_view.split_pane(SplitDirection::Down, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let state = window_view.read(cx);
+            assert_eq!(
+                state.terminal_error.as_deref(),
+                Some(VISIBLE_LAUNCH_FAILURE)
+            );
+            assert_eq!(state.tabs.len(), tab_count_before);
+            assert_eq!(pane_entity_ids(&window_view, cx), panes_before);
+            assert_eq!(
+                state.active_tab().map(|pane| pane.entity_id()),
+                active_pane_before,
+            );
+            assert_eq!(
+                state
+                    .tabs
+                    .first()
+                    .and_then(|tab| tab.split_root.as_ref())
+                    .map(SplitNode::leaf_count),
+                Some(2),
+            );
+        });
+    }
+
+    #[derive(Clone, Debug)]
+    struct GeneratedConstructionSettings {
+        shell_seed: u8,
+        environment_seed: u8,
+        working_directory_variant: u8,
+        max_scroll_history_lines: Option<usize>,
+    }
+
+    impl GeneratedConstructionSettings {
+        fn for_revision(&self, revision: usize) -> Self {
+            Self {
+                shell_seed: self.shell_seed.wrapping_add(revision as u8),
+                environment_seed: self.environment_seed.wrapping_add(revision as u8),
+                working_directory_variant: self.working_directory_variant,
+                max_scroll_history_lines: self.max_scroll_history_lines,
+            }
+        }
+
+        fn shell(&self, revision: usize) -> settings::Shell {
+            settings::Shell::WithArguments {
+                program: format!("audit-shell-{}-{revision}", self.shell_seed),
+                args: vec![
+                    format!("--environment-seed={}", self.environment_seed),
+                    format!("--revision={revision}"),
+                ],
+                title_override: Some(format!("Audit {revision}")),
+            }
+        }
+
+        fn environment(&self, revision: usize) -> collections::HashMap<String, String> {
+            collections::HashMap::from_iter([
+                (
+                    "AUDIT_ENVIRONMENT_SEED".to_string(),
+                    self.environment_seed.to_string(),
+                ),
+                ("AUDIT_REVISION".to_string(), revision.to_string()),
+                (
+                    "VALUE_WITH_EQUALS".to_string(),
+                    "left=middle=right".to_string(),
+                ),
+            ])
+        }
+
+        fn working_directory(&self) -> settings::WorkingDirectory {
+            match self.working_directory_variant % 3 {
+                0 => settings::WorkingDirectory::AlwaysHome,
+                1 => settings::WorkingDirectory::Always {
+                    directory: paths::home_dir().to_string_lossy().into_owned(),
+                },
+                _ => {
+                    let temporary_directory = std::env::temp_dir();
+                    let directory = if temporary_directory.is_dir() {
+                        temporary_directory
+                    } else {
+                        paths::home_dir().clone()
+                    };
+                    settings::WorkingDirectory::Always {
+                        directory: directory.to_string_lossy().into_owned(),
+                    }
+                }
+            }
+        }
+
+        fn cursor_shape(revision: usize) -> terminal_core::terminal_settings::CursorShape {
+            match revision % 4 {
+                0 => terminal_core::terminal_settings::CursorShape::Block,
+                1 => terminal_core::terminal_settings::CursorShape::Underline,
+                2 => terminal_core::terminal_settings::CursorShape::Bar,
+                _ => terminal_core::terminal_settings::CursorShape::Hollow,
+            }
+        }
+
+        fn alternate_scroll(revision: usize) -> settings::AlternateScroll {
+            if revision.is_multiple_of(2) {
+                settings::AlternateScroll::On
+            } else {
+                settings::AlternateScroll::Off
+            }
+        }
+    }
+
+    fn construction_settings_strategy()
+    -> impl proptest::strategy::Strategy<Value = GeneratedConstructionSettings> {
+        (
+            proptest::arbitrary::any::<u8>(),
+            proptest::arbitrary::any::<u8>(),
+            proptest::arbitrary::any::<u8>(),
+            proptest::option::of(0_usize..=terminal_core::MAX_SCROLL_HISTORY_LINES),
+        )
+            .prop_map(
+                |(
+                    shell_seed,
+                    environment_seed,
+                    working_directory_variant,
+                    max_scroll_history_lines,
+                )| GeneratedConstructionSettings {
+                    shell_seed,
+                    environment_seed,
+                    working_directory_variant,
+                    max_scroll_history_lines,
+                },
+            )
+    }
+
+    fn update_construction_settings(
+        cx: &mut App,
+        values: &GeneratedConstructionSettings,
+        revision: usize,
+        cursor_shape: terminal_core::terminal_settings::CursorShape,
+        alternate_scroll: settings::AlternateScroll,
+    ) {
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |content| {
+                let terminal = content
+                    .terminal
+                    .get_or_insert_with(settings::TerminalSettingsContent::default);
+                terminal.project.shell = Some(values.shell(revision));
+                terminal.project.env = Some(values.environment(revision));
+                terminal.project.working_directory = Some(values.working_directory());
+                terminal.max_scroll_history_lines = values.max_scroll_history_lines;
+                terminal.cursor_shape = Some(cursor_shape_content(cursor_shape));
+                terminal.alternate_scroll = Some(alternate_scroll);
+            });
+        });
+    }
+
+    fn assert_existing_panes_have_live_values(
+        window_view: &Entity<TerminalWindowView>,
+        cursor_shape: terminal_core::terminal_settings::CursorShape,
+        alternate_scroll: settings::AlternateScroll,
+        cx: &App,
+    ) {
+        for pane in window_view.read(cx).all_panes() {
+            let terminal = pane.read(cx).terminal.clone();
+            assert_eq!(
+                terminal.read(cx).live_settings_snapshot_for_test(),
+                (Some(cursor_shape), alternate_scroll),
+                "existing pane {:?} did not receive the live projection",
+                pane.entity_id(),
+            );
+        }
+    }
+
+    fn effective_construction_projection(cx: &App) -> FakeLaunchSnapshot {
+        let settings = TerminalSettings::get_global(cx);
+        FakeLaunchSnapshot {
+            shell: settings.shell.clone(),
+            environment: settings.env.clone(),
+            working_directory: standalone_working_directory(&settings.working_directory),
+            max_scroll_history_lines: settings.max_scroll_history_lines,
+            cursor_shape: settings.cursor_shape,
+            alternate_scroll: settings.alternate_scroll,
+        }
+    }
+
+    /// Feature: terminal-settings-completion, Property 10: Construction settings affect only subsequent panes
+    /// **Validates: Requirements 4.6–4.9, 5.9, 8.3**
+    #[gpui::property_test(config = proptest::test_runner::Config {
+        cases: 128,
+        failure_persistence: None,
+        ..proptest::test_runner::Config::default()
+    })]
+    fn construction_settings_affect_only_subsequent_panes(
+        cx: &mut gpui::TestAppContext,
+        #[strategy = proptest::collection::vec(construction_settings_strategy(), 2..7)]
+        generated_sequence: Vec<GeneratedConstructionSettings>,
+    ) {
+        let Some(initial_source) = generated_sequence.first() else {
+            return;
+        };
+        let (default_launch, window_view, initial_pane_construction, mut launched_panes) = cx
+            .update(|cx| {
+                let settings_store = SettingsStore::test(cx);
+                cx.set_global(settings_store);
+                let default_launch = fake_launch_snapshot(cx);
+                assert_eq!(default_launch, effective_construction_projection(cx));
+
+                let initial = initial_source.for_revision(0);
+                update_construction_settings(
+                    cx,
+                    &initial,
+                    0,
+                    GeneratedConstructionSettings::cursor_shape(0),
+                    GeneratedConstructionSettings::alternate_scroll(0),
+                );
+                let window_view = test_window_with_panes(1, 2, 30_000, cx);
+                let panes = window_view.read(cx).all_panes();
+                let initial_pane_construction = pane_invariant_snapshots(&panes, cx);
+                let initial_launch = fake_launch_snapshot(cx);
+                assert_eq!(initial_launch, effective_construction_projection(cx));
+                (
+                    default_launch,
+                    window_view,
+                    initial_pane_construction,
+                    vec![initial_launch],
+                )
+            });
+
+        for (revision, generated) in generated_sequence.iter().enumerate().skip(1) {
+            let generated = generated.for_revision(revision);
+            let existing_panes_before_save = launched_panes.clone();
+            let cursor_shape = GeneratedConstructionSettings::cursor_shape(revision);
+            let alternate_scroll = GeneratedConstructionSettings::alternate_scroll(revision);
+            cx.update(|cx| {
+                update_construction_settings(
+                    cx,
+                    &generated,
+                    revision,
+                    cursor_shape,
+                    alternate_scroll,
+                );
+            });
+            let new_pane = cx.update(|cx| {
+                assert_existing_panes_have_live_values(
+                    &window_view,
+                    cursor_shape,
+                    alternate_scroll,
+                    cx,
+                );
+                let new_pane = fake_launch_snapshot(cx);
+                assert_eq!(new_pane, effective_construction_projection(cx));
+                new_pane
+            });
+
+            assert_eq!(
+                launched_panes, existing_panes_before_save,
+                "save at revision {revision} changed an existing pane's immutable launch snapshot",
+            );
+            assert_eq!(new_pane.cursor_shape, cursor_shape);
+            assert_eq!(new_pane.alternate_scroll, alternate_scroll);
+            assert_eq!(
+                new_pane.environment.get("AUDIT_REVISION"),
+                Some(&revision.to_string()),
+            );
+            launched_panes.push(new_pane);
+        }
+
+        let pre_reset_revision = generated_sequence.len();
+        let Some(pre_reset_source) = generated_sequence.last() else {
+            return;
+        };
+        let pre_reset = pre_reset_source.for_revision(pre_reset_revision);
+        let pre_reset_cursor_shape = different_cursor_shape(default_launch.cursor_shape);
+        let pre_reset_alternate_scroll =
+            different_alternate_scroll(default_launch.alternate_scroll);
+        let existing_panes_before_reset = launched_panes.clone();
+        cx.update(|cx| {
+            update_construction_settings(
+                cx,
+                &pre_reset,
+                pre_reset_revision,
+                pre_reset_cursor_shape,
+                pre_reset_alternate_scroll,
+            );
+        });
+        let pre_reset_launch = cx.update(|cx| {
+            assert_existing_panes_have_live_values(
+                &window_view,
+                pre_reset_cursor_shape,
+                pre_reset_alternate_scroll,
+                cx,
+            );
+            let pre_reset_launch = fake_launch_snapshot(cx);
+            assert_eq!(pre_reset_launch, effective_construction_projection(cx));
+            pre_reset_launch
+        });
+        launched_panes.push(pre_reset_launch);
+
+        cx.update(reset_terminal_settings);
+        let reset_launch = cx.update(|cx| {
+            assert_existing_panes_have_live_values(
+                &window_view,
+                default_launch.cursor_shape,
+                default_launch.alternate_scroll,
+                cx,
+            );
+            let reset_launch = fake_launch_snapshot(cx);
+            assert_eq!(reset_launch, effective_construction_projection(cx));
+            reset_launch
+        });
+
+        assert!(
+            launched_panes
+                .iter()
+                .take(existing_panes_before_reset.len())
+                .eq(existing_panes_before_reset.iter()),
+            "Reset changed an existing pane's immutable launch snapshot",
+        );
+        assert_eq!(
+            reset_launch, default_launch,
+            "the first pane after Reset did not use Default_Settings_Source construction values",
+        );
+        cx.update(|cx| {
+            let panes = window_view.read(cx).all_panes();
+            assert_eq!(
+                pane_invariant_snapshots(&panes, cx),
+                initial_pane_construction,
+                "construction or identity of an existing pane changed after save/reset",
+            );
+        });
+    }
+
+    const GLOBAL_LIVE_SETTING_PATHS: [(&str, &str); 12] = [
+        ("font_family", "TerminalElement::prepaint"),
+        ("font_weight", "TerminalElement::prepaint"),
+        ("line_height", "TerminalElement::prepaint"),
+        ("minimum_contrast", "TerminalElement::prepaint"),
+        ("cursor_blink", "TerminalTab::cursor_visible"),
+        ("scrollbar", "TerminalScrollbarSettingsWrapper::visibility"),
+        ("option_as_meta", "TerminalWindowView::render::on_key_down"),
+        ("copy_on_select", "Terminal::mouse_up"),
+        ("keep_selection_on_copy", "Terminal::process_terminal_event"),
+        ("open_links_in_mouse_mode", "Terminal::mouse_down"),
+        ("scroll_multiplier", "TerminalTab::scroll_wheel"),
+        ("bell", "TerminalWindowView::handle_bell"),
+    ];
+
+    #[derive(Clone, Debug)]
+    struct GeneratedLiveSettings {
+        font_family: String,
+        font_weight: f32,
+        line_height: settings::TerminalLineHeight,
+        minimum_contrast: f32,
+        blinking: settings::TerminalBlink,
+        scrollbar: settings::ShowScrollbar,
+        option_as_meta: bool,
+        copy_on_select: bool,
+        keep_selection_on_copy: bool,
+        open_links_in_mouse_mode: bool,
+        scroll_multiplier: f32,
+        bell: settings::TerminalBell,
+        cursor_shape: terminal_core::terminal_settings::CursorShape,
+        alternate_scroll: settings::AlternateScroll,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct PaneInvariantSnapshot {
+        pane_entity_id: gpui::EntityId,
+        terminal_entity_id: gpui::EntityId,
+        is_pty: bool,
+        process_id: String,
+        construction: String,
+    }
+
+    fn cursor_shape_content(
+        cursor_shape: terminal_core::terminal_settings::CursorShape,
+    ) -> settings::CursorShapeContent {
+        match cursor_shape {
+            terminal_core::terminal_settings::CursorShape::Block => {
+                settings::CursorShapeContent::Block
+            }
+            terminal_core::terminal_settings::CursorShape::Underline => {
+                settings::CursorShapeContent::Underline
+            }
+            terminal_core::terminal_settings::CursorShape::Bar => settings::CursorShapeContent::Bar,
+            terminal_core::terminal_settings::CursorShape::Hollow => {
+                settings::CursorShapeContent::Hollow
+            }
+        }
+    }
+
+    fn different_cursor_shape(
+        cursor_shape: terminal_core::terminal_settings::CursorShape,
+    ) -> terminal_core::terminal_settings::CursorShape {
+        match cursor_shape {
+            terminal_core::terminal_settings::CursorShape::Block => {
+                terminal_core::terminal_settings::CursorShape::Underline
+            }
+            _ => terminal_core::terminal_settings::CursorShape::Block,
+        }
+    }
+
+    fn different_alternate_scroll(
+        alternate_scroll: settings::AlternateScroll,
+    ) -> settings::AlternateScroll {
+        match alternate_scroll {
+            settings::AlternateScroll::On => settings::AlternateScroll::Off,
+            settings::AlternateScroll::Off => settings::AlternateScroll::On,
+        }
+    }
+
+    fn update_live_settings(cx: &mut App, values: &GeneratedLiveSettings) {
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |content| {
+                let terminal = content
+                    .terminal
+                    .get_or_insert_with(settings::TerminalSettingsContent::default);
+                terminal.font_family =
+                    Some(settings::FontFamilyName(values.font_family.clone().into()));
+                terminal.font_weight = Some(settings::FontWeightContent(values.font_weight));
+                terminal.line_height = Some(values.line_height.clone());
+                terminal.minimum_contrast = Some(values.minimum_contrast);
+                terminal.blinking = Some(values.blinking);
+                terminal.scrollbar.get_or_insert_default().show = Some(values.scrollbar);
+                terminal.option_as_meta = Some(values.option_as_meta);
+                terminal.copy_on_select = Some(values.copy_on_select);
+                terminal.keep_selection_on_copy = Some(values.keep_selection_on_copy);
+                terminal.open_links_in_mouse_mode = Some(values.open_links_in_mouse_mode);
+                terminal.scroll_multiplier = Some(values.scroll_multiplier);
+                terminal.bell = Some(values.bell);
+                terminal.cursor_shape = Some(cursor_shape_content(values.cursor_shape));
+                terminal.alternate_scroll = Some(values.alternate_scroll);
+            });
+        });
+    }
+
+    fn reset_terminal_settings(cx: &mut App) {
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |content| content.terminal = None);
+        });
+    }
+
+    fn new_test_pane(
+        settings: &TerminalSettings,
+        window_id: u64,
+        cx: &mut App,
+    ) -> Entity<TerminalTab> {
+        let builder = TerminalBuilder::new_display_only(
             settings.cursor_shape,
             settings.alternate_scroll,
             settings.max_scroll_history_lines,
-            settings.path_hyperlink_regexes.clone(),
-            Duration::from_millis(settings.path_hyperlink_timeout_ms),
-            false,
-            0,
-            None,
-            cx,
-            Vec::new(),
+            window_id,
+            cx.background_executor(),
             PathStyle::local(),
+        );
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+        cx.new(|cx| TerminalTab::new(terminal, cx))
+    }
+
+    fn test_window_with_panes(
+        non_active_tab_count: usize,
+        split_leaf_count: usize,
+        window_id_seed: u64,
+        cx: &mut App,
+    ) -> Entity<TerminalWindowView> {
+        let settings = TerminalSettings::get_global(cx).clone();
+        let mut tabs = Vec::with_capacity(non_active_tab_count + 1);
+        for index in 0..non_active_tab_count {
+            tabs.push(WindowTab::new(new_test_pane(
+                &settings,
+                window_id_seed + index as u64,
+                cx,
+            )));
+        }
+
+        let first_split_pane =
+            new_test_pane(&settings, window_id_seed + non_active_tab_count as u64, cx);
+        let mut split_root = SplitNode::leaf(first_split_pane.clone());
+        let mut active_pane = first_split_pane.clone();
+        for index in 1..split_leaf_count {
+            let split_pane = new_test_pane(
+                &settings,
+                window_id_seed + non_active_tab_count as u64 + index as u64,
+                cx,
+            );
+            assert!(
+                split_root.split(&first_split_pane, split_pane.clone(), SplitDirection::Right,)
+            );
+            active_pane = split_pane;
+        }
+        tabs.push(WindowTab {
+            split_root: Some(split_root),
+            active_pane_tab: Some(active_pane),
+            maximized_pane_tab: None,
+        });
+        let active_tab_index = tabs.len() - 1;
+
+        let window_view = cx.new(TerminalWindowView::new);
+        window_view.update(cx, |window_view, _| {
+            window_view.tabs = tabs;
+            window_view.active_tab_index = active_tab_index;
+        });
+        window_view
+    }
+
+    fn pane_invariant_snapshots(
+        panes: &[Entity<TerminalTab>],
+        cx: &App,
+    ) -> Vec<PaneInvariantSnapshot> {
+        panes
+            .iter()
+            .map(|pane| {
+                let terminal = pane.read(cx).terminal.clone();
+                let terminal = terminal.read(cx);
+                PaneInvariantSnapshot {
+                    pane_entity_id: pane.entity_id(),
+                    terminal_entity_id: pane.read(cx).terminal.entity_id(),
+                    is_pty: terminal.is_pty(),
+                    process_id: format!("{:?}", terminal.pid()),
+                    construction: format!("{:?}", terminal.construction_snapshot_for_test()),
+                }
+            })
+            .collect()
+    }
+
+    fn scrollbar_visibility(show: Option<settings::ShowScrollbar>) -> ShowScrollbar {
+        match show.unwrap_or(settings::ShowScrollbar::Auto) {
+            settings::ShowScrollbar::Auto => ShowScrollbar::Auto,
+            settings::ShowScrollbar::System => ShowScrollbar::System,
+            settings::ShowScrollbar::Always => ShowScrollbar::Always,
+            settings::ShowScrollbar::Never => ShowScrollbar::Never,
+        }
+    }
+
+    fn audit_stage(
+        stage: &str,
+        window_view: &Entity<TerminalWindowView>,
+        expected: &EffectiveLiveSettingsSnapshot,
+        cx: &mut App,
+    ) -> Vec<String> {
+        let panes = window_view.read(cx).all_panes();
+        let before = pane_invariant_snapshots(&panes, cx);
+        let mut gaps = Vec::new();
+
+        assert_eq!(EffectiveLiveSettingsSnapshot::capture(cx), *expected);
+        assert_eq!(
+            TerminalScrollbarSettingsWrapper.visibility(cx),
+            scrollbar_visibility(expected.scrollbar),
+        );
+        for pane in &panes {
+            assert_eq!(EffectiveLiveSettingsSnapshot::capture(cx), *expected);
+            pane.read(cx).cursor_visible(cx);
+
+            let terminal = pane.read(cx).terminal.clone();
+            let terminal = terminal.read(cx);
+            let observed = terminal.live_settings_snapshot_for_test();
+            if observed.0 != Some(expected.cursor_shape) {
+                gaps.push(format!(
+                    "{stage}: pane {:?} cursor_shape remained {:?}, expected {:?}",
+                    pane.entity_id(),
+                    observed.0,
+                    expected.cursor_shape,
+                ));
+            }
+            if observed.1 != expected.alternate_scroll {
+                gaps.push(format!(
+                    "{stage}: pane {:?} alternate_scroll remained {:?}, expected {:?}",
+                    pane.entity_id(),
+                    observed.1,
+                    expected.alternate_scroll,
+                ));
+            }
+            assert_eq!(
+                terminal.live_settings_application_counts_for_test(),
+                (1, 1),
+                "{stage}: pane {:?} must receive each imperative live setting exactly once",
+                pane.entity_id(),
+            );
+        }
+
+        let after = pane_invariant_snapshots(&panes, cx);
+        assert_eq!(
+            before, after,
+            "{stage}: live update recreated pane, terminal, PTY, or construction state"
+        );
+        gaps
+    }
+
+    struct GeneratedLiveSettingsParameters {
+        font_seed: u8,
+        font_weight_step: u8,
+        line_height_step: u8,
+        minimum_contrast: u8,
+        blink_variant: u8,
+        scrollbar_variant: u8,
+        option_as_meta: bool,
+        copy_on_select: bool,
+        keep_selection_on_copy: bool,
+        open_links_in_mouse_mode: bool,
+        scroll_multiplier_step: u8,
+        bell_enabled: bool,
+        cursor_shape_variant: u8,
+        alternate_scroll_enabled: bool,
+    }
+
+    fn generated_live_settings(
+        parameters: GeneratedLiveSettingsParameters,
+    ) -> GeneratedLiveSettings {
+        let GeneratedLiveSettingsParameters {
+            font_seed,
+            font_weight_step,
+            line_height_step,
+            minimum_contrast,
+            blink_variant,
+            scrollbar_variant,
+            option_as_meta,
+            copy_on_select,
+            keep_selection_on_copy,
+            open_links_in_mouse_mode,
+            scroll_multiplier_step,
+            bell_enabled,
+            cursor_shape_variant,
+            alternate_scroll_enabled,
+        } = parameters;
+        let blinking = match blink_variant % 3 {
+            0 => settings::TerminalBlink::Off,
+            1 => settings::TerminalBlink::On,
+            _ => settings::TerminalBlink::TerminalControlled,
+        };
+        let scrollbar = match scrollbar_variant % 4 {
+            0 => settings::ShowScrollbar::Auto,
+            1 => settings::ShowScrollbar::System,
+            2 => settings::ShowScrollbar::Always,
+            _ => settings::ShowScrollbar::Never,
+        };
+        let cursor_shape = match cursor_shape_variant % 4 {
+            0 => terminal_core::terminal_settings::CursorShape::Block,
+            1 => terminal_core::terminal_settings::CursorShape::Underline,
+            2 => terminal_core::terminal_settings::CursorShape::Bar,
+            _ => terminal_core::terminal_settings::CursorShape::Hollow,
+        };
+        GeneratedLiveSettings {
+            font_family: format!("Audit Font {font_seed}"),
+            font_weight: 100.0 + f32::from(font_weight_step % 9) * 100.0,
+            line_height: settings::TerminalLineHeight::Custom(
+                1.0 + f32::from(line_height_step % 21) / 10.0,
+            ),
+            minimum_contrast: f32::from(minimum_contrast % 107),
+            blinking,
+            scrollbar,
+            option_as_meta,
+            copy_on_select,
+            keep_selection_on_copy,
+            open_links_in_mouse_mode,
+            scroll_multiplier: 0.1 + f32::from(scroll_multiplier_step % 100) / 10.0,
+            bell: if bell_enabled {
+                settings::TerminalBell::System
+            } else {
+                settings::TerminalBell::Off
+            },
+            cursor_shape,
+            alternate_scroll: if alternate_scroll_enabled {
+                settings::AlternateScroll::On
+            } else {
+                settings::AlternateScroll::Off
+            },
+        }
+    }
+
+    fn generated_live_settings_strategy()
+    -> impl proptest::strategy::Strategy<Value = GeneratedLiveSettings> {
+        (
+            proptest::arbitrary::any::<u8>(),
+            proptest::arbitrary::any::<u8>(),
+            proptest::arbitrary::any::<u8>(),
+            proptest::arbitrary::any::<u8>(),
+            proptest::arbitrary::any::<u8>(),
+            proptest::arbitrary::any::<u8>(),
+            proptest::arbitrary::any::<u8>(),
+            proptest::arbitrary::any::<u8>(),
+            (
+                proptest::arbitrary::any::<bool>(),
+                proptest::arbitrary::any::<bool>(),
+                proptest::arbitrary::any::<bool>(),
+                proptest::arbitrary::any::<bool>(),
+                proptest::arbitrary::any::<bool>(),
+                proptest::arbitrary::any::<bool>(),
+            ),
         )
-    });
-    builder.await.ok()
+            .prop_map(
+                |(
+                    font_seed,
+                    font_weight_step,
+                    line_height_step,
+                    minimum_contrast,
+                    blink_variant,
+                    scrollbar_variant,
+                    scroll_multiplier_step,
+                    cursor_shape_variant,
+                    (
+                        option_as_meta,
+                        copy_on_select,
+                        keep_selection_on_copy,
+                        open_links_in_mouse_mode,
+                        bell_enabled,
+                        alternate_scroll_enabled,
+                    ),
+                )| {
+                    generated_live_settings(GeneratedLiveSettingsParameters {
+                        font_seed,
+                        font_weight_step,
+                        line_height_step,
+                        minimum_contrast,
+                        blink_variant,
+                        scrollbar_variant,
+                        option_as_meta,
+                        copy_on_select,
+                        keep_selection_on_copy,
+                        open_links_in_mouse_mode,
+                        scroll_multiplier_step,
+                        bell_enabled,
+                        cursor_shape_variant,
+                        alternate_scroll_enabled,
+                    })
+                },
+            )
+    }
+
+    /// Feature: terminal-settings-completion, Property 7: Live settings reach every existing pane without recreation
+    /// **Validates: Requirements 3.1–3.7, 5.8, 8.2**
+    #[gpui::property_test(config = proptest::test_runner::Config {
+        cases: 128,
+        failure_persistence: None,
+        ..proptest::test_runner::Config::default()
+    })]
+    fn live_settings_reach_every_existing_pane_without_recreation(
+        cx: &mut gpui::TestAppContext,
+        #[strategy = 1_usize..4] non_active_tab_count: usize,
+        #[strategy = 2_usize..6] split_leaf_count: usize,
+        #[strategy = generated_live_settings_strategy()] custom: GeneratedLiveSettings,
+    ) {
+        let custom_window = cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            assert_eq!(GLOBAL_LIVE_SETTING_PATHS.len(), 12);
+
+            let mut initial_custom = custom.clone();
+            initial_custom.cursor_shape = different_cursor_shape(custom.cursor_shape);
+            initial_custom.alternate_scroll = different_alternate_scroll(custom.alternate_scroll);
+            update_live_settings(cx, &initial_custom);
+            test_window_with_panes(non_active_tab_count, split_leaf_count, 10_000, cx)
+        });
+
+        cx.update(|cx| update_live_settings(cx, &custom));
+        let mut gaps = cx.update(|cx| {
+            let custom_expected = EffectiveLiveSettingsSnapshot::capture(cx);
+            audit_stage("saved live values", &custom_window, &custom_expected, cx)
+        });
+
+        let defaults = cx.update(|cx| {
+            reset_terminal_settings(cx);
+            EffectiveLiveSettingsSnapshot::capture(cx)
+        });
+        let reset_initial = GeneratedLiveSettings {
+            font_family: "Reset audit override".to_string(),
+            font_weight: 900.0,
+            line_height: settings::TerminalLineHeight::Custom(2.0),
+            minimum_contrast: 106.0,
+            blinking: settings::TerminalBlink::On,
+            scrollbar: settings::ShowScrollbar::Always,
+            option_as_meta: !defaults.option_as_meta,
+            copy_on_select: !defaults.copy_on_select,
+            keep_selection_on_copy: !defaults.keep_selection_on_copy,
+            open_links_in_mouse_mode: !defaults.open_links_in_mouse_mode,
+            scroll_multiplier: defaults.scroll_multiplier + 1.0,
+            bell: match defaults.bell {
+                settings::TerminalBell::System => settings::TerminalBell::Off,
+                settings::TerminalBell::Off => settings::TerminalBell::System,
+            },
+            cursor_shape: different_cursor_shape(defaults.cursor_shape),
+            alternate_scroll: different_alternate_scroll(defaults.alternate_scroll),
+        };
+        let reset_window = cx.update(|cx| {
+            update_live_settings(cx, &reset_initial);
+            test_window_with_panes(non_active_tab_count, split_leaf_count, 20_000, cx)
+        });
+
+        cx.update(reset_terminal_settings);
+        cx.update(|cx| {
+            let reset_expected = EffectiveLiveSettingsSnapshot::capture(cx);
+            assert_eq!(reset_expected, defaults);
+            gaps.extend(audit_stage(
+                "Reset Terminal Defaults",
+                &reset_window,
+                &reset_expected,
+                cx,
+            ));
+        });
+
+        assert!(
+            gaps.is_empty(),
+            "Property 7 live-setting audit found gaps:\n{}",
+            gaps.join("\n"),
+        );
+    }
+
+    /// Feature: terminal-settings-completion, Property 9: Scrollbar visibility mapping is total and exact
+    /// **Validates: Requirements 3.5, 8.5**
+    #[gpui::property_test(config = proptest::test_runner::Config {
+        cases: 128,
+        failure_persistence: None,
+        ..proptest::test_runner::Config::default()
+    })]
+    fn scrollbar_visibility_mapping_is_total_and_exact_without_recreating_panes(
+        cx: &mut gpui::TestAppContext,
+        #[strategy = 0_usize..4] non_active_tab_count: usize,
+        #[strategy = 1_usize..6] split_leaf_count: usize,
+        #[strategy = proptest::arbitrary::any::<u8>()] rotation: u8,
+    ) {
+        let window_view = cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            test_window_with_panes(
+                non_active_tab_count,
+                split_leaf_count,
+                30_000 + u64::from(rotation),
+                cx,
+            )
+        });
+        let panes_before = cx.update(|cx| {
+            let panes = window_view.read(cx).all_panes();
+            (
+                pane_entity_ids(&window_view, cx),
+                pane_invariant_snapshots(&panes, cx),
+            )
+        });
+        let mappings = [
+            (settings::ShowScrollbar::Auto, ShowScrollbar::Auto),
+            (settings::ShowScrollbar::System, ShowScrollbar::System),
+            (settings::ShowScrollbar::Always, ShowScrollbar::Always),
+            (settings::ShowScrollbar::Never, ShowScrollbar::Never),
+        ];
+
+        for mapping_index in 0..mappings.len() {
+            let (configured, expected) =
+                mappings[(mapping_index + usize::from(rotation)) % mappings.len()];
+            cx.update(|cx| {
+                SettingsStore::update_global(cx, |store, cx| {
+                    store.update_user_settings(cx, |content| {
+                        content
+                            .terminal
+                            .get_or_insert_default()
+                            .scrollbar
+                            .get_or_insert_default()
+                            .show = Some(configured);
+                    });
+                });
+
+                assert_eq!(
+                    TerminalScrollbarSettingsWrapper.visibility(cx),
+                    expected,
+                    "scrollbar mode {configured:?} did not map exactly",
+                );
+                let panes = window_view.read(cx).all_panes();
+                assert_eq!(
+                    pane_entity_ids(&window_view, cx),
+                    panes_before.0,
+                    "switching scrollbar mode {configured:?} recreated a pane",
+                );
+                assert_eq!(
+                    pane_invariant_snapshots(&panes, cx),
+                    panes_before.1,
+                    "switching scrollbar mode {configured:?} changed pane or terminal identity",
+                );
+            });
+        }
+    }
 }

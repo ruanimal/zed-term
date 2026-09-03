@@ -28,10 +28,10 @@ use futures::StreamExt;
 use pty_info::{ProcessIdGetter, PtyProcessInfo};
 use serde::{Deserialize, Serialize};
 use settings::Settings;
-use util::shell::Shell;
 use terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape, TerminalSettings};
 use theme::{ActiveTheme, Theme};
 use urlencoding;
+use util::shell::Shell;
 use util::{paths::PathStyle, truncate_and_trailoff};
 
 use std::{
@@ -45,7 +45,7 @@ use std::{
     time::{Duration, Instant},
 };
 use thiserror::Error;
-use vte::ansi::{Attr, Handler, Processor, StdSyncHandler};
+use vte::ansi::{Attr, Handler, NamedPrivateMode, PrivateMode, Processor, StdSyncHandler};
 pub use vte::ansi::{Color, NamedColor, Rgb};
 
 use gpui::{
@@ -60,13 +60,12 @@ use crate::alacritty::current_child_signal_mask;
 use crate::alacritty::display_only_term_config;
 use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
-    AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
-    apply_config, clear_saved_screen, content_text, display_offset,
-    find_from_terminal_point, full_content_range, last_non_empty_lines,
-    make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
-    scroll_display, scroll_to_point, search_matches, selection_text, set_default_cursor_style,
-    set_selection as set_term_selection, shrink_to_used, spawn_event_loop, total_lines,
-    update_selection as update_term_selection, used_lines,
+    AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches, apply_config,
+    clear_saved_screen, content_text, display_offset, find_from_terminal_point, full_content_range,
+    last_non_empty_lines, make_content, new_term, open_pty, pty_options, pty_term_config, resize,
+    screen_lines, scroll_display, scroll_to_point, search_matches, selection_text,
+    set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
+    spawn_event_loop, total_lines, update_selection as update_term_selection, used_lines,
 };
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
@@ -610,10 +609,7 @@ const DEBUG_LINE_HEIGHT: Pixels = px(5.);
 pub const TERMINAL_PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Inserts ZedTerm-specific environment variables for terminal sessions.
-pub fn insert_terminal_env(
-    env: &mut HashMap<String, String>,
-    version: &str,
-) {
+pub fn insert_terminal_env(env: &mut HashMap<String, String>, version: &str) {
     env.insert("ZED_TERM".to_string(), "zedterm".to_string());
     env.insert("TERM_PROGRAM".to_string(), "zedterm".to_string());
     env.insert("TERM".to_string(), "xterm-256color".to_string());
@@ -941,6 +937,8 @@ impl TerminalBuilder {
             suppress_hyperlink_throttle_once: false,
             #[cfg(any(test, feature = "test-support"))]
             pty_write_log: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            live_settings_application_counts: (0, 0),
         };
 
         TerminalBuilder {
@@ -1177,6 +1175,8 @@ impl TerminalBuilder {
                 suppress_hyperlink_throttle_once: false,
                 #[cfg(any(test, feature = "test-support"))]
                 pty_write_log: Default::default(),
+                #[cfg(any(test, feature = "test-support"))]
+                live_settings_application_counts: (0, 0),
             };
 
             if !activation_script.is_empty() {
@@ -1345,6 +1345,8 @@ pub struct Terminal {
     suppress_hyperlink_throttle_once: bool,
     #[cfg(any(test, feature = "test-support"))]
     pty_write_log: std::cell::RefCell<Vec<Vec<u8>>>,
+    #[cfg(any(test, feature = "test-support"))]
+    live_settings_application_counts: (usize, usize),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1683,8 +1685,28 @@ impl Terminal {
     }
 
     pub fn set_cursor_shape(&mut self, cursor_shape: SettingsCursorShape) {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.live_settings_application_counts.0 += 1;
+        }
         set_default_cursor_style(&mut self.term_config, cursor_shape);
         apply_config(&self.term, &self.term_config);
+    }
+
+    pub fn set_alternate_scroll(&mut self, alternate_scroll: AlternateScroll) {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.live_settings_application_counts.1 += 1;
+        }
+        let mut terminal = self.term.lock();
+        match alternate_scroll {
+            AlternateScroll::On => {
+                terminal.set_private_mode(PrivateMode::Named(NamedPrivateMode::AlternateScroll))
+            }
+            AlternateScroll::Off => {
+                terminal.unset_private_mode(PrivateMode::Named(NamedPrivateMode::AlternateScroll))
+            }
+        }
     }
 
     pub fn write_output(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
@@ -1886,6 +1908,53 @@ impl Terminal {
     #[cfg(any(test, feature = "test-support"))]
     pub fn keyboard_input_sent(&self) -> bool {
         self.keyboard_input_sent
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn live_settings_snapshot_for_test(
+        &self,
+    ) -> (Option<SettingsCursorShape>, AlternateScroll) {
+        let terminal = self.term.lock_unfair();
+        let content = make_content(&terminal, &self.last_content);
+        let cursor_shape = match content.cursor.shape {
+            CursorShape::Block => Some(SettingsCursorShape::Block),
+            CursorShape::Underline => Some(SettingsCursorShape::Underline),
+            CursorShape::Bar => Some(SettingsCursorShape::Bar),
+            CursorShape::HollowBlock => Some(SettingsCursorShape::Hollow),
+            CursorShape::Hidden => None,
+        };
+        let alternate_scroll = if content.mode.contains(Modes::ALTERNATE_SCROLL) {
+            AlternateScroll::On
+        } else {
+            AlternateScroll::Off
+        };
+        (cursor_shape, alternate_scroll)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn live_settings_application_counts_for_test(&self) -> (usize, usize) {
+        self.live_settings_application_counts
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn construction_snapshot_for_test(
+        &self,
+    ) -> (
+        Shell,
+        HashMap<String, String>,
+        Option<usize>,
+        Vec<String>,
+        Duration,
+        u64,
+    ) {
+        (
+            self.template.shell.clone(),
+            self.template.env.clone(),
+            self.template.max_scroll_history_lines,
+            self.template.path_hyperlink_regexes.clone(),
+            self.template.path_hyperlink_timeout,
+            self.template.window_id,
+        )
     }
 
     pub fn try_keystroke(&mut self, keystroke: &Keystroke, option_as_meta: bool) -> bool {
@@ -4722,6 +4791,23 @@ mod tests {
             PathStyle::local(),
         )
         .terminal
+    }
+
+    #[test]
+    fn test_set_alternate_scroll_updates_the_existing_terminal() {
+        let mut terminal = make_display_only_terminal();
+
+        terminal.set_alternate_scroll(AlternateScroll::Off);
+        assert_eq!(
+            terminal.live_settings_snapshot_for_test().1,
+            AlternateScroll::Off
+        );
+        terminal.set_alternate_scroll(AlternateScroll::On);
+        assert_eq!(
+            terminal.live_settings_snapshot_for_test().1,
+            AlternateScroll::On
+        );
+        assert_eq!(terminal.live_settings_application_counts_for_test().1, 2);
     }
 
     #[test]

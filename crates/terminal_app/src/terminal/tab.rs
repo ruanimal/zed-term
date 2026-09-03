@@ -3,7 +3,10 @@
 //! Replaces Zed's `TerminalView`, which was bound to `Workspace`/`Project`:
 //! it owns scroll state and IME state and forwards input to the terminal.
 
-use std::ops::Range as StdRange;
+use std::{
+    ops::Range as StdRange,
+    time::{Duration, Instant},
+};
 
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Pixels, ScrollWheelEvent, Window};
 use settings::Settings as _;
@@ -12,6 +15,21 @@ use terminal_core::{
     terminal_settings::TerminalSettings,
 };
 use util::ResultExt;
+
+use super::TerminalScrollHandle;
+
+fn cursor_is_visible(
+    mode: settings::TerminalBlink,
+    terminal_blinking_enabled: bool,
+    elapsed: Duration,
+) -> bool {
+    let should_blink = match mode {
+        settings::TerminalBlink::Off => false,
+        settings::TerminalBlink::On => true,
+        settings::TerminalBlink::TerminalControlled => terminal_blinking_enabled,
+    };
+    !should_blink || (elapsed.as_millis() / 500).is_multiple_of(2)
+}
 
 /// Events emitted by a [`TerminalTab`] for the window to act on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +55,7 @@ pub struct TerminalTab {
     /// Scroll offset of a block below the cursor; unused in standalone mode,
     /// kept so the terminal element can read it without branching on it.
     pub scroll_top: Pixels,
+    pub scroll_handle: TerminalScrollHandle,
     ime_state: Option<ImeState>,
     /// Active search query and whether the search bar is showing.
     pub search_query: String,
@@ -45,11 +64,14 @@ pub struct TerminalTab {
     pub active_match: Option<usize>,
     /// Sticky unread bell state, cleared when input is sent to this pane.
     has_bell: bool,
+    terminal_blinking_enabled: bool,
+    blink_started_at: Instant,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
 impl TerminalTab {
     pub fn new(terminal: Entity<Terminal>, cx: &mut Context<Self>) -> Self {
+        let scroll_handle = TerminalScrollHandle::new(terminal.read(cx));
         let mut this = Self {
             terminal,
             // Each terminal gets its own focus handle so pane focus is
@@ -57,11 +79,14 @@ impl TerminalTab {
             focus_handle: cx.focus_handle(),
             search_focus_handle: cx.focus_handle(),
             scroll_top: Pixels::ZERO,
+            scroll_handle,
             ime_state: None,
             search_query: String::new(),
             search_active: false,
             active_match: None,
             has_bell: false,
+            terminal_blinking_enabled: false,
+            blink_started_at: Instant::now(),
             _subscriptions: Vec::new(),
         };
 
@@ -69,10 +94,18 @@ impl TerminalTab {
         // pick them up; the element reads `title()` every frame.
         this._subscriptions
             .push(
-                cx.subscribe(&this.terminal, |this, _terminal, event, cx| match event {
+                cx.subscribe(&this.terminal, |this, terminal, event, cx| match event {
                     // PTY output arrives as a Wakeup event, not an `Entity::notify`;
                     // repaint immediately (this is the no-heartbeat path).
-                    Event::Wakeup | Event::TitleChanged | Event::BreadcrumbsChanged => cx.notify(),
+                    Event::Wakeup | Event::TitleChanged | Event::BreadcrumbsChanged => {
+                        this.scroll_handle.update(terminal.read(cx));
+                        cx.notify();
+                    }
+                    Event::BlinkChanged(enabled) => {
+                        this.terminal_blinking_enabled = *enabled;
+                        this.blink_started_at = Instant::now();
+                        cx.notify();
+                    }
                     Event::Open(target) => match target {
                         // Cmd-click on a hyperlink or path: hand it to the OS.
                         MaybeNavigationTarget::Url(url) => cx.open_url(url),
@@ -97,7 +130,10 @@ impl TerminalTab {
         // Content updates notify the window so shell output repaints promptly
         // instead of waiting for the window heartbeat.
         this._subscriptions
-            .push(cx.observe(&this.terminal, |_, _, cx| cx.notify()));
+            .push(cx.observe(&this.terminal, |this, terminal, cx| {
+                this.scroll_handle.update(terminal.read(cx));
+                cx.notify();
+            }));
 
         this
     }
@@ -112,6 +148,32 @@ impl TerminalTab {
 
     pub(crate) fn has_bell(&self) -> bool {
         self.has_bell
+    }
+
+    pub(crate) fn cursor_visible(&self, cx: &App) -> bool {
+        cursor_is_visible(
+            TerminalSettings::get_global(cx).blinking,
+            self.terminal_blinking_enabled,
+            self.blink_started_at.elapsed(),
+        )
+    }
+
+    pub(crate) fn apply_pending_scrollbar_offset(&mut self, cx: &mut Context<Self>) {
+        let Some(target_offset) = self.scroll_handle.future_display_offset.take() else {
+            return;
+        };
+        let current_offset = self.terminal.read(cx).last_content().display_offset;
+        self.terminal.update(cx, |terminal, _| {
+            if target_offset > current_offset {
+                terminal.scroll_up_by(target_offset - current_offset);
+            } else if target_offset < current_offset {
+                terminal.scroll_down_by(current_offset - target_offset);
+            }
+        });
+    }
+
+    pub(crate) fn update_scrollbar(&self, cx: &App) {
+        self.scroll_handle.update(self.terminal.read(cx));
     }
 
     pub(crate) fn clear_bell(&mut self, cx: &mut Context<Self>) {
@@ -328,4 +390,130 @@ pub(crate) enum ScrollAction {
     HalfPageDown,
     Top,
     Bottom,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{AppContext as _, UpdateGlobal as _};
+    use proptest::strategy::{Just, Strategy as _};
+    use settings::SettingsStore;
+    use terminal_core::TerminalBuilder;
+    use util::paths::PathStyle;
+
+    fn terminal_blink_strategy()
+    -> impl proptest::strategy::Strategy<Value = settings::TerminalBlink> {
+        proptest::prop_oneof![
+            Just(settings::TerminalBlink::Off),
+            Just(settings::TerminalBlink::On),
+            Just(settings::TerminalBlink::TerminalControlled),
+        ]
+    }
+
+    fn elapsed_duration_strategy() -> impl proptest::strategy::Strategy<Value = Duration> {
+        proptest::prop_oneof![
+            Just(Duration::ZERO),
+            Just(Duration::from_nanos(499_999_999)),
+            Just(Duration::from_millis(500)),
+            Just(Duration::from_nanos(999_999_999)),
+            Just(Duration::from_secs(1)),
+            (0_u64..20_000, 0_u32..1_000_000).prop_map(
+                |(milliseconds, submillisecond_nanoseconds)| {
+                    Duration::from_millis(milliseconds)
+                        + Duration::from_nanos(u64::from(submillisecond_nanoseconds))
+                }
+            ),
+        ]
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 128,
+            failure_persistence: None,
+            ..proptest::test_runner::Config::default()
+        })]
+
+        /// Feature: terminal-settings-completion, Property 8: Cursor visibility follows mode and 500ms phase
+        /// **Validates: Requirements 3.2, 3.3, 3.4, 8.4**
+        #[test]
+        fn cursor_visibility_follows_mode_and_500_millisecond_phase(
+            mode in terminal_blink_strategy(),
+            terminal_blinking_enabled in proptest::bool::ANY,
+            elapsed in elapsed_duration_strategy(),
+        ) {
+            let phase_is_visible =
+                (elapsed.as_nanos() / Duration::from_millis(500).as_nanos()).is_multiple_of(2);
+            let expected = match mode {
+                settings::TerminalBlink::Off => true,
+                settings::TerminalBlink::On => phase_is_visible,
+                settings::TerminalBlink::TerminalControlled => {
+                    !terminal_blinking_enabled || phase_is_visible
+                }
+            };
+
+            proptest::prop_assert_eq!(
+                cursor_is_visible(mode, terminal_blinking_enabled, elapsed),
+                expected,
+                "mode={:?}, terminal_blinking_enabled={}, elapsed={:?}",
+                mode,
+                terminal_blinking_enabled,
+                elapsed,
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn blink_changed_resets_phase_on_existing_pane(cx: &mut gpui::TestAppContext) {
+        let pane = cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content
+                        .terminal
+                        .get_or_insert_with(settings::TerminalSettingsContent::default)
+                        .blinking = Some(settings::TerminalBlink::TerminalControlled);
+                });
+            });
+
+            let settings = TerminalSettings::get_global(cx);
+            let builder = TerminalBuilder::new_display_only(
+                settings.cursor_shape,
+                settings.alternate_scroll,
+                settings.max_scroll_history_lines,
+                1,
+                cx.background_executor(),
+                PathStyle::local(),
+            );
+            let terminal = cx.new(|cx| builder.subscribe(cx));
+            cx.new(|cx| TerminalTab::new(terminal, cx))
+        });
+
+        let terminal = cx.update(|cx| {
+            pane.update(cx, |pane, _| {
+                pane.blink_started_at = Instant::now() - Duration::from_millis(500);
+            });
+            assert!(pane.read(cx).cursor_visible(cx));
+            pane.read(cx).terminal.clone()
+        });
+
+        let timer = cx.update(|cx| cx.background_executor().timer(Duration::from_millis(500)));
+        cx.background_executor
+            .advance_clock(Duration::from_millis(500));
+        timer.await;
+
+        cx.update(|cx| {
+            terminal.update(cx, |_terminal, cx| {
+                cx.emit(Event::BlinkChanged(true));
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let pane = pane.read(cx);
+            assert!(pane.terminal_blinking_enabled);
+            assert!(pane.cursor_visible(cx));
+            assert!(pane.blink_started_at.elapsed() < Duration::from_millis(500));
+        });
+    }
 }
