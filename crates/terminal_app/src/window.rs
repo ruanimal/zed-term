@@ -1412,7 +1412,6 @@ fn render_terminal_pane(
             Scrollbars::for_settings::<TerminalScrollbarSettingsWrapper>()
                 .id(("terminal-scrollbar", scrollbar_id))
                 .show_along(ScrollAxes::Vertical)
-                .with_stable_track_along(ScrollAxes::Vertical, colors.terminal_background)
                 .tracked_scroll_handle(&scroll_handle),
             window,
             cx,
