@@ -5,15 +5,16 @@
 //! flexes are the only stored layout state.
 
 use gpui::{
-    AnyElement, App, Axis, Entity, InteractiveElement as _, IntoElement as _, MouseButton,
-    MouseDownEvent, ParentElement as _, Pixels, Styled as _, px,
+    Along, AnyElement, App, Axis, Entity, InteractiveElement as _, IntoElement as _, MouseButton,
+    MouseDownEvent, ParentElement as _, Pixels, Size, Styled as _, px, relative,
 };
 use theme::ActiveTheme as _;
 
 use crate::terminal::TerminalTab;
 
 /// Hitbox width of the divider in pixels (Zed: HANDLE_HITBOX_SIZE = 4).
-pub(crate) const DIVIDER_HITBOX: Pixels = px(6.);
+pub(crate) const DIVIDER_HITBOX: Pixels = px(4.);
+const DIVIDER_SIZE: Pixels = px(1.);
 /// Smallest allowed flex weight, keeping a leaf visible during a drag.
 const MIN_FLEX: f32 = 0.05;
 
@@ -57,6 +58,19 @@ pub(crate) enum SplitNode {
         flexes: Vec<f32>,
         children: Vec<SplitNode>,
     },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DividerPath {
+    axis: Axis,
+    axis_path: Vec<usize>,
+    divider_index: usize,
+}
+
+impl DividerPath {
+    pub(crate) fn axis(&self) -> Axis {
+        self.axis
+    }
 }
 
 thread_local! {
@@ -220,14 +234,11 @@ impl SplitNode {
 
     /// Recursively renders the tree; each leaf is laid out with flex-grow
     /// proportional to its stored flex weight, with dividers between
-    /// siblings. Mouse-down on a divider latches a `DividerDragState` (via
-    /// `set_drag_anchor`); the window-level mouse-move handler then calls
-    /// `resize_flexes` every frame — the same split of responsibilities as
-    /// Zed's `PaneAxisHandleLayout` + window drag tracking, chosen because
-    /// divider-local `on_mouse_move` stops firing once the cursor leaves the
-    /// 6px hitbox.
+    /// siblings. A divider captures its path through the tree so the
+    /// window-level mouse-move handler can resize that exact axis.
     pub(crate) fn render(
         &mut self,
+        axis_path: &[usize],
         _window: &mut gpui::Window,
         cx: &mut App,
         leaf_renderer: &mut dyn FnMut(&Entity<TerminalTab>) -> AnyElement,
@@ -250,8 +261,9 @@ impl SplitNode {
                 flexes,
                 children,
             } => {
-                let divider_color = cx.theme().colors().border;
+                let divider_color = cx.theme().colors().pane_group_border;
                 let axis_for_id = *axis;
+                let axis_for_drag = *axis;
                 let container = gpui::div().size_full().flex();
                 let container = match axis {
                     Axis::Horizontal => container.flex_row(),
@@ -260,33 +272,42 @@ impl SplitNode {
                 let mut elements = Vec::with_capacity(children.len() * 2);
                 let children_len = children.len();
                 for (index, child) in children.iter_mut().enumerate() {
-                    let rendered = child.render(_window, cx, leaf_renderer);
+                    let mut child_path = axis_path.to_vec();
+                    child_path.push(index);
+                    let rendered = child.render(&child_path, _window, cx, leaf_renderer);
                     // Taffy distributes free space proportionally to
                     // flex-grow, so the weight is the whole sizing story.
                     elements.push(
                         gpui::div()
                             .flex_grow(flex_weight(flexes, index))
+                            .flex_basis(relative(0.))
                             .min_w_0()
                             .min_h_0()
                             .child(rendered)
                             .into_any_element(),
                     );
                     if index + 1 < children_len {
+                        let divider_path = DividerPath {
+                            axis: *axis,
+                            axis_path: axis_path.to_vec(),
+                            divider_index: index,
+                        };
                         let divider = render_divider(*axis, divider_color)
                             .id(gpui::ElementId::NamedInteger(
-                                format!("{axis_for_id:?}").into(),
+                                format!("{axis_for_id:?}:{axis_path:?}").into(),
                                 index as u64,
                             ))
                             .on_mouse_down(MouseButton::Left, {
-                                let axis_for_drag = *axis;
-                                move |_event: &MouseDownEvent, window: &mut gpui::Window, _cx| {
+                                let divider_path = divider_path.clone();
+                                move |_event: &MouseDownEvent, window: &mut gpui::Window, cx| {
                                     let position = window.mouse_position();
                                     let position = if axis_for_drag == Axis::Horizontal {
                                         position.x
                                     } else {
                                         position.y
                                     };
-                                    set_drag_anchor(axis_for_drag, position);
+                                    set_drag_anchor(divider_path.clone(), position);
+                                    cx.stop_propagation();
                                 }
                             })
                             .into_any_element();
@@ -298,38 +319,152 @@ impl SplitNode {
         }
     }
 
-    /// Resizes the flex pair following the first divider on `axis` whose
-    /// stored bounds the cursor crossed. Called from the window mouse-move
-    /// handler while a drag is latched.
-    pub(crate) fn resize_flexes(&mut self, axis: Axis, container_length: Pixels, delta: Pixels) {
-        let Self::Axis {
-            axis: node_axis,
-            flexes,
-            ..
-        } = self
-        else {
-            return;
-        };
-        if *node_axis != axis {
-            return;
-        }
-        if flexes.len() < 2 || container_length <= Pixels::ZERO {
-            return;
-        }
-        let total: f32 = flexes.iter().sum();
-        if total <= 0. {
-            return;
-        }
-        let delta_flex = (delta / container_length) * total;
-        let left_index = 0;
-        let new_left = (flexes[left_index] + delta_flex).max(MIN_FLEX);
-        let new_right = flexes[left_index + 1] - (new_left - flexes[left_index]);
-        if new_right < MIN_FLEX {
-            return;
-        }
-        flexes[left_index] = new_left;
-        flexes[left_index + 1] = new_right;
+    /// Resizes the divider identified by its path through the split tree.
+    pub(crate) fn resize_divider(
+        &mut self,
+        divider: &DividerPath,
+        root_size: Size<Pixels>,
+        delta: Pixels,
+    ) -> bool {
+        self.resize_divider_at_path(&divider.axis_path, divider.divider_index, root_size, delta)
     }
+
+    fn resize_divider_at_path(
+        &mut self,
+        axis_path: &[usize],
+        divider_index: usize,
+        container_size: Size<Pixels>,
+        delta: Pixels,
+    ) -> bool {
+        match self {
+            Self::Leaf { .. } => false,
+            Self::Axis {
+                axis,
+                flexes,
+                children,
+            } => {
+                if axis_path.is_empty() {
+                    let Some(container_length) =
+                        flex_container_length(container_size.along(*axis), flexes.len())
+                    else {
+                        return false;
+                    };
+                    resize_axis(*axis, flexes, container_length, divider_index, delta)
+                } else {
+                    let Some((&child_index, remaining_path)) = axis_path.split_first() else {
+                        return false;
+                    };
+                    let Some(child) = children.get_mut(child_index) else {
+                        return false;
+                    };
+                    let Some(child_size) =
+                        child_layout_size(container_size, *axis, flexes, child_index)
+                    else {
+                        return false;
+                    };
+                    child.resize_divider_at_path(remaining_path, divider_index, child_size, delta)
+                }
+            }
+        }
+    }
+}
+
+const HORIZONTAL_MIN_SIZE: Pixels = px(80.);
+const VERTICAL_MIN_SIZE: Pixels = px(100.);
+
+fn child_layout_size(
+    container_size: Size<Pixels>,
+    axis: Axis,
+    flexes: &[f32],
+    child_index: usize,
+) -> Option<Size<Pixels>> {
+    let container_length = flex_container_length(container_size.along(axis), flexes.len())?;
+    let child_flex = *flexes.get(child_index)?;
+    let child_length = container_length * (child_flex / flexes.len() as f32);
+    Some(container_size.apply_along(axis, |_| child_length))
+}
+
+fn flex_container_length(total_length: Pixels, child_count: usize) -> Option<Pixels> {
+    if child_count == 0 {
+        return None;
+    }
+    let divider_count = child_count.saturating_sub(1) as f32;
+    Some((total_length - DIVIDER_HITBOX * divider_count).max(Pixels::ZERO))
+}
+
+fn resize_axis(
+    axis: Axis,
+    flexes: &mut [f32],
+    container_length: Pixels,
+    divider_index: usize,
+    delta: Pixels,
+) -> bool {
+    let child_count = flexes.len();
+    if child_count < 2 || divider_index >= child_count - 1 || container_length <= Pixels::ZERO {
+        return false;
+    }
+
+    let min_size = match axis {
+        Axis::Horizontal => HORIZONTAL_MIN_SIZE,
+        Axis::Vertical => VERTICAL_MIN_SIZE,
+    };
+    let size = |flex: f32| container_length * (flex / child_count as f32);
+    let Some(divider_flex) = flexes.get(divider_index).copied() else {
+        return false;
+    };
+    if size(divider_flex) < min_size - px(1.) {
+        return false;
+    }
+
+    let mut proposed_change = delta;
+    let moving_forward = proposed_change > Pixels::ZERO;
+    let mut offset = 0;
+    while proposed_change.abs() > Pixels::ZERO {
+        let current_index = if moving_forward {
+            divider_index
+                .checked_add(offset)
+                .filter(|index| *index < child_count.saturating_sub(1))
+        } else {
+            divider_index.checked_sub(offset)
+        };
+        let Some(current_index) = current_index else {
+            break;
+        };
+        let Some(next_index) = current_index.checked_add(1) else {
+            break;
+        };
+
+        let Some(current_size) = flexes.get(current_index).copied().map(size) else {
+            break;
+        };
+        let Some(next_size) = flexes.get(next_index).copied().map(size) else {
+            break;
+        };
+        let next_target_size = Pixels::max(next_size - proposed_change, min_size);
+        let current_target_size =
+            Pixels::max(current_size + next_size - next_target_size, min_size);
+        let current_pixel_change = current_target_size - current_size;
+        if current_pixel_change == Pixels::ZERO {
+            offset += 1;
+            continue;
+        }
+
+        let flex_change = child_count as f32 * current_pixel_change / container_length;
+        let Some((current_flex, remaining_flexes)) = flexes
+            .get_mut(current_index..)
+            .and_then(|values| values.split_first_mut())
+        else {
+            break;
+        };
+        let Some(next_flex) = remaining_flexes.first_mut() else {
+            break;
+        };
+        *current_flex += flex_change;
+        *next_flex -= flex_change;
+        proposed_change -= current_pixel_change;
+        offset += 1;
+    }
+    true
 }
 
 fn flex_weight(flexes: &[f32], index: usize) -> f32 {
@@ -337,32 +472,49 @@ fn flex_weight(flexes: &[f32], index: usize) -> f32 {
 }
 
 fn render_divider(axis: Axis, color: gpui::Hsla) -> gpui::Div {
-    match axis {
-        Axis::Horizontal => gpui::div().flex_none().bg(color).w(DIVIDER_HITBOX).h_full(),
-        Axis::Vertical => gpui::div().flex_none().bg(color).w_full().h(DIVIDER_HITBOX),
-    }
+    let divider = match axis {
+        Axis::Horizontal => gpui::div()
+            .flex_none()
+            .w(DIVIDER_HITBOX)
+            .h_full()
+            .items_center()
+            .child(gpui::div().w(DIVIDER_SIZE).h_full().bg(color)),
+        Axis::Vertical => gpui::div()
+            .flex_none()
+            .w_full()
+            .h(DIVIDER_HITBOX)
+            .justify_center()
+            .child(gpui::div().w_full().h(DIVIDER_SIZE).bg(color)),
+    };
+
+    let divider = match axis {
+        Axis::Horizontal => divider.cursor_col_resize(),
+        Axis::Vertical => divider.cursor_row_resize(),
+    };
+    divider.block_mouse_except_scroll()
 }
 
 thread_local! {
-    static DRAG_ANCHOR: std::cell::Cell<Option<gpui::Pixels>> =
+    static DRAG_DIVIDER: std::cell::RefCell<Option<DividerPath>> =
+        const { std::cell::RefCell::new(None) };
+    static DRAG_ANCHOR: std::cell::Cell<Option<Pixels>> =
         const { std::cell::Cell::new(None) };
-    static DRAG_AXIS: std::cell::Cell<Option<Axis>> = const { std::cell::Cell::new(None) };
 }
 
 /// Latches the divider drag anchor at the given axis-relative position.
-pub(crate) fn set_drag_anchor(axis: Axis, position: Pixels) {
+pub(crate) fn set_drag_anchor(divider: DividerPath, position: Pixels) {
+    DRAG_DIVIDER.with(|cell| cell.replace(Some(divider)));
     DRAG_ANCHOR.with(|cell| cell.set(Some(position)));
-    DRAG_AXIS.with(|cell| cell.set(Some(axis)));
 }
 
-/// Returns the latched drag axis, if any.
-pub(crate) fn drag_axis() -> Option<Axis> {
-    DRAG_AXIS.with(|cell| cell.get())
+/// Returns the currently dragged divider, if any.
+pub(crate) fn drag_divider() -> Option<DividerPath> {
+    DRAG_DIVIDER.with(|cell| cell.borrow().clone())
 }
 
 /// Returns and clears the latched drag anchor (used to detect drag end).
 pub(crate) fn take_drag_anchor() -> Option<Pixels> {
-    DRAG_AXIS.with(|cell| cell.take());
+    DRAG_DIVIDER.with(|cell| cell.replace(None));
     DRAG_ANCHOR.with(|cell| cell.take())
 }
 

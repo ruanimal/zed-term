@@ -8,9 +8,9 @@ use std::{cmp::Ordering, path::PathBuf, time::Duration};
 use gpui::{
     AnyElement, App, AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, PromptLevel, Render, ScrollHandle,
-    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, anchored,
-    deferred, div, prelude::FluentBuilder, px,
+    MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, PromptLevel, Render,
+    ScrollHandle, StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window,
+    anchored, deferred, div, prelude::FluentBuilder, px,
 };
 use settings::Settings as _;
 use settings::settings_content::TerminalBell;
@@ -1491,7 +1491,7 @@ impl Render for TerminalWindowView {
                 .get_mut(self.active_tab_index)
                 .and_then(|tab| tab.split_root.as_mut())
                 .map(|root| {
-                    root.render(window, cx, &mut |_pane| {
+                    root.render(&[], window, cx, &mut |_pane| {
                         pane_elements
                             .next()
                             .unwrap_or_else(|| div().into_any_element())
@@ -1580,32 +1580,33 @@ impl Render for TerminalWindowView {
                     window.start_window_move();
                     return;
                 }
-                // Divider drag: while an anchor is latched, every move
-                // re-distributes the first flex pair of the dragged axis.
-                if let (Some(anchor), Some(axis)) = (split::drag_anchor(), split::drag_axis()) {
-                    let is_horizontal = axis == gpui::Axis::Horizontal;
+                // Divider drag keeps the selected divider and its local pointer
+                // anchor until the button is released.
+                if let (Some(anchor), Some(divider)) = (split::drag_anchor(), split::drag_divider())
+                {
+                    let is_horizontal = divider.axis() == gpui::Axis::Horizontal;
                     let position = if is_horizontal {
                         event.position.x
                     } else {
                         event.position.y
                     };
-                    // The split container is the window content minus the
-                    // titlebar strip; take its axis length from the viewport.
                     let viewport = window.viewport_size();
-                    let container_length = if is_horizontal {
-                        viewport.width
-                    } else {
-                        viewport.height - platform_title_bar_height(window)
-                    };
-                    if container_length > px(0.)
-                        && let Some(root) = this
-                            .tabs
-                            .get_mut(this.active_tab_index)
-                            .and_then(|t| t.split_root.as_mut())
+                    let root_size = gpui::Size::new(
+                        viewport.width,
+                        (viewport.height - platform_title_bar_height(window)).max(px(0.)),
+                    );
+                    if let Some(root) = this
+                        .tabs
+                        .get_mut(this.active_tab_index)
+                        .and_then(|tab| tab.split_root.as_mut())
                     {
-                        root.resize_flexes(axis, container_length, position - anchor);
-                        split::update_drag_anchor(position);
-                        cx.notify();
+                        if root.resize_divider(&divider, root_size, position - anchor) {
+                            split::update_drag_anchor(position);
+                            window.refresh();
+                            cx.notify();
+                        } else {
+                            split::take_drag_anchor();
+                        }
                     }
                 }
             }))
@@ -1615,6 +1616,15 @@ impl Render for TerminalWindowView {
                     split::take_drag_anchor();
                 }),
             )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseUpEvent, _window, _cx| {
+                    split::take_drag_anchor();
+                }),
+            )
+            .on_mouse_exit(cx.listener(|_, _: &MouseExitEvent, _window, _cx| {
+                split::take_drag_anchor();
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
