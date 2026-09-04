@@ -1134,12 +1134,13 @@ impl TerminalWindowView {
                 .action("Paste Text", Box::new(terminal_core::PasteText))
                 .action("Select All", Box::new(terminal_core::SelectAll))
                 .action("Clear", Box::new(terminal_core::Clear))
-                .separator()
                 // Single-pane tab (no split): the only close entry is the tab.
                 // In split layout `Close Pane` above is the per-pane close.
                 .when(!in_split_layout, |menu| {
                     menu.action("Close Terminal Tab", Box::new(CloseTab))
                 })
+                .separator()
+                .action("Settings", Box::new(OpenSettings))
         });
     }
 
@@ -1209,22 +1210,6 @@ impl TerminalWindowView {
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> TabBar {
         TabBar::new("window-tabs")
             .track_scroll(&self.tab_bar_scroll_handle)
-            .end_child(
-                div()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|_, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child(
-                        IconButton::new("settings-button", IconName::Settings)
-                            .icon_size(IconSize::XSmall)
-                            .on_click(cx.listener(|_, _: &gpui::ClickEvent, _window, cx| {
-                                crate::settings_ui::open_settings_window(cx);
-                            })),
-                    ),
-            )
             .children(
                 // In split layout the tab bar shows a single synthetic tab
                 // that follows the focused pane; split panes do not become
