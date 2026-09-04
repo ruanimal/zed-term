@@ -62,5 +62,45 @@
 - rz/sz 支持
 - trzsz 支持 https://github.com/ruanimal/trzsz-rs
 
+### 复杂度评估
+
+实现真正可用的 rz/sz 支持属于高复杂度功能，约为 8/10。它不是终端 UI 层的小功能，而是 `terminal_core` 的 PTY 传输层扩展。
+
+当前数据流是：
+
+```text
+PTY -> Alacritty EventLoop -> ANSI/vte parser -> terminal_core::Terminal -> terminal_app 渲染
+```
+
+当前 PTY 输出由 Alacritty EventLoop 直接解析，ZedTerm 没有原始 PTY 输出的协议扩展点。ZMODEM 的二进制帧可能包含 `ESC`、`CR/LF`、控制字符、非 UTF-8 字节以及类似 ANSI 的内容，因此不能在终端渲染或 ANSI 解析之后再识别，必须在原始 PTY 输出和 Alacritty parser 之间加入协议分流层。
+
+实现范围主要包括：
+
+- `rz`：检测远端接收端握手，弹出本地文件选择器，读取本地文件并通过 PTY 发送。
+- `sz`：检测远端发送端握手，选择本地保存位置，接收二进制内容并写入文件。
+- 增加协议状态机、CRC、转义、分片、重试、超时、取消和异常退出处理。
+- 传输期间仲裁普通键盘、鼠标、粘贴和协议输入，避免与终端输入混写。
+- 增加异步文件读写、传输进度、错误和取消状态 UI。
+- 覆盖任意 chunk 边界、PTY echo、SSH、文件名编码、空文件和大文件等测试场景。
+
+推荐的通用边界为：
+
+```text
+PTY raw output -> ProtocolDetector
+                     |-> 未匹配：交给 Alacritty parser
+                     |-> 匹配传输协议：独占当前传输会话
+```
+
+协议逻辑不应放在 `TerminalElement` 或 ANSI parser 中。协议层应向 UI 暴露结构化状态，例如等待上传、等待保存路径、传输开始、进度变化、传输完成、失败和取消。未来 rz/sz 与 trzsz 可以复用这一边界。
+
+建议按以下顺序实施：
+
+1. 先设计通用 raw PTY 协议扩展接口。
+2. 先做单 pane、显式触发、单文件的 MVP。
+3. 优先评估成熟的 ZMODEM 或 trzsz 实现，避免从头编写协议状态机。
+4. 再增加自动检测、多文件、进度、重试和跨平台行为。
+
+如果目标只是实现文件上传下载，不要求兼容传统 rz/sz，建议优先评估 trzsz。它可以减少协议实现工作，但不能省略 raw PTY 拦截、文件选择和 UI 集成。跨平台、多文件、自动检测和 rz/sz/trzsz 共存应按独立传输子系统规划，而不是作为终端渲染层的零散功能。
+
 ## 多设置 profile 支持
 类似 iterm2 的多 profile 支持
