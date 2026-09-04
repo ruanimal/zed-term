@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.
+
 # ZedTerm 开发指南
 
 本文档面向后续开发者和 AI Agent，说明独立终端应用的代码入口、架构边界和常用开发流程。

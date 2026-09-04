@@ -23,8 +23,8 @@ use theme::{ActiveTheme as _, FontFamilyCache, ThemeRegistry};
 use ui::prelude::*;
 use ui::utils::{TRAFFIC_LIGHT_PADDING, platform_title_bar_height};
 use ui::{
-    Color, ContextMenu, Divider, DividerColor, DropdownMenu, IconButton, IconName, IconSize, Label,
-    LabelSize, Switch, ToggleState,
+    Color, ContextMenu, Divider, DividerColor, DropdownMenu, Icon, IconButton, IconName, IconSize,
+    Label, LabelSize, Switch, ToggleState,
 };
 use util::{ResultExt, shell::Shell as TerminalShell};
 
@@ -1201,26 +1201,41 @@ impl SettingsPage {
         id: impl Into<gpui::ElementId>,
         label: String,
         enabled: bool,
+        show_unsaved_indicator: bool,
+        show_success: bool,
         on_click: impl Fn(&mut Self, &gpui::ClickEvent, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let button = div()
+        let colors = cx.theme().colors();
+        let label_color = if show_success {
+            Color::Success
+        } else if enabled {
+            Color::Default
+        } else {
+            Color::Muted
+        };
+        let button = h_flex()
             .id(id)
+            .gap_1()
             .px_2()
             .py_1()
             .rounded_md()
-            .bg(if enabled {
-                cx.theme().colors().element_background
-            } else {
-                cx.theme().colors().editor_background
+            .bg(colors.ghost_element_background)
+            .when(show_unsaved_indicator, |this| {
+                this.child(
+                    Icon::new(IconName::Circle)
+                        .size(IconSize::XSmall)
+                        .color(Color::Warning),
+                )
             })
-            .child(Label::new(label).size(LabelSize::Small).color(if enabled {
-                Color::Default
-            } else {
-                Color::Muted
-            }));
+            .child(Label::new(label).size(LabelSize::Small).color(label_color));
         if enabled {
-            button.on_click(cx.listener(on_click)).into_any_element()
+            button
+                .cursor_pointer()
+                .hover(|style| style.bg(colors.ghost_element_hover))
+                .active(|style| style.bg(colors.ghost_element_active))
+                .on_click(cx.listener(on_click))
+                .into_any_element()
         } else {
             button.into_any_element()
         }
@@ -2093,6 +2108,8 @@ impl SettingsPage {
                                 "discard-settings",
                                 "Discard".to_string(),
                                 has_unsaved_changes && !saving,
+                                false,
+                                false,
                                 |this, _, _, cx| this.discard_drafts(cx),
                                 cx,
                             ))
@@ -2100,6 +2117,8 @@ impl SettingsPage {
                                 "save-settings",
                                 save_label,
                                 has_unsaved_changes && !saving,
+                                has_unsaved_changes,
+                                self.save_status == SaveStatus::Succeeded && !has_unsaved_changes,
                                 |this, _, _, cx| this.save_drafts(cx),
                                 cx,
                             )),
