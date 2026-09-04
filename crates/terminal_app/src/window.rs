@@ -23,7 +23,7 @@ use terminal_core::{
 };
 use theme::ActiveTheme as _;
 use ui::scrollbars::{ScrollbarVisibility, ShowScrollbar};
-use ui::utils::{TRAFFIC_LIGHT_PADDING, platform_title_bar_height};
+use ui::utils::TRAFFIC_LIGHT_PADDING;
 use ui::{
     ButtonCommon as _, Clickable as _, Color, ContextMenu, IconButton, IconName, IconSize,
     Indicator, Label, LabelCommon as _, LabelSize, ScrollAxes, Scrollbars, Tab, TabBar,
@@ -1171,8 +1171,8 @@ impl TerminalWindowView {
     /// titlebar. Dragging follows Zed's PlatformTitleBar pattern: flag on
     /// mouse-down, `start_window_move` on drag; interactive children (tabs,
     /// buttons) stop propagation so presses on them don't move the window.
-    fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let titlebar_height = platform_title_bar_height(window);
+    fn render_title_bar(&self, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let titlebar_height = Tab::container_height(cx);
         let titlebar_background = cx.theme().colors().tab_bar_background;
         div()
             .id("title-bar")
@@ -1593,7 +1593,7 @@ impl Render for TerminalWindowView {
                     let viewport = window.viewport_size();
                     let root_size = gpui::Size::new(
                         viewport.width,
-                        (viewport.height - platform_title_bar_height(window)).max(px(0.)),
+                        (viewport.height - Tab::container_height(cx)).max(px(0.)),
                     );
                     if let Some(root) = this
                         .tabs
