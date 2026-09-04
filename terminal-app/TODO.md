@@ -56,3 +56,11 @@
 当前 tab 拖拽排序仅限同一窗口。可支持把完整 `WindowTab` 在 terminal-app 窗口之间移动，同时保留 terminal entity、split 树、zoom、bell 与焦点状态。
 
 建议验收：源窗口和目标窗口状态一致；移动最后一个 tab 时窗口关闭语义正确；拖拽期间 pane 退出或 tab 关闭时安全取消。
+
+## 传输文件支持
+需要考虑是否设计通用的扩展接口
+- rz/sz 支持
+- trzsz 支持 https://github.com/ruanimal/trzsz-rs
+
+## 多设置 profile 支持
+类似 iterm2 的多 profile 支持
