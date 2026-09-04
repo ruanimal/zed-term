@@ -1214,24 +1214,6 @@ impl TerminalWindowView {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|_, _: &MouseDownEvent, _, cx| {
-                            // Keep button presses out of the titlebar drag
-                            // gesture (IconButton has no mouse-down hook).
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child(
-                        IconButton::new("new-tab-button", IconName::Plus)
-                            .icon_size(IconSize::XSmall)
-                            .on_click(cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
-                                this.spawn_new_tab(cx);
-                            })),
-                    ),
-            )
-            .end_child(
-                div()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|_, _: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
                         }),
                     )
@@ -1248,6 +1230,24 @@ impl TerminalWindowView {
                 // that follows the focused pane; split panes do not become
                 // separate tabs (per product decision).
                 self.render_tab_children(cx),
+            )
+            .child(
+                div()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                            // Keep button presses out of the titlebar drag
+                            // gesture (IconButton has no mouse-down hook).
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        IconButton::new("new-tab-button", IconName::Plus)
+                            .icon_size(IconSize::XSmall)
+                            .on_click(cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
+                                this.spawn_new_tab(cx);
+                            })),
+                    ),
             )
     }
 
