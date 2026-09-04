@@ -2134,8 +2134,12 @@ impl Render for SettingsPage {
                                     .draft_settings
                                     .max_scroll_history_lines
                                     .unwrap_or(10_000);
-                                let next =
-                                    adjust_bounded(current as f32, delta, 0.0, 100_000.0) as usize;
+                                let next = adjust_bounded(
+                                    current as f32,
+                                    delta * 10_000.0,
+                                    0.0,
+                                    100_000.0,
+                                ) as usize;
                                 this.update_draft(
                                     DirtySetting::MaxScrollHistoryLines,
                                     |settings| settings.max_scroll_history_lines = Some(next),
