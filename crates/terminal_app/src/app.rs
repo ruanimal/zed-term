@@ -77,6 +77,17 @@ pub struct SendKeystroke(pub String);
 /// is transparent: the tab bar itself occupies the titlebar strip (as in
 /// Zed), with the traffic lights floating over its left edge.
 pub fn window_options(bounds: gpui::Bounds<gpui::Pixels>) -> WindowOptions {
+    window_options_with_traffic_light_y(bounds, 9.0)
+}
+
+fn main_window_options(bounds: gpui::Bounds<gpui::Pixels>) -> WindowOptions {
+    window_options_with_traffic_light_y(bounds, 7.0)
+}
+
+fn window_options_with_traffic_light_y(
+    bounds: gpui::Bounds<gpui::Pixels>,
+    traffic_light_y: f32,
+) -> WindowOptions {
     use gpui::{
         TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind,
         point,
@@ -87,7 +98,7 @@ pub fn window_options(bounds: gpui::Bounds<gpui::Pixels>) -> WindowOptions {
         titlebar: Some(TitlebarOptions {
             title: None,
             appears_transparent: true,
-            traffic_light_position: Some(point(px(9.0), px(9.0))),
+            traffic_light_position: Some(point(px(9.0), px(traffic_light_y))),
         }),
         focus: true,
         show: true,
@@ -204,7 +215,7 @@ pub fn open_new_window(cx: &mut App) {
 /// Opens a main window at the given bounds and schedules its activation.
 fn open_window_with_bounds(bounds: gpui::Bounds<gpui::Pixels>, cx: &mut App) {
     let handle = cx
-        .open_window(window_options(bounds), |window, cx| {
+        .open_window(main_window_options(bounds), |window, cx| {
             let view = cx.new(window::TerminalWindowView::new);
             view.read(cx).focus_handle.clone().focus(window, cx);
             view

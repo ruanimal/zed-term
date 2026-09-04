@@ -7,6 +7,7 @@ use crate::prelude::*;
 #[derive(IntoElement, RegisterComponent)]
 pub struct TabBar {
     id: ElementId,
+    height: Option<Pixels>,
     start_children: SmallVec<[AnyElement; 2]>,
     children: SmallVec<[AnyElement; 2]>,
     end_children: SmallVec<[AnyElement; 2]>,
@@ -17,11 +18,17 @@ impl TabBar {
     pub fn new(id: impl Into<ElementId>) -> Self {
         Self {
             id: id.into(),
+            height: None,
             start_children: SmallVec::new(),
             children: SmallVec::new(),
             end_children: SmallVec::new(),
             scroll_handle: None,
         }
+    }
+
+    pub fn height(mut self, height: Pixels) -> Self {
+        self.height = Some(height);
+        self
     }
 
     pub fn track_scroll(mut self, scroll_handle: &ScrollHandle) -> Self {
@@ -91,13 +98,14 @@ impl ParentElement for TabBar {
 
 impl RenderOnce for TabBar {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let height = self.height.unwrap_or_else(|| Tab::container_height(cx));
         div()
             .id(self.id)
             .group("tab_bar")
             .flex()
             .flex_none()
             .w_full()
-            .h(Tab::container_height(cx))
+            .h(height)
             .bg(cx.theme().colors().tab_bar_background)
             .when(!self.start_children.is_empty(), |this| {
                 this.child(

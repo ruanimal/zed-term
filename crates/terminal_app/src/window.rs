@@ -50,6 +50,7 @@ const TAB_TITLE_WIDTH: gpui::Pixels = px(140.);
 /// `MAX_TAB_TITLE_LEN`; keeps tooltips and copy-paste from carrying absurd
 /// titles even though the layout already truncates visually.
 const TAB_TITLE_MAX_CHARS: usize = 24;
+const TERMINAL_TAB_BAR_HEIGHT: Pixels = px(28.);
 
 #[derive(Default)]
 struct TerminalScrollbarSettingsWrapper;
@@ -196,6 +197,7 @@ impl DraggedTerminalTab {
 impl Render for DraggedTerminalTab {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         Tab::new("dragged-terminal-tab")
+            .height(TERMINAL_TAB_BAR_HEIGHT)
             .toggle_state(self.is_active)
             .child(
                 div().w(TAB_TITLE_WIDTH).child(
@@ -1173,7 +1175,7 @@ impl TerminalWindowView {
     /// mouse-down, `start_window_move` on drag; interactive children (tabs,
     /// buttons) stop propagation so presses on them don't move the window.
     fn render_title_bar(&self, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let titlebar_height = Tab::container_height(cx);
+        let titlebar_height = TERMINAL_TAB_BAR_HEIGHT;
         let titlebar_background = cx.theme().colors().tab_bar_background;
         div()
             .id("title-bar")
@@ -1209,6 +1211,7 @@ impl TerminalWindowView {
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> TabBar {
         TabBar::new("window-tabs")
+            .height(TERMINAL_TAB_BAR_HEIGHT)
             .track_scroll(&self.tab_bar_scroll_handle)
             .children(
                 // In split layout the tab bar shows a single synthetic tab
@@ -1270,6 +1273,7 @@ impl TerminalWindowView {
                 };
                 let tab_idx = idx;
                 Tab::new(idx.to_string())
+                    .height(TERMINAL_TAB_BAR_HEIGHT)
                     .position(position)
                     .toggle_state(idx == self.active_tab_index)
                     .on_mouse_down(
@@ -1578,7 +1582,7 @@ impl Render for TerminalWindowView {
                     let viewport = window.viewport_size();
                     let root_size = gpui::Size::new(
                         viewport.width,
-                        (viewport.height - Tab::container_height(cx)).max(px(0.)),
+                        (viewport.height - TERMINAL_TAB_BAR_HEIGHT).max(px(0.)),
                     );
                     if let Some(root) = this
                         .tabs

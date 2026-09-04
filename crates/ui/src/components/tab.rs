@@ -32,6 +32,7 @@ pub enum TabCloseSide {
 #[derive(IntoElement, RegisterComponent)]
 pub struct Tab {
     div: Stateful<Div>,
+    height: Option<Pixels>,
     selected: bool,
     position: TabPosition,
     close_side: TabCloseSide,
@@ -47,6 +48,7 @@ impl Tab {
             div: div()
                 .id(id.clone())
                 .debug_selector(|| format!("TAB-{}", id)),
+            height: None,
             selected: false,
             position: TabPosition::First,
             close_side: TabCloseSide::End,
@@ -54,6 +56,11 @@ impl Tab {
             end_slot: None,
             children: SmallVec::new(),
         }
+    }
+
+    pub fn height(mut self, height: Pixels) -> Self {
+        self.height = Some(height);
+        self
     }
 
     pub fn position(mut self, position: TabPosition) -> Self {
@@ -109,6 +116,8 @@ impl ParentElement for Tab {
 impl RenderOnce for Tab {
     #[allow(refining_impl_trait)]
     fn render(self, _: &mut Window, cx: &mut App) -> Stateful<Div> {
+        let container_height = self.height.unwrap_or_else(|| Tab::container_height(cx));
+        let content_height = (container_height - px(1.)).max(px(0.));
         let (text_color, tab_bg, _tab_hover_bg, _tab_active_bg) = match self.selected {
             false => (
                 cx.theme().colors().text_muted,
@@ -142,7 +151,7 @@ impl RenderOnce for Tab {
         };
 
         self.div
-            .h(Tab::container_height(cx))
+            .h(container_height)
             .bg(tab_bg)
             .border_color(cx.theme().colors().border)
             .map(|this| match self.position {
@@ -169,7 +178,7 @@ impl RenderOnce for Tab {
                 h_flex()
                     .group("")
                     .relative()
-                    .h(Tab::content_height(cx))
+                    .h(content_height)
                     .px(DynamicSpacing::Base04.px(cx))
                     .gap(DynamicSpacing::Base04.rems(cx))
                     .text_color(text_color)
