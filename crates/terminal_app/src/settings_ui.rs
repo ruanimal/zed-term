@@ -96,6 +96,7 @@ enum EditableField {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum DirtySetting {
     Theme,
+    ResetTerminalDefaults,
     FontFamily,
     FontSize,
     FontWeight,
@@ -125,12 +126,6 @@ struct SettingsPageDraft {
     shell_form: ShellForm,
     environment: Vec<EnvironmentVariable>,
     working_directory: WorkingDirectoryForm,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WriteKind {
-    Save,
-    ResetTerminalDefaults,
 }
 
 #[derive(Default)]
@@ -163,14 +158,13 @@ struct CapturedSavePatch {
 #[derive(Clone)]
 enum CapturedPatch {
     Save(Box<CapturedSavePatch>),
-    ResetTerminalDefaults,
 }
 
 struct PendingWrite {
     operation_id: u64,
-    kind: WriteKind,
     started_revision: u64,
     captured_field_revisions: HashMap<DirtySetting, u64>,
+    #[cfg(test)]
     captured_patch: CapturedPatch,
 }
 
@@ -226,7 +220,28 @@ pub fn open_settings_window(cx: &mut App) {
 }
 
 fn settings_page_draft(cx: &App) -> SettingsPageDraft {
-    let draft_settings = TerminalSettings::get_global(cx).clone();
+    let theme_name = theme_settings::ThemeSettings::get_global(cx)
+        .theme
+        .name(theme::SystemAppearance::global(cx).0)
+        .0
+        .to_string();
+    settings_page_draft_from_settings(TerminalSettings::get_global(cx).clone(), theme_name)
+}
+
+fn default_settings_page_draft(theme_name: String) -> Result<SettingsPageDraft, String> {
+    let content: settings::SettingsContent =
+        settings::parse_json_with_comments(&settings::default_settings())
+            .map_err(|error| format!("Could not load terminal defaults: {error}"))?;
+    Ok(settings_page_draft_from_settings(
+        TerminalSettings::from_settings(&content),
+        theme_name,
+    ))
+}
+
+fn settings_page_draft_from_settings(
+    draft_settings: TerminalSettings,
+    theme_name: String,
+) -> SettingsPageDraft {
     let shell_form = match draft_settings.shell.clone() {
         TerminalShell::System => ShellForm {
             mode: ShellMode::System,
@@ -279,11 +294,7 @@ fn settings_page_draft(cx: &App) -> SettingsPageDraft {
     environment.sort_by(|left, right| left.key.cmp(&right.key));
 
     SettingsPageDraft {
-        theme_name: theme_settings::ThemeSettings::get_global(cx)
-            .theme
-            .name(theme::SystemAppearance::global(cx).0)
-            .0
-            .to_string(),
+        theme_name,
         font_family: draft_settings
             .font_family
             .as_ref()
@@ -301,17 +312,16 @@ fn reset_terminal_overrides(content: &mut settings::SettingsContent) {
 }
 
 impl CapturedPatch {
-    fn kind(&self) -> WriteKind {
-        match self {
-            CapturedPatch::Save(_) => WriteKind::Save,
-            CapturedPatch::ResetTerminalDefaults => WriteKind::ResetTerminalDefaults,
-        }
-    }
-
     fn apply(&self, content: &mut settings::SettingsContent) {
         match self {
-            CapturedPatch::ResetTerminalDefaults => reset_terminal_overrides(content),
             CapturedPatch::Save(patch) => {
+                let reset_terminal_defaults = patch
+                    .dirty_settings
+                    .contains(&DirtySetting::ResetTerminalDefaults);
+                if reset_terminal_defaults {
+                    reset_terminal_overrides(content);
+                }
+
                 if patch.dirty_settings.contains(&DirtySetting::Theme) {
                     theme_settings::set_theme(
                         content,
@@ -321,11 +331,12 @@ impl CapturedPatch {
                     );
                 }
 
-                if !patch
-                    .dirty_settings
-                    .iter()
-                    .any(|setting| *setting != DirtySetting::Theme)
-                {
+                if !patch.dirty_settings.iter().any(|setting| {
+                    !matches!(
+                        setting,
+                        DirtySetting::Theme | DirtySetting::ResetTerminalDefaults
+                    )
+                }) {
                     return;
                 }
 
@@ -334,7 +345,7 @@ impl CapturedPatch {
                     .get_or_insert_with(settings::TerminalSettingsContent::default);
                 for setting in &patch.dirty_settings {
                     match setting {
-                        DirtySetting::Theme => {}
+                        DirtySetting::Theme | DirtySetting::ResetTerminalDefaults => {}
                         DirtySetting::FontFamily => {
                             terminal.font_family =
                                 (!patch.draft.font_family.is_empty()).then(|| {
@@ -495,6 +506,7 @@ impl SettingsPage {
     fn replay_field(&mut self, setting: DirtySetting, source: &SettingsPageDraft) {
         match setting {
             DirtySetting::Theme => self.theme_name.clone_from(&source.theme_name),
+            DirtySetting::ResetTerminalDefaults => {}
             DirtySetting::FontFamily => self.font_family.clone_from(&source.font_family),
             DirtySetting::FontSize => {
                 self.draft_settings.font_size = source.draft_settings.font_size;
@@ -569,7 +581,7 @@ impl SettingsPage {
 
     fn begin_write(
         &mut self,
-        captured_patch: CapturedPatch,
+        _captured_patch: CapturedPatch,
         cx: &mut Context<Self>,
     ) -> Option<u64> {
         if self.pending_write.is_some() {
@@ -583,13 +595,12 @@ impl SettingsPage {
             return None;
         };
         self.next_operation_id = operation_id;
-        let kind = captured_patch.kind();
         self.pending_write = Some(PendingWrite {
             operation_id,
-            kind,
             started_revision: self.draft_revisions.next_revision,
             captured_field_revisions: self.draft_revisions.field_revisions.clone(),
-            captured_patch,
+            #[cfg(test)]
+            captured_patch: _captured_patch,
         });
         self.save_status = SaveStatus::Saving;
         self.status_message = Some("Saving settings…".to_string());
@@ -599,11 +610,6 @@ impl SettingsPage {
         }
         cx.notify();
         Some(operation_id)
-    }
-
-    fn begin_reset_terminal_defaults(&mut self, cx: &mut Context<Self>) -> bool {
-        self.begin_write(CapturedPatch::ResetTerminalDefaults, cx)
-            .is_some()
     }
 
     fn finish_write(
@@ -654,28 +660,16 @@ impl SettingsPage {
                 }
 
                 self.save_status = SaveStatus::Succeeded;
-                self.status_message = Some(match (pending.kind, self.dirty_settings.is_empty()) {
-                    (WriteKind::Save, true) => "Settings saved.".to_string(),
-                    (WriteKind::Save, false) => {
-                        "Settings saved. Additional changes remain.".to_string()
-                    }
-                    (WriteKind::ResetTerminalDefaults, true) => {
-                        "Terminal defaults restored.".to_string()
-                    }
-                    (WriteKind::ResetTerminalDefaults, false) => {
-                        "Terminal defaults restored. Additional changes remain.".to_string()
-                    }
+                self.status_message = Some(if self.dirty_settings.is_empty() {
+                    "Settings saved.".to_string()
+                } else {
+                    "Settings saved. Additional changes remain.".to_string()
                 });
                 cx.refresh_windows();
             }
             Err(error) => {
                 self.save_status = SaveStatus::Failed;
-                self.status_message = Some(match pending.kind {
-                    WriteKind::Save => format!("Could not save settings: {error}"),
-                    WriteKind::ResetTerminalDefaults => {
-                        format!("Could not reset terminal defaults: {error}")
-                    }
-                });
+                self.status_message = Some(format!("Could not save settings: {error}"));
             }
         }
         cx.notify();
@@ -683,33 +677,31 @@ impl SettingsPage {
     }
 
     fn reset_terminal_defaults(&mut self, cx: &mut Context<Self>) {
-        if !self.begin_reset_terminal_defaults(cx) {
+        if self.pending_write.is_some() {
             return;
         }
-        let Some(pending) = self.pending_write.as_ref() else {
-            return;
+        let draft = match default_settings_page_draft(self.theme_name.clone()) {
+            Ok(draft) => draft,
+            Err(error) => {
+                self.fail_validation(error, cx);
+                return;
+            }
         };
-        let operation_id = pending.operation_id;
-        let captured_patch = pending.captured_patch.clone();
-
-        let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
-        let completion = SettingsStore::update_global(cx, |store, _| {
-            store.update_settings_file_with_completion(fs, move |content, _| {
-                captured_patch.apply(content);
-            })
-        });
-
-        cx.spawn(async move |this, cx| {
-            let result = match completion.await {
-                Ok(result) => result.map_err(|error| error.to_string()),
-                Err(_) => Err("The settings update was canceled.".to_string()),
-            };
-            this.update(cx, |this, cx| {
-                this.finish_write(operation_id, result, cx);
-            })?;
-            anyhow::Ok(())
-        })
-        .detach_and_log_err(cx);
+        let theme_was_dirty = self.dirty_settings.contains(&DirtySetting::Theme);
+        self.replace_draft(draft);
+        self.dirty_settings.clear();
+        self.draft_revisions.field_revisions.clear();
+        if theme_was_dirty {
+            self.dirty_settings.push(DirtySetting::Theme);
+            self.draft_revisions.record_edit(DirtySetting::Theme);
+        }
+        self.dirty_settings
+            .push(DirtySetting::ResetTerminalDefaults);
+        self.draft_revisions
+            .record_edit(DirtySetting::ResetTerminalDefaults);
+        self.save_status = SaveStatus::Idle;
+        self.status_message = None;
+        cx.notify();
     }
 
     fn begin_edit(&mut self, field: EditableField, window: &mut Window, cx: &mut Context<Self>) {
@@ -2007,15 +1999,11 @@ impl Render for SettingsPage {
             .child(self.section_header("Reset", cx))
             .child(self.row(
                 "Reset Terminal Defaults",
-                "Unlike Discard, this persists the removal of all terminal overrides while preserving theme and other settings.",
+                "Restore terminal defaults in this draft. Click Save to persist the changes.",
                 self.action_button(
                     "reset-terminal-defaults",
-                    if self.save_status == SaveStatus::Saving {
-                        "Saving…"
-                    } else {
-                        "Reset Terminal Defaults"
-                    },
-                    self.save_status != SaveStatus::Saving,
+                    "Reset Terminal Defaults",
+                    self.pending_write.is_none(),
                     |this, _, _, cx| this.reset_terminal_defaults(cx),
                     cx,
                 ),
@@ -4694,13 +4682,6 @@ mod tests {
         ScrollMultiplier,
     }
 
-    fn write_kind_strategy() -> impl proptest::strategy::Strategy<Value = WriteKind> {
-        proptest::prop_oneof![
-            proptest::strategy::Just(WriteKind::Save),
-            proptest::strategy::Just(WriteKind::ResetTerminalDefaults),
-        ]
-    }
-
     fn revision_test_field_strategy() -> impl proptest::strategy::Strategy<Value = RevisionTestField>
     {
         proptest::prop_oneof![
@@ -4718,18 +4699,15 @@ mod tests {
     })]
     fn write_completion_is_revision_aware(
         cx: &mut gpui::TestAppContext,
-        #[strategy = write_kind_strategy()] write_kind: WriteKind,
         #[strategy = revision_test_field_strategy()] revised_field: RevisionTestField,
         captured_font_size: u8,
         captured_scroll_multiplier: u8,
         #[strategy = proptest::collection::vec(1_u8..=100, 1..12)] pending_values: Vec<u8>,
     ) {
-        let (default_font_size, default_scroll_multiplier) = cx.update(|cx| {
+        cx.update(|cx| {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
-            let settings = TerminalSettings::get_global(cx);
-            (settings.font_size, settings.scroll_multiplier)
         });
         let (settings_page, cx) = cx.add_window_view(|_, cx| {
             let mut settings_page = test_settings_page(
@@ -4769,20 +4747,8 @@ mod tests {
                 cx,
             );
 
-            let started_operation_id = match write_kind {
-                WriteKind::Save => {
-                    settings_page.begin_write(captured_save_patch(settings_page), cx)
-                }
-                WriteKind::ResetTerminalDefaults => {
-                    settings_page.begin_reset_terminal_defaults(cx).then(|| {
-                        settings_page
-                            .pending_write
-                            .as_ref()
-                            .map(|pending| pending.operation_id)
-                            .unwrap_or_default()
-                    })
-                }
-            };
+            let started_operation_id =
+                settings_page.begin_write(captured_save_patch(settings_page), cx);
             assert_eq!(started_operation_id, Some(1));
             assert_eq!(settings_page.settings_write_request_count, 1);
             assert_eq!(settings_page.save_status, SaveStatus::Saving);
@@ -4792,7 +4758,6 @@ mod tests {
             );
 
             settings_page.save_drafts(cx);
-            assert!(!settings_page.begin_reset_terminal_defaults(cx));
             assert_eq!(settings_page.settings_write_request_count, 1);
             assert_eq!(settings_page.save_status, SaveStatus::Saving);
             assert_eq!(
@@ -4862,14 +4827,9 @@ mod tests {
             assert_eq!(settings_page.save_status, SaveStatus::Succeeded);
             assert_eq!(settings_page.settings_write_request_count, 1);
 
-            let expected_baseline_font_size = match write_kind {
-                WriteKind::Save => Some(px(f32::from(captured_font_size) + 8.0)),
-                WriteKind::ResetTerminalDefaults => default_font_size,
-            };
-            let expected_baseline_scroll_multiplier = match write_kind {
-                WriteKind::Save => f32::from(captured_scroll_multiplier) / 10.0 + 0.1,
-                WriteKind::ResetTerminalDefaults => default_scroll_multiplier,
-            };
+            let expected_baseline_font_size = Some(px(f32::from(captured_font_size) + 8.0));
+            let expected_baseline_scroll_multiplier =
+                f32::from(captured_scroll_multiplier) / 10.0 + 0.1;
             let (expected_dirty_setting, cleared_setting) = match revised_field {
                 RevisionTestField::FontSize => {
                     assert_eq!(
@@ -4909,28 +4869,13 @@ mod tests {
             );
             assert_eq!(
                 settings_page.status_message.as_deref(),
-                Some(match write_kind {
-                    WriteKind::Save => "Settings saved. Additional changes remain.",
-                    WriteKind::ResetTerminalDefaults => {
-                        "Terminal defaults restored. Additional changes remain."
-                    }
-                })
+                Some("Settings saved. Additional changes remain.")
             );
 
             let draft_before_late_completion = settings_page.current_draft();
             let dirty_before_late_completion = settings_page.dirty_settings.clone();
-            let second_operation_id = match write_kind {
-                WriteKind::Save => settings_page.begin_reset_terminal_defaults(cx).then(|| {
-                    settings_page
-                        .pending_write
-                        .as_ref()
-                        .map(|pending| pending.operation_id)
-                        .unwrap_or_default()
-                }),
-                WriteKind::ResetTerminalDefaults => {
-                    settings_page.begin_write(captured_save_patch(settings_page), cx)
-                }
-            };
+            let second_operation_id =
+                settings_page.begin_write(captured_save_patch(settings_page), cx);
             assert_eq!(second_operation_id, Some(2));
             assert!(!settings_page.finish_write(1, Ok(()), cx));
             assert_eq!(settings_page.save_status, SaveStatus::Saving);
@@ -5010,156 +4955,90 @@ mod tests {
             file_before_validation
         );
 
-        for write_kind in [WriteKind::Save, WriteKind::ResetTerminalDefaults] {
-            for failure in [
-                CompletionFailure::Writer,
-                CompletionFailure::CanceledReceiver,
-            ] {
-                cx.update(|cx| {
-                    install_atomic_failure_test_settings(
-                        cx,
-                        terminal_font_size,
-                        terminal_scroll_multiplier,
-                    );
-                });
-                let file_before_completion = cx.update(|cx| user_settings_snapshot(cx));
-                assert!(file_before_completion.is_some());
-                let terminal_overrides_before_completion = file_before_completion
-                    .as_ref()
-                    .and_then(|content| content.terminal.clone());
-                let settings_page = cx.new(|cx| {
-                    let mut settings_page = test_settings_page(
-                        ShellForm {
-                            mode: ShellMode::System,
-                            program: String::new(),
-                            arguments: Vec::new(),
-                            title_override: String::new(),
+        for failure in [
+            CompletionFailure::Writer,
+            CompletionFailure::CanceledReceiver,
+        ] {
+            cx.update(|cx| {
+                install_atomic_failure_test_settings(
+                    cx,
+                    terminal_font_size,
+                    terminal_scroll_multiplier,
+                );
+            });
+            let file_before_completion = cx.update(|cx| user_settings_snapshot(cx));
+            assert!(file_before_completion.is_some());
+            let settings_page = cx.new(|cx| {
+                let mut settings_page = test_settings_page(
+                    ShellForm {
+                        mode: ShellMode::System,
+                        program: String::new(),
+                        arguments: Vec::new(),
+                        title_override: String::new(),
+                    },
+                    cx,
+                );
+                settings_page.dirty_settings.clear();
+                settings_page.draft_revisions = DraftRevisions::default();
+                settings_page
+            });
+
+            let (operation_id, page_before_completion) =
+                settings_page.update(cx, |settings_page, cx| {
+                    settings_page.update_draft(
+                        DirtySetting::FontSize,
+                        |settings| {
+                            settings.font_size =
+                                Some(px(8.0 + f32::from(draft_font_size_seed % 65)))
                         },
                         cx,
                     );
-                    settings_page.dirty_settings.clear();
-                    settings_page.draft_revisions = DraftRevisions::default();
-                    settings_page
-                });
-
-                let (operation_id, page_before_completion) =
-                    settings_page.update(cx, |settings_page, cx| {
-                        settings_page.update_draft(
-                            DirtySetting::FontSize,
-                            |settings| {
-                                settings.font_size =
-                                    Some(px(8.0 + f32::from(draft_font_size_seed % 65)))
-                            },
-                            cx,
-                        );
-                        settings_page.update_draft(
-                            DirtySetting::ScrollMultiplier,
-                            |settings| {
-                                settings.scroll_multiplier =
-                                    0.1 + f32::from(terminal_scroll_multiplier_seed % 100) / 10.0
-                            },
-                            cx,
-                        );
-                        let operation_id = match write_kind {
-                            WriteKind::Save => {
-                                settings_page.begin_write(captured_save_patch(settings_page), cx)
-                            }
-                            WriteKind::ResetTerminalDefaults => {
-                                settings_page.begin_reset_terminal_defaults(cx).then(|| {
-                                    settings_page
-                                        .pending_write
-                                        .as_ref()
-                                        .map(|pending| pending.operation_id)
-                                        .unwrap_or_default()
-                                })
-                            }
-                        }
+                    settings_page.update_draft(
+                        DirtySetting::ScrollMultiplier,
+                        |settings| {
+                            settings.scroll_multiplier =
+                                0.1 + f32::from(terminal_scroll_multiplier_seed % 100) / 10.0
+                        },
+                        cx,
+                    );
+                    let operation_id = settings_page
+                        .begin_write(captured_save_patch(settings_page), cx)
                         .unwrap_or_default();
-                        assert_ne!(operation_id, 0);
+                    assert_ne!(operation_id, 0);
 
-                        settings_page.update_draft(
-                            DirtySetting::FontSize,
-                            |settings| {
-                                settings.font_size =
-                                    Some(px(73.0 + f32::from(pending_font_size_seed % 65)))
-                            },
-                            cx,
-                        );
-                        (operation_id, atomic_failure_page_snapshot(settings_page))
-                    });
-
-                let (completion_result, originating_reason) =
-                    injected_completion_failure(failure, &writer_failure_reason);
-                settings_page.update(cx, |settings_page, cx| {
-                    assert!(settings_page.finish_write(operation_id, completion_result, cx));
-
-                    assert_eq!(
-                        atomic_failure_page_snapshot(settings_page),
-                        page_before_completion
+                    settings_page.update_draft(
+                        DirtySetting::FontSize,
+                        |settings| {
+                            settings.font_size =
+                                Some(px(73.0 + f32::from(pending_font_size_seed % 65)))
+                        },
+                        cx,
                     );
-                    assert!(settings_page.pending_write.is_none());
-                    assert_eq!(settings_page.save_status, SaveStatus::Failed);
-                    let expected_message = match write_kind {
-                        WriteKind::Save => {
-                            format!("Could not save settings: {originating_reason}")
-                        }
-                        WriteKind::ResetTerminalDefaults => {
-                            format!("Could not reset terminal defaults: {originating_reason}")
-                        }
-                    };
-                    assert_eq!(
-                        settings_page.status_message.as_deref(),
-                        Some(expected_message.as_str())
-                    );
-                    assert!(expected_message.contains(&originating_reason));
+                    (operation_id, atomic_failure_page_snapshot(settings_page))
                 });
 
-                let file_after_completion = cx.update(|cx| user_settings_snapshot(cx));
-                assert_eq!(file_after_completion, file_before_completion);
-                if write_kind == WriteKind::ResetTerminalDefaults {
-                    assert_eq!(
-                        file_after_completion
-                            .as_ref()
-                            .and_then(|content| content.terminal.clone()),
-                        terminal_overrides_before_completion
-                    );
-                }
-            }
+            let (completion_result, originating_reason) =
+                injected_completion_failure(failure, &writer_failure_reason);
+            settings_page.update(cx, |settings_page, cx| {
+                assert!(settings_page.finish_write(operation_id, completion_result, cx));
+
+                assert_eq!(
+                    atomic_failure_page_snapshot(settings_page),
+                    page_before_completion
+                );
+                assert!(settings_page.pending_write.is_none());
+                assert_eq!(settings_page.save_status, SaveStatus::Failed);
+                let expected_message = format!("Could not save settings: {originating_reason}");
+                assert_eq!(
+                    settings_page.status_message.as_deref(),
+                    Some(expected_message.as_str())
+                );
+                assert!(expected_message.contains(&originating_reason));
+            });
+
+            let file_after_completion = cx.update(|cx| user_settings_snapshot(cx));
+            assert_eq!(file_after_completion, file_before_completion);
         }
-    }
-
-    #[gpui::test]
-    fn reset_terminal_defaults_does_not_start_a_second_pending_write(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(|cx| {
-            let settings = SettingsStore::test(cx);
-            cx.set_global(settings);
-        });
-        let settings_page = cx.new(|cx| {
-            test_settings_page(
-                ShellForm {
-                    mode: ShellMode::System,
-                    program: String::new(),
-                    arguments: Vec::new(),
-                    title_override: String::new(),
-                },
-                cx,
-            )
-        });
-
-        settings_page.update(cx, |settings_page, cx| {
-            assert!(settings_page.begin_reset_terminal_defaults(cx));
-            assert!(!settings_page.begin_reset_terminal_defaults(cx));
-            settings_page.save_drafts(cx);
-
-            assert_eq!(settings_page.settings_write_request_count, 1);
-            assert_eq!(settings_page.save_status, SaveStatus::Saving);
-            assert_eq!(
-                settings_page.status_message.as_deref(),
-                Some("Saving settings…")
-            );
-        });
     }
 
     #[gpui::test]
@@ -5337,11 +5216,8 @@ mod tests {
                 revisions_before_failure
             );
 
-            assert!(settings_page.begin_reset_terminal_defaults(cx));
             let second_operation_id = settings_page
-                .pending_write
-                .as_ref()
-                .map(|pending| pending.operation_id)
+                .begin_write(captured_save_patch(settings_page), cx)
                 .unwrap_or_default();
             assert_ne!(first_operation_id, second_operation_id);
             assert!(!settings_page.finish_write(first_operation_id, Ok(()), cx));
@@ -5357,7 +5233,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn successful_reset_reloads_effective_terminal_defaults(cx: &mut gpui::TestAppContext) {
+    fn reset_terminal_defaults_updates_draft_until_saved(cx: &mut gpui::TestAppContext) {
         let default_font_size = cx.update(|cx| {
             let settings = SettingsStore::test(cx);
             cx.set_global(settings);
@@ -5391,8 +5267,29 @@ mod tests {
             Some(px(31.))
         );
 
+        settings_page.update(cx, |settings_page, cx| {
+            settings_page.reset_terminal_defaults(cx);
+            assert_eq!(settings_page.draft_settings.font_size, default_font_size);
+            assert_eq!(
+                settings_page.dirty_settings,
+                vec![DirtySetting::ResetTerminalDefaults]
+            );
+            assert!(settings_page.pending_write.is_none());
+            assert_eq!(settings_page.settings_write_request_count, 0);
+            assert_eq!(settings_page.save_status, SaveStatus::Idle);
+            assert_eq!(settings_page.status_message, None);
+        });
+        assert_eq!(
+            cx.update(|cx| {
+                user_settings_snapshot(cx)
+                    .and_then(|content| content.terminal)
+                    .and_then(|terminal| terminal.font_size)
+            }),
+            Some(settings::FontSize(31.))
+        );
+
         let operation_id = settings_page.update(cx, |settings_page, cx| {
-            assert!(settings_page.begin_reset_terminal_defaults(cx));
+            settings_page.save_drafts(cx);
             settings_page
                 .pending_write
                 .as_ref()
@@ -5400,31 +5297,39 @@ mod tests {
                 .unwrap_or_default()
         });
         assert_ne!(operation_id, 0);
-        cx.update(|cx| {
-            SettingsStore::update_global(cx, |store, cx| {
-                store.update_user_settings(cx, reset_terminal_overrides);
-            });
+        let captured_patch = settings_page.read_with(cx, |settings_page, _| {
+            settings_page
+                .pending_write
+                .as_ref()
+                .map(|pending| pending.captured_patch.clone())
         });
+        assert!(captured_patch.is_some());
+        if let Some(captured_patch) = captured_patch {
+            cx.update(|cx| {
+                SettingsStore::update_global(cx, |store, cx| {
+                    store.update_user_settings(cx, |content| captured_patch.apply(content));
+                });
+            });
+        }
         settings_page.update(cx, |settings_page, cx| {
             assert!(settings_page.finish_write(operation_id, Ok(()), cx));
-
             assert_eq!(settings_page.draft_settings.font_size, default_font_size);
             assert!(settings_page.dirty_settings.is_empty());
             assert_eq!(settings_page.save_status, SaveStatus::Succeeded);
             assert_eq!(
                 settings_page.status_message.as_deref(),
-                Some("Terminal defaults restored.")
+                Some("Settings saved.")
             );
         });
     }
 
     #[gpui::test]
-    fn failed_reset_retains_terminal_overrides_and_displays_the_reason(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(|cx| {
+    fn failed_reset_retains_draft_and_displays_the_reason(cx: &mut gpui::TestAppContext) {
+        let default_font_size = cx.update(|cx| {
             let settings = SettingsStore::test(cx);
             cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            let default_font_size = TerminalSettings::get_global(cx).font_size;
             SettingsStore::update_global(cx, |store, cx| {
                 store.update_user_settings(cx, |content| {
                     content
@@ -5433,6 +5338,7 @@ mod tests {
                         .font_size = Some(settings::FontSize(31.));
                 });
             });
+            default_font_size
         });
         let settings_page = cx.new(|cx| {
             test_settings_page(
@@ -5447,35 +5353,35 @@ mod tests {
         });
 
         settings_page.update(cx, |settings_page, cx| {
-            assert!(settings_page.begin_reset_terminal_defaults(cx));
+            settings_page.reset_terminal_defaults(cx);
+            assert_eq!(settings_page.draft_settings.font_size, default_font_size);
+            settings_page.save_drafts(cx);
             let operation_id = settings_page
                 .pending_write
                 .as_ref()
                 .map(|pending| pending.operation_id)
                 .unwrap_or_default();
-            assert_ne!(operation_id, 0);
             assert!(settings_page.finish_write(
                 operation_id,
                 Err("settings file is read-only".to_string()),
                 cx,
             ));
 
-            assert_eq!(settings_page.draft_settings.font_size, Some(px(31.)));
+            assert_eq!(settings_page.draft_settings.font_size, default_font_size);
             assert_eq!(settings_page.save_status, SaveStatus::Failed);
             assert_eq!(
                 settings_page.status_message.as_deref(),
-                Some("Could not reset terminal defaults: settings file is read-only")
+                Some("Could not save settings: settings file is read-only")
             );
         });
-        cx.update(|cx| {
-            let retained_terminal = SettingsStore::global(cx)
-                .get_content_for_file(settings::SettingsFile::User)
-                .and_then(|content| content.terminal.as_ref());
-            assert_eq!(
-                retained_terminal.and_then(|terminal| terminal.font_size),
-                Some(settings::FontSize(31.))
-            );
-        });
+        assert_eq!(
+            cx.update(|cx| {
+                user_settings_snapshot(cx)
+                    .and_then(|content| content.terminal)
+                    .and_then(|terminal| terminal.font_size)
+            }),
+            Some(settings::FontSize(31.))
+        );
     }
 
     proptest::proptest! {
