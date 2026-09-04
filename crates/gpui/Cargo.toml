@@ -142,7 +142,6 @@ unicode-segmentation = { workspace = true }
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 http_client = { workspace = true, features = ["test-support"] }
 proptest = { workspace = true }
-reqwest_client = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(target_family = "wasm")'.dev-dependencies]
 wasm-bindgen = { workspace = true }
@@ -171,10 +170,6 @@ path = "examples/hello_world.rs"
 [[example]]
 name = "move_entity_between_windows"
 path = "examples/move_entity_between_windows.rs"
-
-[[example]]
-name = "image"
-path = "examples/image/image.rs"
 
 [[example]]
 name = "input"
