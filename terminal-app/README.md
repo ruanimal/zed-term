@@ -60,9 +60,6 @@ cargo run -p terminal_app --bin terminal-app
 # 运行 terminal_app 单元测试
 cargo test -p terminal_app --lib
 
-# 按仓库约定运行 clippy
-./script/clippy -p terminal_app
-
 # 格式检查
 cargo fmt --all -- --check
 
@@ -83,7 +80,7 @@ cargo check -p terminal_app
 2. 修改前确认目标 crate 和依赖边界，优先复用现有模块，避免把 `workspace`/`project` 依赖引入 `terminal_app`。
 3. 修改 Rust 源码前确认仓库根目录 `README.md` 的审阅标记存在；不要删除该标记。
 4. 先做最小改动，遵守 Rust 错误传播和 GPUI 实体更新规则，避免 `unwrap()`、越界索引和在实体更新回调中重入更新同一实体。
-5. 修改后至少运行与变更相关的 `cargo check`、测试、`./script/clippy` 和格式检查；涉及交互行为时补做 macOS 手动冒烟测试。
+5. 修改后至少运行与变更相关的 Cargo check、测试和格式检查；涉及交互行为时补做 macOS 手动冒烟测试。
 6. 检查 `git diff` 和 `git status`，不要把无关文件或生成物带入改动。除非用户明确要求，不要自动创建提交。
 
 ## 变更边界

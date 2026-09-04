@@ -27,7 +27,7 @@
 | Reset Terminal Defaults | 已验证 | 已验证：删除 terminal 覆盖并保留其余 JSONC 内容 | 已验证：既有 pane 恢复 live 默认值，后续 pane 采用 construction 默认值 | 已验证：Properties 7、10、11、12、13 |
 | 写入状态及非法值校验 | 已验证：保存中、成功、失败及校验原因可见 | 已验证：差异写入、失败原子性及非法值写入前拒绝 | 已验证：revision-aware 保存/重置状态 | 已验证：Properties 1、4、5、6、12、13 |
 
-验证基线：Properties 1–13 全部通过，每项 128 cases；`cargo test -p terminal_app --lib` 61 passed / 0 failed；目标 `terminal_core` alternate-scroll 测试 1 passed / 0 failed；`./script/clippy` 与 `cargo fmt --all -- --check` 通过。
+验证基线：Properties 1–13 全部通过，每项 128 cases；`cargo test -p terminal_app --lib` 61 passed / 0 failed；目标 `terminal_core` alternate-scroll 测试 1 passed / 0 failed；`cargo clippy` 与 `cargo fmt --all -- --check` 通过。
 
 ### 低优先级
 

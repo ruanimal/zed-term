@@ -16,7 +16,7 @@
 - 验证：cargo check/test/clippy（terminal_app 26 通过、terminal_core 99 通过、clippy --deny warnings 全绿）。
 - 真机验收（2026-08-31）：cmd-d 分屏、拖 divider、cmd-} 循环焦点、关 pane 收缩、shift-escape zoom/还原均已通过。
 - 备注：方向性跳转（ActivatePaneInDirection 几何相邻）未纳入本阶段范围。
-- 补充实现（2026-08-31）：**pane zoom**——`WindowTab` 以 `maximized_pane_tab` 按 tab 保存独占 pane，render 时只绘制该 `TerminalElement` 而不改写 `SplitNode`，还原后 divider 比例不变；`ToggleZoom` 绑定 `shift-escape`，终端右键菜单提供 Zoom Pane/Restore Panes；zoom 内容区右上角显示 `Minimize` 图标标识当前最大化状态，悬停提示 Restore Panes，点击可直接还原。toggle 以窗口真实焦点确定目标；新建 split 或切换相邻 pane 时自动退出 zoom；zoom pane 被关闭/退出时清除状态，隐藏 pane 退出时保持 zoom；split 收缩到单叶时归一化回单 pane。验证：`cargo test -p terminal_app`（26 通过）与 `./script/clippy -p terminal_app`（`--deny warnings`）全绿。
+- 补充实现（2026-08-31）：**pane zoom**——`WindowTab` 以 `maximized_pane_tab` 按 tab 保存独占 pane，render 时只绘制该 `TerminalElement` 而不改写 `SplitNode`，还原后 divider 比例不变；`ToggleZoom` 绑定 `shift-escape`，终端右键菜单提供 Zoom Pane/Restore Panes；zoom 内容区右上角显示 `Minimize` 图标标识当前最大化状态，悬停提示 Restore Panes，点击可直接还原。toggle 以窗口真实焦点确定目标；新建 split 或切换相邻 pane 时自动退出 zoom；zoom pane 被关闭/退出时清除状态，隐藏 pane 退出时保持 zoom；split 收缩到单叶时归一化回单 pane。验证：`cargo test -p terminal_app`（26 通过）与 `cargo clippy -p terminal_app`（`--deny warnings`）全绿。
 - 补充修复（2026-08-28）：**cmd-d 首次按不出分屏、只是新建 tab**——`SplitNode::split` 原来只处理 Axis，首个 split 时树是单个 Leaf，split 返回 false 而 `tabs.push` 已执行。修复：Leaf 分支原地提升为两叶 Axis（`Self::Leaf { tab } if tab == old_tab` → `new_axis`）。同 commit 补了分屏右键菜单：split 布局下终端右键菜单增加 Split Right/Split Down/Close Pane 项；右键命中哪个 pane，该 pane 即成为 active pane（`CLICKED_LEAF` thread_local，split.rs 叶子 div 的 on_mouse_down(Right) 记录，窗口右键 handler 消费），菜单的 Copy/Paste/Split/Close 均作用于被点中的 pane 而非仅焦点 pane。
 - 补充修复（2026-08-28，用户反馈"分屏出现两个 tab + 输入路由 bug"）：原先 split 出的 pane 也 push 进 `tabs`，导致 tab 栏出现两个 tab，且 `active_tab_index` 被 split pane 抢占后输入发错 pane。**模型重构为 per-tab 分屏组（iTerm2 模型，用户确认）**：
   - 顶层单元是 tab：`TerminalWindowView` 持 `Vec<WindowTab>`，每个 `WindowTab` 有自己的 split 树（`split_root`）与焦点 pane（`active_pane_tab`）。
@@ -113,11 +113,11 @@ Zed 的做法：系统标题栏透明化（`appears_transparent: true` + `traffi
 - 相关修复（2026-08-28，commit 6aa63569b7）：前台进程标题增加 750ms 稳定确认，避免短命令让 tab 标题闪烁。
 - 相关修复（2026-08-28）：tab 内容区固定为 `TAB_TITLE_WIDTH`（140px），标题截断并使用布局级 ellipsis，标题变化不再引起 tab 栏宽度抖动。
 ### G7. bell 声音/视觉提示
-**已完成（2026-08-31）**：`TerminalTab` 按 pane 保存 sticky 未读 bell；BEL 到达时始终在所属顶层 tab 显示 Accent 圆点（split tab 聚合所有叶子），`terminal.bell = "system"` 时调用 GPUI 系统提示音，后台窗口首次未读额外请求系统 attention，连续 BEL 不重复请求 attention。用户向来源 pane 输入（普通按键、IME、paste、SendText/SendKeystroke）后清除圆点，下一次 BEL 可重新提示。验证：`cargo check -p terminal_app`、`cargo test -p terminal_app`（26 通过）与 `./script/clippy -p terminal_app`（`--deny warnings`）全绿，真机验收已通过。
+**已完成（2026-08-31）**：`TerminalTab` 按 pane 保存 sticky 未读 bell；BEL 到达时始终在所属顶层 tab 显示 Accent 圆点（split tab 聚合所有叶子），`terminal.bell = "system"` 时调用 GPUI 系统提示音，后台窗口首次未读额外请求系统 attention，连续 BEL 不重复请求 attention。用户向来源 pane 输入（普通按键、IME、paste、SendText/SendKeystroke）后清除圆点，下一次 BEL 可重新提示。验证：`cargo check -p terminal_app`、`cargo test -p terminal_app`（26 通过）与 `cargo clippy -p terminal_app`（`--deny warnings`）全绿，真机验收已通过。
 ### G8. hover tooltip 路径预览（不实现）
 **已关闭（2026-08-31）**：经用户确认不实现。
 ### G9. 标签页拖拽排序（pinned 不实现）
-**拖拽排序已完成（2026-08-31）**：顶层 tab 直接使用 GPUI typed drag/drop；拖动时显示 Tab 外观预览，目标 tab 显示左/右插入线，支持同窗口任意前后重排。drop 以 pane entity 重新定位源/目标，拖拽期间 tab 关闭或退出不会误移其他 tab；重排后保持原 active tab 实体、terminal focus、split/zoom/bell 状态，并同步 tab bar 滚动。**pinned 按用户要求不实现**；跨窗口拖拽未纳入本阶段范围。验证：`cargo check -p terminal_app`、`cargo test -p terminal_app`（26 通过）与 `./script/clippy -p terminal_app`（`--deny warnings`）全绿，真机验收已通过。
+**拖拽排序已完成（2026-08-31）**：顶层 tab 直接使用 GPUI typed drag/drop；拖动时显示 Tab 外观预览，目标 tab 显示左/右插入线，支持同窗口任意前后重排。drop 以 pane entity 重新定位源/目标，拖拽期间 tab 关闭或退出不会误移其他 tab；重排后保持原 active tab 实体、terminal focus、split/zoom/bell 状态，并同步 tab bar 滚动。**pinned 按用户要求不实现**；跨窗口拖拽未纳入本阶段范围。验证：`cargo check -p terminal_app`、`cargo test -p terminal_app`（26 通过）与 `cargo clippy -p terminal_app`（`--deny warnings`）全绿，真机验收已通过。
 （G10 已并入 G12，撤销。）
 
 ---

@@ -224,7 +224,7 @@ crates/terminal_app/
 - WP1 后：✅ `cargo test -p terminal_core`（99 通过 / 0 失败，2026-08-27 实测）；`cargo build -p terminal_app` 编译通过。
 - WP3 后：macOS 手动冒烟（开窗、多标签、多窗口、cwd 继承；已通过——prompt 渲染、标签栏正常）。
 - WP4 后（含 §4.4 收尾）：settings.json 读写回环 + 设置页视觉核对 + 终端动作冒烟（复制粘贴、选择、清除、滚动、搜索、hover 路径打开）。
-- WP6：`./script/clippy` + macOS .app 打包；Linux 打包（AppImage/deb）。
+- WP6：`cargo clippy` + macOS .app 打包；Linux 打包（AppImage/deb）。
 
 ---
 
