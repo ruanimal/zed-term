@@ -1309,13 +1309,19 @@ impl SettingsPage {
                 IconButton::new(format!("{id}-minus"), IconName::SquareMinus)
                     .icon_color(Color::Muted)
                     .icon_size(IconSize::Small)
-                    .on_click(cx.listener(move |_, _, _, cx| minus(cx, -1.0))),
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        let minus = minus.clone();
+                        cx.defer(move |cx| minus(cx, -1.0));
+                    })),
             )
             .child(
                 IconButton::new(format!("{id}-plus"), IconName::SquarePlus)
                     .icon_color(Color::Muted)
                     .icon_size(IconSize::Small)
-                    .on_click(cx.listener(move |_, _, _, cx| plus(cx, 1.0))),
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        let plus = plus.clone();
+                        cx.defer(move |cx| plus(cx, 1.0));
+                    })),
             )
             .into_any_element();
         self.row(title, description, control)
