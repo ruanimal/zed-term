@@ -490,6 +490,18 @@ impl SettingsStore {
             .set_global_value(Box::new(value))
     }
 
+    /// Recomputes a registered setting from the current merged settings.
+    ///
+    /// Returns `false` when the setting has not been registered.
+    pub fn recompute_setting<T: Settings>(&mut self) -> bool {
+        let Some(setting_value) = self.setting_values.get_mut(&TypeId::of::<T>()) else {
+            return false;
+        };
+        let value = setting_value.from_settings(&self.merged_settings);
+        setting_value.set_global_value(value);
+        true
+    }
+
     /// Get the user's settings content.
     ///
     /// For user-facing functionality use the typed setting interface.

@@ -192,6 +192,20 @@ pub struct SettingsPage {
 }
 
 pub fn open_settings_window(cx: &mut App) {
+    if let Some(existing_window) = cx
+        .windows()
+        .into_iter()
+        .find_map(|window| window.downcast::<SettingsPage>())
+    {
+        existing_window
+            .update(cx, |page, window, cx| {
+                page.focus_handle.clone().focus(window, cx);
+                window.activate_window();
+            })
+            .log_err();
+        return;
+    }
+
     let mut options = window_options(gpui::Bounds::centered(None, size(px(660.), px(700.)), cx));
     options.kind = WindowKind::Floating;
     options.window_bounds = Some(WindowBounds::Windowed(gpui::Bounds::centered(
@@ -491,6 +505,167 @@ impl SettingsPage {
         }
     }
 
+    fn preview_draft(&self, cx: &mut Context<Self>) {
+        let reset_terminal_defaults = self
+            .dirty_settings
+            .contains(&DirtySetting::ResetTerminalDefaults);
+        let mut preview_settings = TerminalSettings::get_global(cx).clone();
+        if reset_terminal_defaults {
+            preview_settings = self.draft_settings.clone();
+        } else {
+            for setting in &self.dirty_settings {
+                match setting {
+                    DirtySetting::Theme
+                    | DirtySetting::ResetTerminalDefaults
+                    | DirtySetting::FontFamily
+                    | DirtySetting::Shell
+                    | DirtySetting::Environment
+                    | DirtySetting::WorkingDirectory => {}
+                    DirtySetting::FontSize => {
+                        preview_settings.font_size = self.draft_settings.font_size;
+                    }
+                    DirtySetting::FontWeight => {
+                        preview_settings.font_weight = self.draft_settings.font_weight;
+                    }
+                    DirtySetting::LineHeight => {
+                        preview_settings.line_height = self.draft_settings.line_height.clone();
+                    }
+                    DirtySetting::MinimumContrast => {
+                        preview_settings.minimum_contrast = self.draft_settings.minimum_contrast;
+                    }
+                    DirtySetting::CursorShape => {
+                        preview_settings.cursor_shape = self.draft_settings.cursor_shape;
+                    }
+                    DirtySetting::Blinking => {
+                        preview_settings.blinking = self.draft_settings.blinking;
+                    }
+                    DirtySetting::OptionAsMeta => {
+                        preview_settings.option_as_meta = self.draft_settings.option_as_meta;
+                    }
+                    DirtySetting::CopyOnSelect => {
+                        preview_settings.copy_on_select = self.draft_settings.copy_on_select;
+                    }
+                    DirtySetting::KeepSelectionOnCopy => {
+                        preview_settings.keep_selection_on_copy =
+                            self.draft_settings.keep_selection_on_copy;
+                    }
+                    DirtySetting::OpenLinksInMouseMode => {
+                        preview_settings.open_links_in_mouse_mode =
+                            self.draft_settings.open_links_in_mouse_mode;
+                    }
+                    DirtySetting::AlternateScroll => {
+                        preview_settings.alternate_scroll = self.draft_settings.alternate_scroll;
+                    }
+                    DirtySetting::Bell => {
+                        preview_settings.bell = self.draft_settings.bell;
+                    }
+                    DirtySetting::ScrollMultiplier => {
+                        preview_settings.scroll_multiplier = self.draft_settings.scroll_multiplier;
+                    }
+                    DirtySetting::MaxScrollHistoryLines => {
+                        preview_settings.max_scroll_history_lines =
+                            self.draft_settings.max_scroll_history_lines;
+                    }
+                    DirtySetting::Scrollbar => {
+                        preview_settings.scrollbar.show = self.draft_settings.scrollbar.show;
+                    }
+                }
+            }
+        }
+
+        if self.dirty_settings.contains(&DirtySetting::FontFamily) {
+            preview_settings.font_family = (!self.font_family.is_empty())
+                .then(|| settings::FontFamilyName(self.font_family.clone().into()));
+        }
+        if self.dirty_settings.contains(&DirtySetting::Shell) {
+            match validate_shell_form(&self.shell_form) {
+                Ok(shell) => {
+                    preview_settings.shell = match shell {
+                        settings::Shell::System => TerminalShell::System,
+                        settings::Shell::Program(program) => TerminalShell::Program(program),
+                        settings::Shell::WithArguments {
+                            program,
+                            args,
+                            title_override,
+                        } => TerminalShell::WithArguments {
+                            program,
+                            args,
+                            title_override,
+                        },
+                    };
+                }
+                Err(error) => log::debug!("Skipping shell settings preview: {error}"),
+            }
+        }
+        if self.dirty_settings.contains(&DirtySetting::Environment) {
+            match validate_environment(&self.environment) {
+                Ok(environment) => preview_settings.env = environment,
+                Err(error) => log::debug!("Skipping environment settings preview: {error}"),
+            }
+        }
+        if self
+            .dirty_settings
+            .contains(&DirtySetting::WorkingDirectory)
+        {
+            match validate_working_directory_form(
+                &self.working_directory,
+                Some(paths::home_dir().as_path()),
+                &RealDirectoryAccess,
+            ) {
+                Ok(working_directory) => preview_settings.working_directory = working_directory,
+                Err(error) => log::debug!("Skipping working directory preview: {error}"),
+            }
+        }
+
+        let appearance = theme::SystemAppearance::global(cx).0;
+        let mut preview_theme = theme_settings::ThemeSettings::get_global(cx).clone();
+        if self.dirty_settings.contains(&DirtySetting::Theme) {
+            let theme_name = theme_settings::ThemeName(self.theme_name.clone().into());
+            match &mut preview_theme.theme {
+                theme_settings::ThemeSelection::Static(current) => *current = theme_name,
+                theme_settings::ThemeSelection::Dynamic { mode, light, dark } => {
+                    match appearance {
+                        theme::Appearance::Light => *light = theme_name,
+                        theme::Appearance::Dark => *dark = theme_name,
+                    }
+                    if *mode != theme_settings::ThemeAppearanceMode::System {
+                        *mode = theme_settings::appearance_to_mode(appearance);
+                    }
+                }
+            }
+        }
+
+        SettingsStore::update_global(cx, |store, _| {
+            store.override_global(preview_settings);
+            store.override_global(preview_theme);
+        });
+        if cx.try_global::<theme::GlobalTheme>().is_some()
+            && theme::ThemeRegistry::try_global(cx).is_some()
+        {
+            theme_settings::reload_theme(cx);
+        } else {
+            cx.refresh_windows();
+        }
+    }
+
+    fn restore_preview(&self, cx: &mut Context<Self>) {
+        SettingsStore::update_global(cx, |store, _| {
+            if !store.recompute_setting::<TerminalSettings>() {
+                log::error!("TerminalSettings is not registered while restoring settings preview");
+            }
+            if !store.recompute_setting::<theme_settings::ThemeSettings>() {
+                log::error!("ThemeSettings is not registered while restoring settings preview");
+            }
+        });
+        if cx.try_global::<theme::GlobalTheme>().is_some()
+            && theme::ThemeRegistry::try_global(cx).is_some()
+        {
+            theme_settings::reload_theme(cx);
+        } else {
+            cx.refresh_windows();
+        }
+    }
+
     fn replace_draft(&mut self, draft: SettingsPageDraft) {
         self.draft_settings = draft.draft_settings;
         self.theme_name = draft.theme_name;
@@ -573,6 +748,7 @@ impl SettingsPage {
         if self.pending_write.is_some() {
             return;
         }
+        self.restore_preview(cx);
         self.reload_drafts_from_globals(cx);
         self.save_status = SaveStatus::Idle;
         self.status_message = Some("Unsaved changes discarded.".to_string());
@@ -665,6 +841,9 @@ impl SettingsPage {
                 } else {
                     "Settings saved. Additional changes remain.".to_string()
                 });
+                if !self.dirty_settings.is_empty() {
+                    self.preview_draft(cx);
+                }
                 cx.refresh_windows();
             }
             Err(error) => {
@@ -701,6 +880,7 @@ impl SettingsPage {
             .record_edit(DirtySetting::ResetTerminalDefaults);
         self.save_status = SaveStatus::Idle;
         self.status_message = None;
+        self.preview_draft(cx);
         cx.notify();
     }
 
@@ -818,6 +998,7 @@ impl SettingsPage {
             self.save_status = SaveStatus::Idle;
             self.status_message = None;
         }
+        self.preview_draft(cx);
         cx.notify();
     }
 
@@ -952,11 +1133,15 @@ impl SettingsPage {
                 }
             };
             let discard_changes = matches!(answer, Ok(0));
-            this.update(cx, |this, cx| {
+            let should_remove = this.update(cx, |this, cx| {
                 this.close_prompt_open = false;
+                if discard_changes {
+                    this.restore_preview(cx);
+                }
                 cx.notify();
+                discard_changes
             })?;
-            if discard_changes {
+            if should_remove {
                 window_handle
                     .update(cx, |_, window, _| window.remove_window())
                     .log_err();
@@ -1188,6 +1373,7 @@ impl SettingsPage {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn title_bar_action_button(
         &self,
         id: impl Into<gpui::ElementId>,
