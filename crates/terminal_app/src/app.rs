@@ -161,8 +161,7 @@ fn load_embedded_themes(cx: &mut App) {
     }
 }
 
-/// Loads user themes from the themes dir (`paths::themes_dir()`, shared with
-/// Zed), so any Zed theme JSON on disk is available to ZedTerm too.
+/// Loads user themes from ZedTerm's isolated themes directory.
 fn load_user_themes_in_background(cx: &mut App) {
     let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
     cx.spawn(async move |cx| {
@@ -189,8 +188,7 @@ fn load_user_themes_in_background(cx: &mut App) {
     .detach();
 }
 
-/// Watches the user settings file (`~/Library/Application Support/Zed/
-/// settings.json`, same path Zed uses) and applies changes live.
+/// Watches the ZedTerm user settings file and applies changes live.
 fn watch_user_settings(cx: &mut App) {
     let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
     SettingsStore::update_global(cx, |store, cx| {

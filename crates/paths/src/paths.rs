@@ -1,4 +1,4 @@
-//! Paths to locations used by Zed.
+//! Paths to locations used by ZedTerm.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -11,11 +11,9 @@ use util::rel_path::RelPath;
 /// A default editorconfig file name to use when resolving project settings.
 pub const EDITORCONFIG_NAME: &str = ".editorconfig";
 
-/// The application name, used to derive platform-specific data, config, cache,
-/// and state directory paths.
-///
-/// Forks should change this to avoid colliding with Zed's user data.
-pub const APP_NAME: &str = "Zed";
+/// The ZedTerm application name, used to derive platform-specific data, config,
+/// cache, and state directory paths.
+pub const APP_NAME: &str = "ZedTerm";
 
 /// Lowercased form of [`APP_NAME`], for use in XDG-style paths on
 /// Linux/FreeBSD and the macOS `~/.config` fallback.
@@ -100,12 +98,12 @@ pub fn remote_wsl_server_dir_relative() -> &'static RelPath {
 /// * Called after the data directory has been initialized (e.g., via `data_dir` or `config_dir`)
 /// * The directory's path cannot be canonicalized to an absolute path
 /// * The directory cannot be created
-pub fn set_custom_data_dir(dir: &str) -> &'static PathBuf {
+pub fn set_custom_data_dir(dir: &Path) -> &'static PathBuf {
     if CURRENT_DATA_DIR.get().is_some() || CONFIG_DIR.get().is_some() {
         panic!("set_custom_data_dir called after data_dir or config_dir was initialized");
     }
     CUSTOM_DATA_DIR.get_or_init(|| {
-        let path = PathBuf::from(dir);
+        let path = dir.to_path_buf();
         std::fs::create_dir_all(&path).expect("failed to create custom data directory");
         let canonicalized = path
             .canonicalize()
@@ -118,7 +116,7 @@ pub fn set_custom_data_dir(dir: &str) -> &'static PathBuf {
     })
 }
 
-/// Returns the path to the configuration directory used by Zed.
+/// Returns the path to the configuration directory used by ZedTerm.
 pub fn config_dir() -> &'static PathBuf {
     CONFIG_DIR.get_or_init(|| {
         if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
@@ -140,7 +138,7 @@ pub fn config_dir() -> &'static PathBuf {
     })
 }
 
-/// Returns the path to the data directory used by Zed.
+/// Returns the path to the data directory used by ZedTerm.
 pub fn data_dir() -> &'static PathBuf {
     CURRENT_DATA_DIR.get_or_init(|| {
         if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
@@ -189,7 +187,7 @@ pub fn state_dir() -> &'static PathBuf {
     })
 }
 
-/// Returns the path to the temp directory used by Zed.
+/// Returns the path to the temp directory used by ZedTerm.
 pub fn temp_dir() -> &'static PathBuf {
     static TEMP_DIR: OnceLock<PathBuf> = OnceLock::new();
     TEMP_DIR.get_or_init(|| {
