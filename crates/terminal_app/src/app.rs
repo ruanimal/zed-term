@@ -23,6 +23,7 @@ pub mod persistence;
 pub mod settings_ui;
 pub mod terminal;
 pub mod window;
+pub(crate) mod window_chrome;
 
 /// Product/program name injected into child processes (`TERM_PROGRAM`,
 /// `ZED_TERM`) and used as the window `app_id`.
@@ -73,9 +74,9 @@ pub struct SendText(pub String);
 #[action(namespace = terminal_app)]
 pub struct SendKeystroke(pub String);
 
-/// Window options shared by every window the app opens. The system titlebar
-/// is transparent: the tab bar itself occupies the titlebar strip (as in
-/// Zed), with the traffic lights floating over its left edge.
+/// Window options shared by every window the app opens. Linux requests client-side
+/// decorations so the app can keep the tab bar and window controls in one themed
+/// titlebar; the platform falls back to server-side decorations when necessary.
 pub fn window_options(bounds: gpui::Bounds<gpui::Pixels>) -> WindowOptions {
     window_options_with_traffic_light_y(bounds, 9.0)
 }
@@ -110,7 +111,11 @@ fn window_options_with_traffic_light_y(
         app_owns_titlebar_drag: true,
         display_id: None,
         window_background: WindowBackgroundAppearance::Opaque,
-        window_decorations: Some(WindowDecorations::Server),
+        window_decorations: if cfg!(target_os = "linux") {
+            Some(WindowDecorations::Client)
+        } else {
+            Some(WindowDecorations::Server)
+        },
         app_id: Some(TERM_PROGRAM.to_string()),
         window_min_size: Some(size(px(640.0), px(400.0))),
         ..Default::default()

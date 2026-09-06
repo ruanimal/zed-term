@@ -6,11 +6,11 @@
 use std::{cmp::Ordering, path::PathBuf, time::Duration};
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, DismissEvent, Entity, FocusHandle, Focusable as _,
-    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, PromptLevel, Render,
-    ScrollHandle, StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window,
-    anchored, deferred, div, prelude::FluentBuilder, px,
+    AnyElement, App, AppContext as _, ClickEvent, Context, Decorations, DismissEvent, Entity,
+    FocusHandle, Focusable as _, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels,
+    PromptLevel, Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _, Subscription,
+    WeakEntity, Window, anchored, deferred, div, prelude::FluentBuilder, px,
 };
 use settings::Settings as _;
 use settings::settings_content::TerminalBell;
@@ -35,6 +35,7 @@ use util::paths::PathStyle;
 use crate::terminal::split::{self, SplitDirection, SplitNode};
 use crate::terminal::tab::{ScrollAction, TerminalTabEvent};
 use crate::terminal::{TerminalElement, TerminalSearchBar, TerminalTab};
+use crate::window_chrome;
 use crate::{
     ActivateNextPane, ActivatePreviousPane, CloseAll, CloseLeft, CloseOtherTabs, ClosePane,
     CloseRight, CloseTab, NewTab, NewWindow, NextTab, OpenSettings, PreviousTab, SendKeystroke,
@@ -50,7 +51,6 @@ const TAB_TITLE_WIDTH: gpui::Pixels = px(140.);
 /// `MAX_TAB_TITLE_LEN`; keeps tooltips and copy-paste from carrying absurd
 /// titles even though the layout already truncates visually.
 const TAB_TITLE_MAX_CHARS: usize = 24;
-const TERMINAL_TAB_BAR_HEIGHT: Pixels = px(28.);
 
 #[derive(Default)]
 struct TerminalScrollbarSettingsWrapper;
@@ -197,7 +197,7 @@ impl DraggedTerminalTab {
 impl Render for DraggedTerminalTab {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         Tab::new("dragged-terminal-tab")
-            .height(TERMINAL_TAB_BAR_HEIGHT)
+            .height(window_chrome::TITLE_BAR_HEIGHT)
             .toggle_state(self.is_active)
             .child(
                 div().w(TAB_TITLE_WIDTH).child(
@@ -1172,16 +1172,32 @@ impl TerminalWindowView {
     /// that area is reserved as a drag handle; the remaining empty area of
     /// the strip drags the window and double-click zooms it, like a native
     /// titlebar. Dragging follows Zed's PlatformTitleBar pattern: flag on
-    /// mouse-down, `start_window_move` on drag; interactive children (tabs,
-    /// buttons) stop propagation so presses on them don't move the window.
-    fn render_title_bar(&self, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let titlebar_height = TERMINAL_TAB_BAR_HEIGHT;
+    /// mouse-down, `start_window_move` on drag; interactive children stop
+    /// propagation so presses on them don't move the window.
+    fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let titlebar_height = window_chrome::TITLE_BAR_HEIGHT;
         let titlebar_background = cx.theme().colors().tab_bar_background;
+        let is_server_decorations = matches!(window.window_decorations(), Decorations::Server);
+        let close_window = cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.close_all(&CloseAll, window, cx);
+        });
+        let (left_controls, right_controls) =
+            window_chrome::render_window_controls(window, cx, close_window);
+        let tab_bar = self.render_tab_bar(cx);
+        let tab_bar = if is_server_decorations {
+            tab_bar
+        } else {
+            tab_bar.start_child(left_controls).end_child(right_controls)
+        };
         div()
             .id("title-bar")
             .h(titlebar_height)
+            .flex()
+            .flex_row()
             .flex_none()
-            .pl(px(TRAFFIC_LIGHT_PADDING))
+            .when(is_server_decorations, |this| {
+                this.pl(px(TRAFFIC_LIGHT_PADDING))
+            })
             .bg(titlebar_background)
             .on_mouse_down(
                 MouseButton::Left,
@@ -1206,12 +1222,20 @@ impl TerminalWindowView {
                     window.zoom_window();
                 }
             }))
-            .child(self.render_tab_bar(cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(tab_bar),
+            )
     }
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> TabBar {
         TabBar::new("window-tabs")
-            .height(TERMINAL_TAB_BAR_HEIGHT)
+            .height(window_chrome::TITLE_BAR_HEIGHT)
             .track_scroll(&self.tab_bar_scroll_handle)
             .children(
                 // In split layout the tab bar shows a single synthetic tab
@@ -1273,7 +1297,7 @@ impl TerminalWindowView {
                 };
                 let tab_idx = idx;
                 Tab::new(idx.to_string())
-                    .height(TERMINAL_TAB_BAR_HEIGHT)
+                    .height(window_chrome::TITLE_BAR_HEIGHT)
                     .position(position)
                     .toggle_state(idx == self.active_tab_index)
                     .on_mouse_down(
@@ -1503,193 +1527,198 @@ impl Render for TerminalWindowView {
                 })
         };
 
-        div()
-            .id("terminal-window")
-            .key_context("TerminalWindow")
-            .track_focus(&self.focus_handle)
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(cx.theme().colors().terminal_background)
-            .child(self.render_title_bar(window, cx))
-            .when_some(self.terminal_error.clone(), |this, error| {
-                this.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .bg(cx.theme().colors().element_background)
-                        .child(Label::new(error).size(LabelSize::Small).color(Color::Error)),
-                )
-            })
-            .when_some(active_tab.clone().filter(|_| search_active), |this, tab| {
-                this.child(TerminalSearchBar::new(tab, cx.weak_entity()).into_any_element())
-            })
-            .child(div().flex_1().min_h_0().child(content))
-            .on_action(cx.listener(Self::copy))
-            .on_action(cx.listener(Self::paste))
-            .on_action(cx.listener(Self::paste_text))
-            .on_action(cx.listener(Self::clear))
-            .on_action(cx.listener(Self::select_all))
-            .on_action(cx.listener(Self::scroll_line_up))
-            .on_action(cx.listener(Self::scroll_line_down))
-            .on_action(cx.listener(Self::scroll_page_up))
-            .on_action(cx.listener(Self::scroll_page_down))
-            .on_action(cx.listener(Self::scroll_half_page_up))
-            .on_action(cx.listener(Self::scroll_half_page_down))
-            .on_action(cx.listener(Self::scroll_to_top))
-            .on_action(cx.listener(Self::scroll_to_bottom))
-            .on_action(cx.listener(Self::toggle_search))
-            .on_action(cx.listener(Self::show_character_palette))
-            .on_action(cx.listener(Self::new_tab))
-            .on_action(cx.listener(Self::send_text))
-            .on_action(cx.listener(Self::send_keystroke))
-            .on_action(cx.listener(Self::close_tab))
-            .on_action(cx.listener(Self::close_other_tabs))
-            .on_action(cx.listener(Self::close_left))
-            .on_action(cx.listener(Self::close_right))
-            .on_action(cx.listener(Self::close_all))
-            .on_action(cx.listener(Self::next_tab))
-            .on_action(cx.listener(Self::previous_tab))
-            .on_action(cx.listener(Self::new_window))
-            .on_action(cx.listener(Self::open_settings))
-            .when(in_split_layout, |this| {
-                this.on_action(cx.listener(Self::activate_next_pane))
-                    .on_action(cx.listener(Self::activate_previous_pane))
-                    .on_action(cx.listener(Self::close_pane))
-            })
-            .on_action(cx.listener(Self::split_right))
-            .on_action(cx.listener(Self::split_left))
-            .on_action(cx.listener(Self::split_up))
-            .on_action(cx.listener(Self::split_down))
-            .on_action(cx.listener(Self::toggle_zoom))
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                // Titlebar drag gesture first (it owns the flag-based latch).
-                if this.titlebar_mouse_down.get() {
-                    this.titlebar_mouse_down.set(false);
-                    window.start_window_move();
-                    return;
-                }
-                // Divider drag keeps the selected divider and its local pointer
-                // anchor until the button is released.
-                if let (Some(anchor), Some(divider)) = (split::drag_anchor(), split::drag_divider())
-                {
-                    let is_horizontal = divider.axis() == gpui::Axis::Horizontal;
-                    let position = if is_horizontal {
-                        event.position.x
-                    } else {
-                        event.position.y
-                    };
-                    let viewport = window.viewport_size();
-                    let root_size = gpui::Size::new(
-                        viewport.width,
-                        (viewport.height - TERMINAL_TAB_BAR_HEIGHT).max(px(0.)),
-                    );
-                    if let Some(root) = this
-                        .tabs
-                        .get_mut(this.active_tab_index)
-                        .and_then(|tab| tab.split_root.as_mut())
-                    {
-                        if root.resize_divider(&divider, root_size, position - anchor) {
-                            split::update_drag_anchor(position);
-                            window.refresh();
-                            cx.notify();
-                        } else {
-                            split::take_drag_anchor();
-                        }
-                    }
-                }
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|_, _: &MouseUpEvent, _window, _cx| {
-                    split::take_drag_anchor();
-                }),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|_, _: &MouseUpEvent, _window, _cx| {
-                    split::take_drag_anchor();
-                }),
-            )
-            .on_mouse_exit(cx.listener(|_, _: &MouseExitEvent, _window, _cx| {
-                split::take_drag_anchor();
-            }))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    // In split layout the right-click may land on any pane;
-                    // make the clicked leaf the active tab's focused pane so
-                    // the menu (and its split/closing actions) act on it.
-                    if let Some(active) = this.tabs.get_mut(this.active_tab_index)
-                        && active.is_split_layout()
-                        && let Some(clicked) = split::take_clicked_leaf()
-                    {
-                        active.active_pane_tab = Some(clicked.clone());
-                        if let Some(pane) = active.active_pane_tab.as_ref() {
-                            let focus = pane.read(cx).focus_handle.clone();
-                            focus.focus(window, cx);
-                        }
-                    }
-                    let Some(tab) = this.active_tab() else {
+        window_chrome::client_side_decorations(
+            div()
+                .id("terminal-window")
+                .key_context("TerminalWindow")
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .flex()
+                .flex_col()
+                .bg(cx.theme().colors().terminal_background)
+                .child(self.render_title_bar(window, cx))
+                .when_some(self.terminal_error.clone(), |this, error| {
+                    this.child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .bg(cx.theme().colors().element_background)
+                            .child(Label::new(error).size(LabelSize::Small).color(Color::Error)),
+                    )
+                })
+                .when_some(active_tab.clone().filter(|_| search_active), |this, tab| {
+                    this.child(TerminalSearchBar::new(tab, cx.weak_entity()).into_any_element())
+                })
+                .child(div().flex_1().min_h_0().child(content))
+                .on_action(cx.listener(Self::copy))
+                .on_action(cx.listener(Self::paste))
+                .on_action(cx.listener(Self::paste_text))
+                .on_action(cx.listener(Self::clear))
+                .on_action(cx.listener(Self::select_all))
+                .on_action(cx.listener(Self::scroll_line_up))
+                .on_action(cx.listener(Self::scroll_line_down))
+                .on_action(cx.listener(Self::scroll_page_up))
+                .on_action(cx.listener(Self::scroll_page_down))
+                .on_action(cx.listener(Self::scroll_half_page_up))
+                .on_action(cx.listener(Self::scroll_half_page_down))
+                .on_action(cx.listener(Self::scroll_to_top))
+                .on_action(cx.listener(Self::scroll_to_bottom))
+                .on_action(cx.listener(Self::toggle_search))
+                .on_action(cx.listener(Self::show_character_palette))
+                .on_action(cx.listener(Self::new_tab))
+                .on_action(cx.listener(Self::send_text))
+                .on_action(cx.listener(Self::send_keystroke))
+                .on_action(cx.listener(Self::close_tab))
+                .on_action(cx.listener(Self::close_other_tabs))
+                .on_action(cx.listener(Self::close_left))
+                .on_action(cx.listener(Self::close_right))
+                .on_action(cx.listener(Self::close_all))
+                .on_action(cx.listener(Self::next_tab))
+                .on_action(cx.listener(Self::previous_tab))
+                .on_action(cx.listener(Self::new_window))
+                .on_action(cx.listener(Self::open_settings))
+                .when(in_split_layout, |this| {
+                    this.on_action(cx.listener(Self::activate_next_pane))
+                        .on_action(cx.listener(Self::activate_previous_pane))
+                        .on_action(cx.listener(Self::close_pane))
+                })
+                .on_action(cx.listener(Self::split_right))
+                .on_action(cx.listener(Self::split_left))
+                .on_action(cx.listener(Self::split_up))
+                .on_action(cx.listener(Self::split_down))
+                .on_action(cx.listener(Self::toggle_zoom))
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                    // Titlebar drag gesture first (it owns the flag-based latch).
+                    if this.titlebar_mouse_down.get() {
+                        this.titlebar_mouse_down.set(false);
+                        window.start_window_move();
                         return;
-                    };
-                    let in_mouse_mode = tab
-                        .read(cx)
-                        .terminal
-                        .read(cx)
-                        .mouse_mode(event.modifiers.shift);
-                    if !in_mouse_mode {
-                        // Mirrors Zed: right-click selects the word under the
-                        // cursor before showing the context menu.
-                        let has_selection = tab
+                    }
+                    // Divider drag keeps the selected divider and its local pointer
+                    // anchor until the button is released.
+                    if let (Some(anchor), Some(divider)) =
+                        (split::drag_anchor(), split::drag_divider())
+                    {
+                        let is_horizontal = divider.axis() == gpui::Axis::Horizontal;
+                        let position = if is_horizontal {
+                            event.position.x
+                        } else {
+                            event.position.y
+                        };
+                        let viewport = window.viewport_size();
+                        let root_size = gpui::Size::new(
+                            viewport.width,
+                            (viewport.height - window_chrome::TITLE_BAR_HEIGHT).max(px(0.)),
+                        );
+                        if let Some(root) = this
+                            .tabs
+                            .get_mut(this.active_tab_index)
+                            .and_then(|tab| tab.split_root.as_mut())
+                        {
+                            if root.resize_divider(&divider, root_size, position - anchor) {
+                                split::update_drag_anchor(position);
+                                window.refresh();
+                                cx.notify();
+                            } else {
+                                split::take_drag_anchor();
+                            }
+                        }
+                    }
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|_, _: &MouseUpEvent, _window, _cx| {
+                        split::take_drag_anchor();
+                    }),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|_, _: &MouseUpEvent, _window, _cx| {
+                        split::take_drag_anchor();
+                    }),
+                )
+                .on_mouse_exit(cx.listener(|_, _: &MouseExitEvent, _window, _cx| {
+                    split::take_drag_anchor();
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        // In split layout the right-click may land on any pane;
+                        // make the clicked leaf the active tab's focused pane so
+                        // the menu (and its split/closing actions) act on it.
+                        if let Some(active) = this.tabs.get_mut(this.active_tab_index)
+                            && active.is_split_layout()
+                            && let Some(clicked) = split::take_clicked_leaf()
+                        {
+                            active.active_pane_tab = Some(clicked.clone());
+                            if let Some(pane) = active.active_pane_tab.as_ref() {
+                                let focus = pane.read(cx).focus_handle.clone();
+                                focus.focus(window, cx);
+                            }
+                        }
+                        let Some(tab) = this.active_tab() else {
+                            return;
+                        };
+                        let in_mouse_mode = tab
                             .read(cx)
                             .terminal
                             .read(cx)
-                            .last_content
-                            .selection
-                            .is_some();
-                        if !has_selection {
-                            tab.update(cx, |tab, cx| {
-                                tab.terminal.update(cx, |term, _| {
-                                    term.select_word_at_event_position(event);
+                            .mouse_mode(event.modifiers.shift);
+                        if !in_mouse_mode {
+                            // Mirrors Zed: right-click selects the word under the
+                            // cursor before showing the context menu.
+                            let has_selection = tab
+                                .read(cx)
+                                .terminal
+                                .read(cx)
+                                .last_content
+                                .selection
+                                .is_some();
+                            if !has_selection {
+                                tab.update(cx, |tab, cx| {
+                                    tab.terminal.update(cx, |term, _| {
+                                        term.select_word_at_event_position(event);
+                                    });
                                 });
-                            });
+                            }
+                            this.deploy_terminal_context_menu(event.position, window, cx);
+                            cx.notify();
                         }
-                        this.deploy_terminal_context_menu(event.position, window, cx);
-                        cx.notify();
-                    }
-                }),
-            )
-            .children(self.context_menu.as_ref().map(|(menu, position, _)| {
-                deferred(
-                    anchored()
-                        .position(*position)
-                        .anchor(gpui::Anchor::TopLeft)
-                        .child(menu.clone()),
+                    }),
                 )
-                .with_priority(1)
-            }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                // Keys that no keymap binding consumed (Enter, Tab, arrows,
-                // Ctrl+C, ...) are translated to ANSI and sent to the pty,
-                // mirroring Zed's `TerminalView::key_down`. Targets the pane
-                // actually holding focus so input lands where the user typed.
-                let Some(tab) = this.focused_tab(window, cx) else {
-                    return;
-                };
-                let handled = tab.update(cx, |tab, cx| {
-                    tab.clear_bell(cx);
-                    tab.terminal.update(cx, |term, cx| {
-                        term.try_keystroke(
-                            &event.keystroke,
-                            TerminalSettings::get_global(cx).option_as_meta,
-                        )
-                    })
-                });
-                if handled {
-                    cx.stop_propagation();
-                }
-            }))
+                .children(self.context_menu.as_ref().map(|(menu, position, _)| {
+                    deferred(
+                        anchored()
+                            .position(*position)
+                            .anchor(gpui::Anchor::TopLeft)
+                            .child(menu.clone()),
+                    )
+                    .with_priority(1)
+                }))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    // Keys that no keymap binding consumed (Enter, Tab, arrows,
+                    // Ctrl+C, ...) are translated to ANSI and sent to the pty,
+                    // mirroring Zed's `TerminalView::key_down`. Targets the pane
+                    // actually holding focus so input lands where the user typed.
+                    let Some(tab) = this.focused_tab(window, cx) else {
+                        return;
+                    };
+                    let handled = tab.update(cx, |tab, cx| {
+                        tab.clear_bell(cx);
+                        tab.terminal.update(cx, |term, cx| {
+                            term.try_keystroke(
+                                &event.keystroke,
+                                TerminalSettings::get_global(cx).option_as_meta,
+                            )
+                        })
+                    });
+                    if handled {
+                        cx.stop_propagation();
+                    }
+                })),
+            window,
+            cx,
+        )
     }
 }
 

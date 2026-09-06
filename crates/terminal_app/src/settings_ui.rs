@@ -8,11 +8,11 @@ use std::{
 
 use collections::HashMap;
 use gpui::{
-    App, AppContext as _, Bounds, Context, Element, FocusHandle, GlobalElementId, InputHandler,
-    InspectorElementId, InteractiveElement as _, IntoElement, KeyDownEvent, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, PromptLevel, Render,
-    SharedString, Style, Styled as _, UTF16Selection, UpdateGlobal, WeakEntity, Window,
-    WindowBounds, WindowKind, px, size,
+    App, AppContext as _, Bounds, ClickEvent, Context, Decorations, Element, FocusHandle,
+    GlobalElementId, InputHandler, InspectorElementId, InteractiveElement as _, IntoElement,
+    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement as _, Pixels, PromptLevel, Render, SharedString, Style, Styled as _,
+    UTF16Selection, UpdateGlobal, WeakEntity, Window, WindowBounds, WindowKind, px, size,
 };
 use settings::Settings as _;
 use settings::SettingsStore;
@@ -21,13 +21,14 @@ use terminal_core::terminal_settings::{
 };
 use theme::{ActiveTheme as _, FontFamilyCache, ThemeRegistry};
 use ui::prelude::*;
-use ui::utils::{TRAFFIC_LIGHT_PADDING, platform_title_bar_height};
+use ui::utils::TRAFFIC_LIGHT_PADDING;
 use ui::{
     Color, ContextMenu, Divider, DividerColor, DropdownMenu, Icon, IconButton, IconName, IconSize,
     Label, LabelSize, Switch, ToggleState,
 };
 use util::{ResultExt, shell::Shell as TerminalShell};
 
+use crate::window_chrome;
 use crate::window_options;
 
 type OptionAction = Box<dyn Fn(&mut App) + 'static>;
@@ -1412,13 +1413,19 @@ impl SettingsPage {
                         .color(Color::Warning),
                 )
             })
-            .child(Label::new(label).size(LabelSize::Small).color(label_color));
+            .child(Label::new(label).size(LabelSize::Small).color(label_color))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            });
         if enabled {
             button
                 .cursor_pointer()
                 .hover(|style| style.bg(colors.ghost_element_hover))
                 .active(|style| style.bg(colors.ghost_element_active))
-                .on_click(cx.listener(on_click))
+                .on_click(cx.listener(move |this, event, window, cx| {
+                    cx.stop_propagation();
+                    on_click(this, event, window, cx);
+                }))
                 .into_any_element()
         } else {
             button.into_any_element()
@@ -2205,41 +2212,45 @@ impl Render for SettingsPage {
                 ),
             ));
 
-        v_flex()
-            .id("settings-page")
-            .key_context("SettingsPage")
-            .track_focus(&self.focus_handle)
-            .size_full()
-            .bg(cx.theme().colors().panel_background)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                match event.keystroke.key.as_ref() {
-                    "enter" => this.commit_active_edit(cx),
-                    "escape" => {
-                        this.editing_field = None;
-                        cx.notify();
+        window_chrome::client_side_decorations(
+            v_flex()
+                .id("settings-page")
+                .key_context("SettingsPage")
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .bg(cx.theme().colors().panel_background)
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    match event.keystroke.key.as_ref() {
+                        "enter" => this.commit_active_edit(cx),
+                        "escape" => {
+                            this.editing_field = None;
+                            cx.notify();
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                }
-            }))
-            .child(SettingsPageInputElement {
-                focus_handle: self.focus_handle.clone(),
-                page: cx.weak_entity(),
-            })
-            .child(title_bar)
-            .child(
-                div()
-                    .id("settings-content-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(content),
-            )
+                }))
+                .child(SettingsPageInputElement {
+                    focus_handle: self.focus_handle.clone(),
+                    page: cx.weak_entity(),
+                })
+                .child(title_bar)
+                .child(
+                    div()
+                        .id("settings-content-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .child(content),
+                ),
+            window,
+            cx,
+        )
     }
 }
 
 impl SettingsPage {
     fn render_title_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let titlebar_height = platform_title_bar_height(window);
+        let titlebar_height = window_chrome::TITLE_BAR_HEIGHT;
         let has_unsaved_changes = !self.dirty_settings.is_empty();
         let saving = self.save_status == SaveStatus::Saving;
         let save_label = if saving {
@@ -2250,11 +2261,28 @@ impl SettingsPage {
             "Save"
         }
         .to_string();
+        let is_client_decorations =
+            matches!(window.window_decorations(), Decorations::Client { .. });
+        let is_server_decorations = !is_client_decorations;
+        let can_maximize =
+            is_client_decorations && window.is_resizable() && window.window_controls().maximize;
+        let close_window = cx.listener(|this, _: &ClickEvent, window, cx| {
+            if this.request_close(window, cx) {
+                window.remove_window();
+            }
+        });
+        let (left_controls, right_controls) =
+            window_chrome::render_window_controls(window, cx, close_window);
         div()
             .id("settings-title-bar")
             .h(titlebar_height)
+            .flex()
+            .flex_row()
             .flex_none()
-            .pl(px(TRAFFIC_LIGHT_PADDING))
+            .when(is_server_decorations, |this| {
+                this.pl(px(TRAFFIC_LIGHT_PADDING))
+            })
+            .when(!is_server_decorations, |this| this.pl_2())
             .bg(cx.theme().colors().tab_bar_background)
             .on_mouse_down(
                 MouseButton::Left,
@@ -2274,12 +2302,19 @@ impl SettingsPage {
                     window.start_window_move();
                 }
             }))
+            .on_click(cx.listener(move |_, event: &gpui::ClickEvent, window, _| {
+                if can_maximize && event.click_count() >= 2 {
+                    window.zoom_window();
+                }
+            }))
+            .child(left_controls)
             .child(
                 h_flex()
                     .h_full()
-                    .w_full()
+                    .flex_1()
+                    .min_w_0()
+                    .when(is_server_decorations, |this| this.pr_4())
                     .justify_between()
-                    .pr_4()
                     .child(
                         Label::new("ZedTerm — Settings")
                             .size(LabelSize::Small)
@@ -2308,6 +2343,7 @@ impl SettingsPage {
                             )),
                     ),
             )
+            .child(right_controls)
             .into_any_element()
     }
 }
