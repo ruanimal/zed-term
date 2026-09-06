@@ -244,11 +244,12 @@ fn open_window_with_bounds(bounds: gpui::Bounds<gpui::Pixels>, cx: &mut App) {
 /// registry, fonts, keymap, persistence, then the first window.
 pub fn run(cx: &mut App) {
     settings::init(cx);
+    watch_user_settings(cx);
     theme_settings::init(theme::LoadThemes::JustBase, cx);
     load_embedded_themes(cx);
+    theme_settings::reload_theme(cx);
     load_user_themes_in_background(cx);
     load_fonts(cx);
-    watch_user_settings(cx);
     persist_window_geometry_on_quit(cx);
 
     cx.bind_keys([
