@@ -307,18 +307,43 @@ impl TerminalWindowView {
             };
             let terminal = cx.new(|cx| builder.subscribe(cx));
             let tab = cx.new(|cx| TerminalTab::new(terminal, cx));
+            let focus_handle = tab.read_with(cx, |tab, _| tab.focus_handle.clone());
             cx.update(|cx| {
                 this.update(cx, |this, cx| {
                     this.terminal_error = None;
                     this.observe_tab(&tab, cx);
                     this.tabs.push(WindowTab::new(tab));
                     this.active_tab_index = this.tabs.len() - 1;
+                    Self::focus_handle_after_update(focus_handle, cx);
                     cx.notify();
                 })
                 .log_err();
             });
         })
         .detach();
+    }
+
+    fn focus_handle_after_update(focus_handle: FocusHandle, cx: &mut Context<Self>) {
+        let source = cx.entity();
+        cx.defer(move |cx| {
+            for any_window in cx.windows() {
+                let Some(window_handle) = any_window.downcast::<Self>() else {
+                    continue;
+                };
+                let Ok(window_entity) = window_handle.entity(cx) else {
+                    continue;
+                };
+                if window_entity != source {
+                    continue;
+                }
+                window_handle
+                    .update(cx, |_, window, cx| {
+                        focus_handle.focus(window, cx);
+                    })
+                    .log_err();
+                break;
+            }
+        });
     }
 
     /// Registers the window to repaint when the tab notifies (its terminal
@@ -634,6 +659,7 @@ impl TerminalWindowView {
             };
             let terminal = cx.new(|cx| builder.subscribe(cx));
             let tab = cx.new(|cx| TerminalTab::new(terminal, cx));
+            let focus_handle = tab.read_with(cx, |tab, _| tab.focus_handle.clone());
             cx.update(|cx| {
                 this.update(cx, |this, cx| {
                     this.terminal_error = None;
@@ -652,6 +678,7 @@ impl TerminalWindowView {
                         this.tabs.push(WindowTab::new(tab));
                         this.active_tab_index = this.tabs.len() - 1;
                     }
+                    Self::focus_handle_after_update(focus_handle, cx);
                     cx.notify();
                 })
                 .log_err();
