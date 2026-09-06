@@ -1,0 +1,284 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version; defaults to the terminal_app Cargo version"
+        required: false
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare release metadata
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Resolve and validate version
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cargo_version="$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[] | select(.name == "terminal_app") | .version')"
+          if [ -z "$cargo_version" ] || [ "$cargo_version" = "null" ]; then
+            echo "::error::Unable to determine terminal_app version from Cargo metadata"
+            exit 1
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            release_tag="$GITHUB_REF_NAME"
+            case "$release_tag" in
+              v*) version="${release_tag#v}" ;;
+              *)
+                echo "::error::Release tags must start with v"
+                exit 1
+                ;;
+            esac
+          else
+            version="${REQUESTED_VERSION:-$cargo_version}"
+            release_tag="v$version"
+          fi
+
+          if [ "$version" != "$cargo_version" ]; then
+            echo "::error::Release version $version does not match terminal_app Cargo version $cargo_version"
+            exit 1
+          fi
+
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$release_tag" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Build Linux deb
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential \
+            clang \
+            desktop-file-utils \
+            dpkg-dev \
+            libdbus-1-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            liblzma-dev \
+            libssl-dev \
+            libvulkan-dev \
+            libwayland-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcb-randr0-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcb-xinput-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build terminal-app
+        run: cargo build --locked --release -p terminal_app --bin terminal-app
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --version 3.7.0 --locked
+
+      - name: Build deb package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package_file="$RUNNER_TEMP/zedterm-${VERSION}-linux-amd64.deb"
+          cargo deb --locked --no-build -p terminal_app --output "$package_file"
+          desktop-file-validate crates/terminal_app/resources/dev.zed.ZedTerm.desktop
+          dpkg-deb --info "$package_file"
+          dpkg-deb --contents "$package_file"
+
+      - name: Upload Linux package
+        uses: actions/upload-artifact@v4
+        with:
+          name: zedterm-linux-deb
+          path: ${{ runner.temp }}/zedterm-${{ needs.prepare.outputs.version }}-linux-amd64.deb
+          if-no-files-found: error
+          retention-days: 7
+
+  macos:
+    name: Build macOS ${{ matrix.arch }} package
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            arch: x86_64
+          - os: macos-14
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build terminal-app
+        run: cargo build --locked --release -p terminal_app --bin terminal-app
+
+      - name: Assemble app bundle and DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          binary="$GITHUB_WORKSPACE/target/release/terminal-app"
+          test -x "$binary"
+
+          app_path="$RUNNER_TEMP/ZedTerm.app"
+          contents_path="$app_path/Contents"
+          iconset_path="$RUNNER_TEMP/ZedTerm.iconset"
+          dmg_path="$RUNNER_TEMP/zedterm-${VERSION}-macos-${{ matrix.arch }}-unsigned.dmg"
+          rm -rf "$app_path" "$iconset_path" "$dmg_path"
+          mkdir -p "$contents_path/MacOS" "$contents_path/Resources" "$iconset_path"
+
+          cp "$binary" "$contents_path/MacOS/terminal-app"
+          chmod 755 "$contents_path/MacOS/terminal-app"
+
+          source_icon="$GITHUB_WORKSPACE/crates/terminal_app/resources/app-icon@2x.png"
+          for icon_size in 16 32 128 256 512; do
+            sips -s format png -z "$icon_size" "$icon_size" "$source_icon" \
+              --out "$iconset_path/icon_${icon_size}x${icon_size}.png" >/dev/null
+            retina_size=$((icon_size * 2))
+            sips -s format png -z "$retina_size" "$retina_size" "$source_icon" \
+              --out "$iconset_path/icon_${icon_size}x${icon_size}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$iconset_path" -o "$contents_path/Resources/ZedTerm.icns"
+
+          short_version="${VERSION%%-*}"
+          cat > "$contents_path/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDisplayName</key>
+              <string>ZedTerm</string>
+              <key>CFBundleExecutable</key>
+              <string>terminal-app</string>
+              <key>CFBundleIconFile</key>
+              <string>ZedTerm</string>
+              <key>CFBundleIdentifier</key>
+              <string>dev.zed.ZedTerm</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>ZedTerm</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>$short_version</string>
+              <key>CFBundleSignature</key>
+              <string>ZDTR</string>
+              <key>CFBundleVersion</key>
+              <string>${GITHUB_RUN_NUMBER}</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>10.15.7</string>
+              <key>LSApplicationCategoryType</key>
+              <string>public.app-category.utilities</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+          </dict>
+          </plist>
+          PLIST
+
+          plutil -lint "$contents_path/Info.plist"
+          test -f "$contents_path/Resources/ZedTerm.icns"
+          hdiutil create -volname "ZedTerm $VERSION" -srcfolder "$app_path" \
+            -ov -format UDZO "$dmg_path"
+          hdiutil imageinfo "$dmg_path" >/dev/null
+
+      - name: Upload macOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: zedterm-macos-${{ matrix.arch }}
+          path: ${{ runner.temp }}/zedterm-${{ needs.prepare.outputs.version }}-macos-${{ matrix.arch }}-unsigned.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub release
+    needs: [prepare, linux, macos]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: zedterm-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Check release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f -print | sort)
+          if [ "${#assets[@]}" -ne 3 ]; then
+            echo "::error::Expected one deb and two macOS packages, found ${#assets[@]}"
+            printf '%s\n' "${assets[@]}"
+            exit 1
+          fi
+          printf '%s\n' "${assets[@]}"
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release-assets/* \
+              --target "$GITHUB_SHA" \
+              --title "ZedTerm $VERSION" \
+              --generate-notes
+          fi

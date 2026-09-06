@@ -3,6 +3,7 @@ name = "terminal_app"
 version = "0.1.0"
 edition.workspace = true
 license = "GPL-3.0-or-later"
+description = "Standalone terminal application based on Zed's terminal."
 build = "build.rs"
 
 [lib]
@@ -43,6 +44,42 @@ embed-resource = "=3.0.6"
 name = "ZedTerm"
 identifier = "dev.zed.ZedTerm"
 icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
+
+[package.metadata.deb]
+name = "zedterm"
+maintainer = "ZedTerm contributors <zedterm@example.invalid>"
+copyright = "2026 ZedTerm contributors"
+extended-description = "ZedTerm is a standalone terminal application based on Zed's terminal."
+section = "utils"
+priority = "optional"
+revision = ""
+depends = [
+    "$auto",
+    "libfontconfig1",
+    "libfreetype6",
+    "libvulkan1",
+    "libwayland-client0",
+    "libwayland-cursor0",
+    "libwayland-egl1",
+]
+assets = [
+    ["target/release/terminal-app", "usr/bin/zedterm", "755"],
+    [
+        "resources/dev.zed.ZedTerm.desktop",
+        "usr/share/applications/dev.zed.ZedTerm.desktop",
+        "644",
+    ],
+    [
+        "resources/app-icon.png",
+        "usr/share/icons/hicolor/512x512/apps/zedterm.png",
+        "644",
+    ],
+    [
+        "resources/app-icon.svg",
+        "usr/share/icons/hicolor/scalable/apps/zedterm.svg",
+        "644",
+    ],
+]
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

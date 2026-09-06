@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=ZedTerm
+Comment=Standalone terminal application
+Exec=zedterm %U
+Icon=zedterm
+Terminal=false
+Type=Application
+Categories=System;TerminalEmulator;
+StartupNotify=true
+StartupWMClass=zedterm
