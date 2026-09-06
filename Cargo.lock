@@ -7161,6 +7161,7 @@ dependencies = [
  "anyhow",
  "assets",
  "collections",
+ "embed-resource",
  "fs",
  "futures",
  "gpui",

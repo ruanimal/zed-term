@@ -1,0 +1,20 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <pattern id="grain" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="4" cy="7" r="1.4" fill="#FFFFFF" fill-opacity="0.22"/>
+      <circle cx="22" cy="18" r="1" fill="#FFFFFF" fill-opacity="0.14"/>
+      <circle cx="12" cy="28" r="0.8" fill="#FFFFFF" fill-opacity="0.18"/>
+    </pattern>
+  </defs>
+
+  <rect x="48" y="48" width="928" height="928" rx="248" fill="#15181B"/>
+  <rect x="48" y="48" width="928" height="928" rx="248" fill="url(#grain)" opacity="0.42"/>
+  <rect x="49.5" y="49.5" width="925" height="925" rx="246.5" stroke="#33383D" stroke-width="3"/>
+
+  <path d="M272 342H742" stroke="#E4E8EB" stroke-width="36" stroke-linecap="round"/>
+  <path d="M742 342L650 410" stroke="#E4E8EB" stroke-width="36" stroke-linecap="round"/>
+  <path d="M328 648L282 682" stroke="#E4E8EB" stroke-width="36" stroke-linecap="round"/>
+  <path d="M282 682H744" stroke="#E4E8EB" stroke-width="36" stroke-linecap="round"/>
+  <path d="M351 422L445 502L351 582" stroke="#7BDFFF" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M505 582H671" stroke="#7BDFFF" stroke-width="38" stroke-linecap="round"/>
+</svg>
