@@ -1436,18 +1436,30 @@ fn render_terminal_pane(
     let scroll_handle = tab.read(cx).scroll_handle.clone();
     let scrollbar_id = tab.entity_id();
     let colors = cx.theme().colors();
+    let focused = focus.is_focused(window);
+    let content_opacity = if focused { 1.0 } else { 0.72 };
+    let background_color = if focused {
+        colors.terminal_background
+    } else {
+        colors.terminal_ansi_black
+    };
     div()
         .id(("terminal-pane", tab.entity_id()))
         .relative()
         .size_full()
-        .bg(colors.terminal_background)
-        .child(TerminalElement::new(
-            terminal,
-            tab,
-            focus.clone(),
-            focus.is_focused(window),
-            cursor_visible,
-        ))
+        .bg(background_color)
+        .child(
+            div()
+                .size_full()
+                .opacity(content_opacity)
+                .child(TerminalElement::new(
+                    terminal,
+                    tab,
+                    focus.clone(),
+                    focused,
+                    cursor_visible,
+                )),
+        )
         .custom_scrollbars(
             Scrollbars::for_settings::<TerminalScrollbarSettingsWrapper>()
                 .id(("terminal-scrollbar", scrollbar_id))
