@@ -79,17 +79,6 @@ pub struct SendKeystroke(pub String);
 /// decorations so the app can keep the tab bar and window controls in one themed
 /// titlebar; the platform falls back to server-side decorations when necessary.
 pub fn window_options(bounds: gpui::Bounds<gpui::Pixels>) -> WindowOptions {
-    window_options_with_traffic_light_y(bounds, 9.0)
-}
-
-fn main_window_options(bounds: gpui::Bounds<gpui::Pixels>) -> WindowOptions {
-    window_options_with_traffic_light_y(bounds, 7.0)
-}
-
-fn window_options_with_traffic_light_y(
-    bounds: gpui::Bounds<gpui::Pixels>,
-    traffic_light_y: f32,
-) -> WindowOptions {
     use gpui::{
         TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind,
         point,
@@ -100,7 +89,10 @@ fn window_options_with_traffic_light_y(
         titlebar: Some(TitlebarOptions {
             title: None,
             appears_transparent: true,
-            traffic_light_position: Some(point(px(9.0), px(traffic_light_y))),
+            traffic_light_position: Some(point(
+                window_chrome::TITLE_BAR_TRAFFIC_LIGHT_X,
+                window_chrome::TITLE_BAR_TRAFFIC_LIGHT_Y,
+            )),
         }),
         focus: true,
         show: true,
@@ -231,7 +223,7 @@ pub fn reopen_window_if_needed(cx: &mut App) {
 /// Opens a main window at the given bounds and schedules its activation.
 fn open_window_with_bounds(bounds: gpui::Bounds<gpui::Pixels>, cx: &mut App) {
     let handle = cx
-        .open_window(main_window_options(bounds), |window, cx| {
+        .open_window(window_options(bounds), |window, cx| {
             let view = cx.new(window::TerminalWindowView::new);
             view.read(cx).focus_handle.clone().focus(window, cx);
             view
