@@ -25,9 +25,9 @@ use theme::ActiveTheme as _;
 use ui::scrollbars::{ScrollbarVisibility, ShowScrollbar};
 use ui::utils::TRAFFIC_LIGHT_PADDING;
 use ui::{
-    ButtonCommon as _, ButtonSize, Clickable as _, Color, ContextMenu, IconButton, IconName,
-    IconSize, Indicator, Label, LabelCommon as _, LabelSize, ScrollAxes, Scrollbars, Tab, TabBar,
-    TabPosition, Toggleable as _, Tooltip, WithScrollbar,
+    ButtonCommon as _, ButtonSize, Clickable as _, Color, ContextMenu, DynamicSpacing, IconButton,
+    IconName, IconSize, Indicator, Label, LabelCommon as _, LabelSize, ScrollAxes, Scrollbars, Tab,
+    TabBar, TabPosition, Toggleable as _, Tooltip, WithScrollbar,
 };
 use util::ResultExt;
 use util::paths::PathStyle;
@@ -1272,6 +1272,7 @@ impl TerminalWindowView {
             )
             .child(
                 div()
+                    .ml(DynamicSpacing::Base02.rems(cx))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|_, _: &MouseDownEvent, _, cx| {
@@ -1360,6 +1361,7 @@ impl TerminalWindowView {
                         // The wrapping div stops the press from starting the
                         // titlebar-drag gesture and from toggling the tab.
                         div()
+                            .mt(px(1.))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |_, _: &MouseDownEvent, _, cx| {
