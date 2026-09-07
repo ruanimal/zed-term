@@ -3,7 +3,11 @@
 //! Each window owns its own set of tabs; multiple windows share the app-level
 //! keymap defined in `app.rs`.
 
-use std::{cmp::Ordering, path::PathBuf, time::Duration};
+use std::{
+    cmp::Ordering,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Decorations, DismissEvent, Entity,
@@ -211,7 +215,7 @@ impl Render for DraggedTerminalTab {
 }
 
 impl TerminalWindowView {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(cx: &mut Context<Self>, initial_directory: Option<PathBuf>) -> Self {
         let live_settings = LiveTerminalSettings::from_settings(TerminalSettings::get_global(cx));
         let settings_subscription =
             cx.observe_global::<settings::SettingsStore>(Self::settings_changed);
@@ -226,7 +230,7 @@ impl TerminalWindowView {
             live_settings,
             _subscriptions: vec![settings_subscription],
         };
-        view.spawn_new_tab(cx);
+        view.spawn_new_tab(cx, initial_directory);
 
         // The macOS display link only redraws while invalidated. Shell output now
         // repaints through the observe chain (Terminal -> TerminalTab ->
@@ -292,9 +296,9 @@ impl TerminalWindowView {
 
     /// Starts a PTY-backed shell as a brand-new tab (each tab owns its own
     /// split-pane group; cmd-d later splits within it).
-    fn spawn_new_tab(&mut self, cx: &mut Context<Self>) {
+    fn spawn_new_tab(&mut self, cx: &mut Context<Self>, initial_directory: Option<PathBuf>) {
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let builder = match build_terminal(cx).await {
+            let builder = match build_terminal(cx, initial_directory).await {
                 Ok(builder) => builder,
                 Err(error) => {
                     this.update(cx, |this, cx| {
@@ -620,7 +624,7 @@ impl TerminalWindowView {
     }
 
     fn new_tab(&mut self, _: &NewTab, _window: &mut Window, cx: &mut Context<Self>) {
-        self.spawn_new_tab(cx);
+        self.spawn_new_tab(cx, None);
     }
 
     // Split panes (G1). Each tab owns its own split-pane group; cmd-d splits
@@ -646,7 +650,7 @@ impl TerminalWindowView {
             self.tabs[active_index].split_root = Some(SplitNode::leaf(anchor_tab.clone()));
         }
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let builder = match build_terminal(cx).await {
+            let builder = match build_terminal(cx, None).await {
                 Ok(builder) => builder,
                 Err(error) => {
                     this.update(cx, |this, cx| {
@@ -1285,7 +1289,7 @@ impl TerminalWindowView {
                         IconButton::new("new-tab-button", IconName::Plus)
                             .icon_size(IconSize::XSmall)
                             .on_click(cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
-                                this.spawn_new_tab(cx);
+                                this.spawn_new_tab(cx, None);
                             })),
                     ),
             )
@@ -1772,10 +1776,13 @@ struct TestTerminalLaunchFailure {
 #[cfg(test)]
 impl gpui::Global for TestTerminalLaunchFailure {}
 
-async fn build_terminal(cx: &gpui::AsyncApp) -> anyhow::Result<TerminalBuilder> {
+async fn build_terminal(
+    cx: &gpui::AsyncApp,
+    initial_directory: Option<PathBuf>,
+) -> anyhow::Result<TerminalBuilder> {
     let settings = cx.update(|cx| TerminalSettings::get_global(cx).clone());
     let builder = cx.update(|cx| {
-        launch_terminal_with(settings, cx, |launch, cx| {
+        launch_terminal_with(settings, initial_directory.as_deref(), cx, |launch, cx| {
             #[cfg(test)]
             if let Some(failure) = cx.try_global::<TestTerminalLaunchFailure>() {
                 return gpui::Task::ready(Err(anyhow::anyhow!(failure.reason.clone())));
@@ -1815,11 +1822,14 @@ struct TerminalLaunchArguments {
 
 fn launch_terminal_with<T>(
     settings: TerminalSettings,
+    initial_directory: Option<&Path>,
     cx: &App,
     launcher: impl FnOnce(TerminalLaunchArguments, &App) -> T,
 ) -> T {
     let launch = TerminalLaunchArguments {
-        working_directory: standalone_working_directory(&settings.working_directory),
+        working_directory: initial_directory
+            .map(Path::to_path_buf)
+            .or_else(|| standalone_working_directory(&settings.working_directory)),
         shell: settings.shell,
         environment: settings.env,
         cursor_shape: settings.cursor_shape,
@@ -1845,7 +1855,7 @@ pub(crate) struct FakeLaunchSnapshot {
 #[cfg(test)]
 pub(crate) fn fake_launch_snapshot(cx: &App) -> FakeLaunchSnapshot {
     let settings = TerminalSettings::get_global(cx).clone();
-    launch_terminal_with(settings, cx, |launch, _| FakeLaunchSnapshot {
+    launch_terminal_with(settings, None, cx, |launch, _| FakeLaunchSnapshot {
         shell: launch.shell,
         environment: launch.environment,
         working_directory: launch.working_directory,
@@ -1998,7 +2008,7 @@ mod tests {
         });
 
         cx.update(|cx| {
-            window_view.update(cx, |window_view, cx| window_view.spawn_new_tab(cx));
+            window_view.update(cx, |window_view, cx| window_view.spawn_new_tab(cx, None));
         });
         cx.run_until_parked();
 
@@ -2545,7 +2555,7 @@ mod tests {
         });
         let active_tab_index = tabs.len() - 1;
 
-        let window_view = cx.new(TerminalWindowView::new);
+        let window_view = cx.new(|cx| TerminalWindowView::new(cx, None));
         window_view.update(cx, |window_view, _| {
             window_view.tabs = tabs;
             window_view.active_tab_index = active_tab_index;

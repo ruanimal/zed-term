@@ -206,7 +206,7 @@ pub fn open_new_window(cx: &mut App) {
         size(settings.default_width, settings.default_height),
         cx,
     );
-    open_window_with_bounds(bounds, cx)
+    open_window_with_bounds(bounds, None, cx)
 }
 
 /// Opens a new terminal window when macOS reopens the app without an existing one.
@@ -222,10 +222,14 @@ pub fn reopen_window_if_needed(cx: &mut App) {
 }
 
 /// Opens a main window at the given bounds and schedules its activation.
-fn open_window_with_bounds(bounds: gpui::Bounds<gpui::Pixels>, cx: &mut App) {
+fn open_window_with_bounds(
+    bounds: gpui::Bounds<gpui::Pixels>,
+    initial_directory: Option<std::path::PathBuf>,
+    cx: &mut App,
+) {
     let handle = cx
         .open_window(window_options(bounds), |window, cx| {
-            let view = cx.new(window::TerminalWindowView::new);
+            let view = cx.new(|cx| window::TerminalWindowView::new(cx, initial_directory));
             view.read(cx).focus_handle.clone().focus(window, cx);
             view
         })
@@ -248,7 +252,7 @@ fn open_window_with_bounds(bounds: gpui::Bounds<gpui::Pixels>, cx: &mut App) {
 
 /// Bootstrap the application inside GPUI's launch callback: settings, theme
 /// registry, fonts, keymap, persistence, then the first window.
-pub fn run(cx: &mut App) {
+pub fn run(cx: &mut App, initial_directory: Option<std::path::PathBuf>) {
     settings::init(cx);
     watch_user_settings(cx);
     theme_settings::init(theme::LoadThemes::JustBase, cx);
@@ -365,17 +369,17 @@ pub fn run(cx: &mut App) {
         cx.set_dock_menu(vec![MenuItem::action("New Window", NewWindow)]);
     }
 
-    open_first_window(cx);
+    open_first_window(cx, initial_directory);
 }
 
 /// Opens the first window, restoring its geometry from the previous session
 /// when possible and falling back to a default-sized window otherwise.
-fn open_first_window(cx: &mut App) {
+fn open_first_window(cx: &mut App, initial_directory: Option<std::path::PathBuf>) {
     let settings = TerminalSettings::get_global(cx);
     let default_size = size(settings.default_width, settings.default_height);
     let bounds = persistence::first_window_bounds(cx)
         .unwrap_or_else(|| persistence::default_first_window_bounds(cx, default_size));
-    open_window_with_bounds(bounds, cx);
+    open_window_with_bounds(bounds, initial_directory, cx);
 }
 
 /// Saves each main window's geometry when the app quits so the next launch
