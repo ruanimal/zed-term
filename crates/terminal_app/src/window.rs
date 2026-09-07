@@ -46,7 +46,7 @@ use crate::{
 /// the title follows the foreground process (e.g. `zsh` → `ls -al` → `zsh`).
 /// Titles longer than this are cut off with an ellipsis, like editor tabs
 /// (`MAX_TAB_TITLE_LEN` in the editor crate).
-const TAB_TITLE_WIDTH: gpui::Pixels = px(140.);
+const TAB_TITLE_WIDTH: gpui::Pixels = px(100.);
 /// Character cap applied to the title string itself, mirroring the editor's
 /// `MAX_TAB_TITLE_LEN`; keeps tooltips and copy-paste from carrying absurd
 /// titles even though the layout already truncates visually.
