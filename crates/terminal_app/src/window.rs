@@ -25,8 +25,8 @@ use theme::ActiveTheme as _;
 use ui::scrollbars::{ScrollbarVisibility, ShowScrollbar};
 use ui::utils::TRAFFIC_LIGHT_PADDING;
 use ui::{
-    ButtonCommon as _, Clickable as _, Color, ContextMenu, IconButton, IconName, IconSize,
-    Indicator, Label, LabelCommon as _, LabelSize, ScrollAxes, Scrollbars, Tab, TabBar,
+    ButtonCommon as _, ButtonSize, Clickable as _, Color, ContextMenu, IconButton, IconName,
+    IconSize, Indicator, Label, LabelCommon as _, LabelSize, ScrollAxes, Scrollbars, Tab, TabBar,
     TabPosition, Toggleable as _, Tooltip, WithScrollbar,
 };
 use util::ResultExt;
@@ -1320,7 +1320,7 @@ impl TerminalWindowView {
                 } else if idx == tab_count - 1 {
                     TabPosition::Last
                 } else {
-                    TabPosition::Middle(Ordering::Equal)
+                    TabPosition::Middle(idx.cmp(&self.active_tab_index))
                 };
                 let tab_idx = idx;
                 Tab::new(idx.to_string())
@@ -1369,6 +1369,7 @@ impl TerminalWindowView {
                             .child(
                                 IconButton::new(format!("close-tab-{tab_idx}"), IconName::Close)
                                     .icon_size(IconSize::XSmall)
+                                    .size(ButtonSize::None)
                                     .on_click(cx.listener(
                                         move |this, _: &gpui::ClickEvent, window, cx| {
                                             cx.stop_propagation();

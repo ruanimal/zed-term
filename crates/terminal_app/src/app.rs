@@ -7,9 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
+#[cfg(target_os = "macos")]
+use gpui::MenuItem;
 use gpui::{
-    Action, App, AppContext as _, KeyBinding, MenuItem, UpdateGlobal, WindowOptions, actions, px,
-    size,
+    Action, App, AppContext as _, KeyBinding, UpdateGlobal, WindowOptions, actions, px, size,
 };
 use settings::Settings as _;
 use settings::SettingsStore;
