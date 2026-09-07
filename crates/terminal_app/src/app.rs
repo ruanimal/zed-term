@@ -215,6 +215,18 @@ pub fn open_new_window(cx: &mut App) {
     open_window_with_bounds(bounds, cx)
 }
 
+/// Opens a new terminal window when macOS reopens the app without an existing one.
+#[cfg(target_os = "macos")]
+pub fn reopen_window_if_needed(cx: &mut App) {
+    let has_terminal_window = cx
+        .windows()
+        .into_iter()
+        .any(|handle| handle.downcast::<window::TerminalWindowView>().is_some());
+    if !has_terminal_window {
+        open_new_window(cx);
+    }
+}
+
 /// Opens a main window at the given bounds and schedules its activation.
 fn open_window_with_bounds(bounds: gpui::Bounds<gpui::Pixels>, cx: &mut App) {
     let handle = cx

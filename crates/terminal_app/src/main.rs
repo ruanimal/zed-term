@@ -88,6 +88,8 @@ fn main() -> Result<()> {
     let restart_arguments = launch_options.restart_arguments();
     init_paths()?;
     let app = build_application().with_restart_arguments(restart_arguments);
+    #[cfg(target_os = "macos")]
+    app.on_reopen(terminal_app::reopen_window_if_needed);
     app.run(terminal_app::run);
     Ok(())
 }

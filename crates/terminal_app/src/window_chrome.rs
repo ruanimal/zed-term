@@ -1,10 +1,13 @@
 use gpui::{
     AnyElement, App, Bounds, BoxShadow, ClickEvent, CursorStyle, Decorations, HitboxBehavior, Hsla,
-    IntoElement, MouseButton, Pixels, Point, ResizeEdge, Size, Tiling, Window, WindowButton,
-    WindowButtonLayout, WindowControls, canvas, px, size, transparent_black,
+    IntoElement, MouseButton, Pixels, Point, ResizeEdge, Size, Tiling, Window, canvas, px, size,
+    transparent_black,
 };
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use gpui::{WindowButton, WindowButtonLayout, WindowControls};
 use theme::ActiveTheme as _;
 use ui::prelude::*;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use ui::{IconButton, IconButtonShape, IconName, IconSize};
 
 pub(crate) const TITLE_BAR_HEIGHT: Pixels = px(28.);
