@@ -257,3 +257,35 @@ WP1 ───→ WP4 ─────────┘
 1. 新仓库建立（选项 A：git 层 fork 全仓后删无关码；选项 B：复制 `terminal_core`/`terminal_app` + 公共依赖快照）。
 2. 视仓库形态决定 `crates/terminal`、`crates/terminal_view` 的去留与替换。
 3. 断开支线同步，独立演进。
+
+## 7. Linux/KDE 集成记录
+
+### Dolphin“在此位置打开终端”图标（2026-09-07）
+
+在 KDE/Dolphin 26.08.0 中，右键菜单的“在此位置打开终端” action 从 `~/.config/kdeglobals` 的 `[General]` 读取 `TerminalService`。当该值非空时，Dolphin 直接执行 `KDesktopFile(terminalDesktopFilename).readIcon()`，而不是通过 KService 在全部 XDG applications 目录中查找 desktop 文件。
+
+因此，下面这组配置会导致 action 图标为空：
+
+```ini
+# ~/.config/kdeglobals
+[General]
+TerminalService=dev.zed.ZedTerm.desktop
+```
+
+如果 ZedTerm 只安装了标准系统文件 `/usr/share/applications/dev.zed.ZedTerm.desktop`，`KDesktopFile` 对这个相对文件名实际查找的是用户可写 applications 目录，通常为：
+
+```text
+~/.local/share/applications/dev.zed.ZedTerm.desktop
+```
+
+该文件不存在时，`readIcon()` 返回空值。ZedTerm 的 desktop 文件中的 `Icon=zedterm`、hicolor 图标安装路径以及 `Exec`、`MimeType`、`Actions` 等字段不是这个问题的根因。
+
+目前已验证可用的完整 workaround 是将用户配置中的 `TerminalService` 改为绝对路径：
+
+```ini
+TerminalService=/usr/share/applications/dev.zed.ZedTerm.desktop
+```
+
+该方案不需要用户目录副本，但属于本机 KDE 配置 workaround。修改后可执行 `kbuildsycoca6 --noincremental` 并完全重启 Dolphin。项目继续按标准位置安装 system desktop 文件，不需要为此添加额外 desktop 元数据。
+
+曾尝试将同名 desktop 文件复制到 `~/.local/share/applications/`：该方法确实能让 Dolphin 读取到 `Icon=zedterm` 并显示图标，但在当前环境下右键 action 不能正常启动 ZedTerm，因此不能作为完整修复方案。其原因是图标读取路径与终端启动路径并不完全相同；目前不建议使用该 workaround。
