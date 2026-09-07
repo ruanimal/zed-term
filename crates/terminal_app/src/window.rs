@@ -1656,7 +1656,6 @@ impl Render for TerminalWindowView {
                         {
                             if root.resize_divider(&divider, root_size, position - anchor) {
                                 split::update_drag_anchor(position);
-                                window.refresh();
                                 cx.notify();
                             } else {
                                 split::take_drag_anchor();

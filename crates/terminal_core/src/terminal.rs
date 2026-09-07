@@ -893,6 +893,7 @@ impl TerminalBuilder {
             output_processor: Processor::<StdSyncHandler>::new(),
             title_override: None,
             events: VecDeque::with_capacity(10),
+            content_dirty: true,
             last_content: Content {
                 terminal_bounds,
                 ..Default::default()
@@ -1119,6 +1120,7 @@ impl TerminalBuilder {
                 output_processor: Processor::<StdSyncHandler>::new(),
                 title_override: terminal_title_override,
                 events: VecDeque::with_capacity(10), //Should never get this high.
+                content_dirty: true,
                 last_content: Default::default(),
                 last_mouse: None,
                 mouse_down_position: None,
@@ -1309,6 +1311,8 @@ pub struct Terminal {
     term_config: AlacrittyTermConfig,
     output_processor: Processor<StdSyncHandler>,
     events: VecDeque<InternalEvent>,
+    /// Whether the Alacritty grid or terminal state changed since the last sync.
+    content_dirty: bool,
     /// This is only used for mouse mode cell change detection
     last_mouse: Option<(Point, SelectionSide)>,
     /// Window-relative position of the most recent left mouse-down. Used to
@@ -1435,6 +1439,7 @@ impl Terminal {
                 //NOOP, Handled in render
             }
             TerminalBackendEvent::Wakeup => {
+                self.content_dirty = true;
                 cx.emit(Event::Wakeup);
 
                 if let TerminalType::Pty { info, .. } = &self.terminal_type {
@@ -1691,6 +1696,7 @@ impl Terminal {
         }
         set_default_cursor_style(&mut self.term_config, cursor_shape);
         apply_config(&self.term, &self.term_config);
+        self.content_dirty = true;
     }
 
     pub fn set_alternate_scroll(&mut self, alternate_scroll: AlternateScroll) {
@@ -1707,6 +1713,7 @@ impl Terminal {
                 terminal.unset_private_mode(PrivateMode::Named(NamedPrivateMode::AlternateScroll))
             }
         }
+        self.content_dirty = true;
     }
 
     pub fn write_output(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
@@ -1718,6 +1725,7 @@ impl Terminal {
         let mut term = self.term.lock();
         self.output_processor.advance(&mut *term, &converted);
         drop(term);
+        self.content_dirty = true;
         cx.emit(Event::Wakeup);
     }
 
@@ -1779,6 +1787,7 @@ impl Terminal {
 
     pub fn shrink_to_used(&mut self) {
         shrink_to_used(&mut self.term.lock());
+        self.content_dirty = true;
     }
 
     pub fn scroll_line_up(&mut self) {
@@ -1992,6 +2001,10 @@ impl Terminal {
     }
 
     pub fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.events.is_empty() && !self.content_dirty {
+            return;
+        }
+
         let term = self.term.clone();
         let mut terminal = term.lock_unfair();
         //Note that the ordering of events matters for event processing
@@ -2000,6 +2013,7 @@ impl Terminal {
         }
 
         self.last_content = make_content(&terminal, &self.last_content);
+        self.content_dirty = false;
         if self.last_content.grid_lines_change == GridLinesChange::Changed {
             debug_assert!(self.last_content.last_hovered_word.is_none());
             self.refresh_hovered_word(window, cx);
