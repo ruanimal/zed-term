@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use gpui::{
-    Action, App, AppContext as _, KeyBinding, UpdateGlobal, WindowOptions, actions, px, size,
+    Action, App, AppContext as _, KeyBinding, MenuItem, UpdateGlobal, WindowOptions, actions, px,
+    size,
 };
 use settings::Settings as _;
 use settings::SettingsStore;
@@ -363,6 +364,13 @@ pub fn run(cx: &mut App) {
         KeyBinding::new("cmd-alt-right", ActivateNextPane, Some("TerminalWindow")),
         KeyBinding::new("shift-escape", ToggleZoom, Some("TerminalWindow")),
     ]);
+
+    #[cfg(target_os = "macos")]
+    {
+        // Dock menu actions have no active window to receive them after all windows close.
+        cx.on_action(|_: &NewWindow, cx| open_new_window(cx));
+        cx.set_dock_menu(vec![MenuItem::action("New Window", NewWindow)]);
+    }
 
     open_first_window(cx);
 }
