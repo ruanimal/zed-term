@@ -150,6 +150,14 @@ impl TerminalTab {
         self.has_bell
     }
 
+    pub(crate) fn cursor_blinking_enabled(&self, cx: &App) -> bool {
+        match TerminalSettings::get_global(cx).blinking {
+            settings::TerminalBlink::Off => false,
+            settings::TerminalBlink::On => true,
+            settings::TerminalBlink::TerminalControlled => self.terminal_blinking_enabled,
+        }
+    }
+
     pub(crate) fn cursor_visible(&self, cx: &App) -> bool {
         cursor_is_visible(
             TerminalSettings::get_global(cx).blinking,

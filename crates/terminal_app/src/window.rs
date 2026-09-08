@@ -234,19 +234,31 @@ impl TerminalWindowView {
 
         // The macOS display link only redraws while invalidated. Shell output now
         // repaints through the observe chain (Terminal -> TerminalTab ->
-        // TerminalWindowView) plus the TitleChanged subscription; the heartbeat
-        // remains as a fallback for cursor blink and any path that does not
-        // notify.
-        cx.spawn(async move |_, cx| {
+        // TerminalWindowView) plus the TitleChanged subscription. Keep a local
+        // heartbeat only for cursor blink, rather than refreshing every window.
+        let entity_id = cx.entity_id();
+        cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
-                    .timer(Duration::from_millis(250))
+                    .timer(Duration::from_millis(500))
                     .await;
-                cx.update(|cx| {
-                    for handle in cx.windows() {
-                        handle.update(cx, |_, window, _| window.refresh()).log_err();
-                    }
-                });
+
+                let should_refresh = match this.update(cx, |view, cx| {
+                    view.all_panes()
+                        .iter()
+                        .any(|pane| pane.read(cx).cursor_blinking_enabled(cx))
+                }) {
+                    Ok(should_refresh) => should_refresh,
+                    Err(_) => break,
+                };
+
+                if should_refresh
+                    && cx
+                        .with_window(entity_id, |window, _| window.refresh())
+                        .is_none()
+                {
+                    break;
+                }
             }
         })
         .detach();

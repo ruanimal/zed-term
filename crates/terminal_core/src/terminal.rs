@@ -2107,7 +2107,6 @@ impl Terminal {
         } else {
             self.schedule_find_hyperlink(e.modifiers, e.position, cx);
         }
-        cx.notify();
     }
 
     fn schedule_find_hyperlink(

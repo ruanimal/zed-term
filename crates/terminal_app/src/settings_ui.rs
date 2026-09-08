@@ -5520,29 +5520,21 @@ mod tests {
             Some(settings::FontSize(31.))
         );
 
+        // Simulate the persistence completion without starting RealFs I/O. This
+        // test verifies the draft state before and after the completion.
+        let captured_patch =
+            settings_page.read_with(cx, |settings_page, _| captured_save_patch(settings_page));
         let operation_id = settings_page.update(cx, |settings_page, cx| {
-            settings_page.save_drafts(cx);
             settings_page
-                .pending_write
-                .as_ref()
-                .map(|pending| pending.operation_id)
+                .begin_write(captured_patch.clone(), cx)
                 .unwrap_or_default()
         });
         assert_ne!(operation_id, 0);
-        let captured_patch = settings_page.read_with(cx, |settings_page, _| {
-            settings_page
-                .pending_write
-                .as_ref()
-                .map(|pending| pending.captured_patch.clone())
-        });
-        assert!(captured_patch.is_some());
-        if let Some(captured_patch) = captured_patch {
-            cx.update(|cx| {
-                SettingsStore::update_global(cx, |store, cx| {
-                    store.update_user_settings(cx, |content| captured_patch.apply(content));
-                });
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| captured_patch.apply(content));
             });
-        }
+        });
         settings_page.update(cx, |settings_page, cx| {
             assert!(settings_page.finish_write(operation_id, Ok(()), cx));
             assert_eq!(settings_page.draft_settings.font_size, default_font_size);
@@ -5587,11 +5579,9 @@ mod tests {
         settings_page.update(cx, |settings_page, cx| {
             settings_page.reset_terminal_defaults(cx);
             assert_eq!(settings_page.draft_settings.font_size, default_font_size);
-            settings_page.save_drafts(cx);
+            let captured_patch = captured_save_patch(settings_page);
             let operation_id = settings_page
-                .pending_write
-                .as_ref()
-                .map(|pending| pending.operation_id)
+                .begin_write(captured_patch, cx)
                 .unwrap_or_default();
             assert!(settings_page.finish_write(
                 operation_id,
