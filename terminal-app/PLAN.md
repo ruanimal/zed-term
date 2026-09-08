@@ -280,12 +280,18 @@ TerminalService=dev.zed.ZedTerm.desktop
 
 该文件不存在时，`readIcon()` 返回空值。ZedTerm 的 desktop 文件中的 `Icon=zedterm`、hicolor 图标安装路径以及 `Exec`、`MimeType`、`Actions` 等字段不是这个问题的根因。
 
-目前已验证可用的完整 workaround 是将用户配置中的 `TerminalService` 改为绝对路径：
+目前有两种可用配置方式。将同名 desktop 文件复制到用户级目录 `~/.local/share/applications/`，并保持用户配置为：
+
+```ini
+TerminalService=dev.zed.ZedTerm.desktop
+```
+
+这是有效方案：Dolphin 可以从用户级 desktop 文件读取 `Icon=zedterm`，并使用同一个入口启动 ZedTerm。此前该方案能够显示图标但无法启动，并不是因为图标读取路径与终端启动路径不一致，而是因为 `Exec=zedterm %U` 中的 `%U` 被 KDE 原样传入，ZedTerm 当时没有正确处理这个 desktop field code。现在应用会将字面量 `%U` 解释为 Dolphin 设置的进程工作目录，因此“在此位置打开终端”可以正常启动并继承当前目录。
+
+如果不希望复制文件，也可以将用户配置中的 `TerminalService` 改为绝对路径：
 
 ```ini
 TerminalService=/usr/share/applications/dev.zed.ZedTerm.desktop
 ```
 
-该方案不需要用户目录副本，但属于本机 KDE 配置 workaround。修改后可执行 `kbuildsycoca6 --noincremental` 并完全重启 Dolphin。项目继续按标准位置安装 system desktop 文件，不需要为此添加额外 desktop 元数据。
-
-曾尝试将同名 desktop 文件复制到 `~/.local/share/applications/`：该方法确实能让 Dolphin 读取到 `Icon=zedterm` 并显示图标，但在当前环境下右键 action 不能正常启动 ZedTerm，因此不能作为完整修复方案。其原因是图标读取路径与终端启动路径并不完全相同；目前不建议使用该 workaround。
+该方案同样可用，只是不需要用户目录副本，属于本机 KDE 配置 workaround。修改或复制 desktop 文件后，可执行 `kbuildsycoca6 --noincremental` 并完全重启 Dolphin。项目继续按标准位置安装 system desktop 文件。
