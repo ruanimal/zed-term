@@ -115,15 +115,10 @@ jobs:
         run: cargo install cargo-deb --version 3.7.0 --locked
 
       - name: Build deb package
-        shell: bash
         run: |
-          set -euo pipefail
-
-          package_file="$RUNNER_TEMP/zedterm-${VERSION}-linux-amd64.deb"
-          cargo deb --locked --no-build -p terminal_app --output "$package_file"
-          desktop-file-validate crates/terminal_app/resources/dev.zed.ZedTerm.desktop
-          dpkg-deb --info "$package_file"
-          dpkg-deb --contents "$package_file"
+          bash scripts/package-linux-deb.sh \
+            --version "$VERSION" \
+            --output "$RUNNER_TEMP/zedterm-${VERSION}-linux-amd64.deb"
 
       - name: Upload Linux package
         uses: actions/upload-artifact@v4
@@ -162,74 +157,12 @@ jobs:
         run: cargo build --locked --release -p terminal_app --bin terminal-app
 
       - name: Assemble app bundle and DMG
-        shell: bash
         run: |
-          set -euo pipefail
-
-          binary="$GITHUB_WORKSPACE/target/release/terminal-app"
-          test -x "$binary"
-
-          app_path="$RUNNER_TEMP/ZedTerm.app"
-          contents_path="$app_path/Contents"
-          iconset_path="$RUNNER_TEMP/ZedTerm.iconset"
-          dmg_path="$RUNNER_TEMP/zedterm-${VERSION}-macos-${{ matrix.arch }}-unsigned.dmg"
-          rm -rf "$app_path" "$iconset_path" "$dmg_path"
-          mkdir -p "$contents_path/MacOS" "$contents_path/Resources" "$iconset_path"
-
-          cp "$binary" "$contents_path/MacOS/terminal-app"
-          chmod 755 "$contents_path/MacOS/terminal-app"
-
-          source_icon="$GITHUB_WORKSPACE/crates/terminal_app/resources/app-icon@2x.png"
-          for icon_size in 16 32 128 256 512; do
-            sips -s format png -z "$icon_size" "$icon_size" "$source_icon" \
-              --out "$iconset_path/icon_${icon_size}x${icon_size}.png" >/dev/null
-            retina_size=$((icon_size * 2))
-            sips -s format png -z "$retina_size" "$retina_size" "$source_icon" \
-              --out "$iconset_path/icon_${icon_size}x${icon_size}@2x.png" >/dev/null
-          done
-          iconutil -c icns "$iconset_path" -o "$contents_path/Resources/ZedTerm.icns"
-
-          short_version="${VERSION%%-*}"
-          cat > "$contents_path/Info.plist" <<PLIST
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>CFBundleDisplayName</key>
-              <string>ZedTerm</string>
-              <key>CFBundleExecutable</key>
-              <string>terminal-app</string>
-              <key>CFBundleIconFile</key>
-              <string>ZedTerm</string>
-              <key>CFBundleIdentifier</key>
-              <string>dev.zed.ZedTerm</string>
-              <key>CFBundleInfoDictionaryVersion</key>
-              <string>6.0</string>
-              <key>CFBundleName</key>
-              <string>ZedTerm</string>
-              <key>CFBundlePackageType</key>
-              <string>APPL</string>
-              <key>CFBundleShortVersionString</key>
-              <string>$short_version</string>
-              <key>CFBundleSignature</key>
-              <string>ZDTR</string>
-              <key>CFBundleVersion</key>
-              <string>${GITHUB_RUN_NUMBER}</string>
-              <key>LSMinimumSystemVersion</key>
-              <string>10.15.7</string>
-              <key>LSApplicationCategoryType</key>
-              <string>public.app-category.utilities</string>
-              <key>NSHighResolutionCapable</key>
-              <true/>
-          </dict>
-          </plist>
-          PLIST
-
-          plutil -lint "$contents_path/Info.plist"
-          test -f "$contents_path/Resources/ZedTerm.icns"
-          hdiutil create -volname "ZedTerm $VERSION" -srcfolder "$app_path" \
-            -ov -format UDZO "$dmg_path"
-          hdiutil imageinfo "$dmg_path" >/dev/null
+          bash scripts/package-macos-dmg.sh \
+            --version "$VERSION" \
+            --arch "${{ matrix.arch }}" \
+            --build-number "$GITHUB_RUN_NUMBER" \
+            --output "$RUNNER_TEMP/zedterm-${VERSION}-macos-${{ matrix.arch }}-unsigned.dmg"
 
       - name: Upload macOS package
         uses: actions/upload-artifact@v4
