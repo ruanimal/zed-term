@@ -39,6 +39,16 @@
 - 不支持 `default_width` 和 `default_height` 默认窗口尺寸设置。
 - 不支持 `path_hyperlink_regexes` 自定义路径 hyperlink 正则。
 
+## 设置页多 Tab 化
+
+目标：设置窗口改为多 tab，现有设置内容不变（整体成为其中一个 tab），另增快捷键设置 tab（keymap）与主题下载 tab（复用 Zed 插件的主题下载）。
+
+- Tab「终端设置」：现有 `SettingsPage` 内容原样迁移，仅外层加 tab 容器；draft / 保存 / revision / 校验语义不变；「设置页扩展」下的待实现（搜索/过滤）与低优先级项归属此 tab。
+- Tab「快捷键」：现状按键全在 `app.rs` 硬编码 `bind_keys`，无 `keymap.json` 加载与编辑入口；需补 `paths::keymap_file()` 读写、按键列表/搜索/改键、冲突提示、重置默认。
+- Tab「主题下载」：现状仅内嵌主题 + 本地 `themes_dir()`；需复用 Zed 扩展 registry 的主题扩展下载 / 安装 / 更新 / 卸载链路，注意 extension 系统依赖重，需先评估裁剪再接入；本地已安装主题仍走现有 `ThemeRegistry` + 设置页主题下拉。
+
+建议验收：三 tab 切换不丢各 tab 未保存状态；快捷键改键后新窗口生效、重置可恢复；主题下载安装后出现在主题下拉并可即时切换，卸载后回落默认主题。
+
 ## Pane 方向性跳转
 
 当前已有按叶子视觉序循环的 ActivateNextPane/ActivatePreviousPane。可增加 ActivatePaneInDirection，根据 pane 几何位置选择上、下、左、右方向的最近邻。
@@ -56,6 +66,20 @@
 当前 tab 拖拽排序仅限同一窗口。可支持把完整 `WindowTab` 在 terminal-app 窗口之间移动，同时保留 terminal entity、split 树、zoom、bell 与焦点状态。
 
 建议验收：源窗口和目标窗口状态一致；移动最后一个 tab 时窗口关闭语义正确；拖拽期间 pane 退出或 tab 关闭时安全取消。
+
+## 链接可打开支持
+
+现状：`terminal_core` 已有链接发现与 Cmd-click 打开链路（OSC8 / URL 正则 / path 正则三路 `find_from_grid_point`，`mouse_down` / `mouse_up` 手势仲裁，`Event::Open` 经 `TerminalTab` 调 `cx.open_url`），`open_links_in_mouse_mode` 设置已接线；但 app 层 hover 反馈与 `PathLike` 落点语义缺失，实际“可发现、可点击”体验不完整。
+
+缺口：
+- hover 高亮未接线：`terminal_element` 两处 `layout_grid` 均传 `hyperlink = None`，`last_hovered_word` 未用于渲染；只有 OSC8 单元格有下划线，正则命中的 URL/path 悬停无高亮。
+- 光标反馈缺失：paint 固定 `CursorStyle::IBeam`，按住 secondary 修饰键悬停链接时未切换为手型。
+- `Event::NewNavigationTarget` 无人订阅，hover 状态未进入 UI 层，无法驱动高亮、光标与右键菜单。
+- 右键菜单缺少“打开链接 / 拷贝链接”（应只在命中链接时出现，且作用于命中位置而非仅焦点 pane）。
+- `PathLike` 打开语义简陋：当前 `file://{maybe_path}` 拼接，未按命中行 `working_directory` 解析相对路径，未剥离 / 利用 `:line[:column]`，未处理不存在路径。
+- `path_hyperlink_regexes` 自定义仍按“明确不支持”处理（仅 `default.json` 默认值生效），本需求不改变该决策。
+
+建议验收：按住 Cmd（Linux / Windows 上为 Ctrl）悬停 URL / path / OSC8 链接时出现下划线高亮加手型光标，松开即恢复；Cmd-click（mouse_mode 下按 `open_links_in_mouse_mode` 语义，关闭时需 Shift 逃逸）能调起系统打开 http(s) / file / OSC8 链接；相对路径按命中行 `working_directory` 解析，`file:line:col` 能定位或至少打开文件本体；命中链接右键出现打开 / 拷贝项，不影响选择、拖拽与窗口拖动；hover tooltip 仍不做（G8 已关闭）。
 
 ## 传输文件支持
 需要考虑是否设计通用的扩展接口
