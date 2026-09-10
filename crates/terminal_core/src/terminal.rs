@@ -1602,16 +1602,63 @@ impl Terminal {
         history_size: usize,
         cx: &mut Context<Self>,
     ) {
+        let prev_hovered_word = self.last_content.last_hovered_word.take();
+        let target = self.navigation_target_for(&hyperlink, history_size);
         let HyperlinkMatch {
             text: maybe_url_or_path,
-            is_url,
             range,
+            ..
         } = hyperlink;
-        let prev_hovered_word = self.last_content.last_hovered_word.take();
-        let match_line = range.start().line;
-        let working_directory = self.cwd_at_line(match_line, history_size);
 
-        let target = if is_url {
+        if open {
+            cx.emit(Event::Open(target));
+        } else {
+            self.update_selected_word(prev_hovered_word, range, maybe_url_or_path, target, cx);
+        }
+    }
+
+    /// Resolves the link under a terminal-local pixel position, if any.
+    ///
+    /// `position` is relative to the terminal pane and already accounts for the
+    /// view's scroll offset; the terminal's own bounds origin is subtracted
+    /// here, matching the mouse-handler convention.
+    pub fn navigation_target_at(
+        &mut self,
+        position: GpuiPoint<Pixels>,
+    ) -> Option<MaybeNavigationTarget> {
+        let terminal_bounds = self.last_content.terminal_bounds;
+        if !terminal_bounds.bounds.contains(&position) {
+            return None;
+        }
+
+        let point = grid_point(
+            position - terminal_bounds.bounds.origin,
+            terminal_bounds,
+            self.last_content.display_offset,
+        );
+        let term = self.term.lock();
+        let hyperlink = find_from_terminal_point(
+            &term,
+            point,
+            &mut self.hyperlink_regex_searches,
+            self.path_style,
+        )?;
+        let history_size = term.history_size();
+        Some(self.navigation_target_for(&hyperlink, history_size))
+    }
+
+    /// Builds the navigation target for a matched hyperlink, resolving the
+    /// working directory that was current on the matched line.
+    fn navigation_target_for(
+        &self,
+        hyperlink: &HyperlinkMatch,
+        history_size: usize,
+    ) -> MaybeNavigationTarget {
+        let match_line = hyperlink.range.start().line;
+        let working_directory = self.cwd_at_line(match_line, history_size);
+        let maybe_url_or_path = hyperlink.text.clone();
+
+        if hyperlink.is_url {
             if let Some(path) = maybe_url_or_path.strip_prefix("file://") {
                 let decoded_path = urlencoding::decode(path)
                     .map(|decoded| decoded.into_owned())
@@ -1622,19 +1669,13 @@ impl Terminal {
                     working_directory,
                 })
             } else {
-                MaybeNavigationTarget::Url(maybe_url_or_path.clone())
+                MaybeNavigationTarget::Url(maybe_url_or_path)
             }
         } else {
             MaybeNavigationTarget::PathLike(PathLikeTarget {
-                maybe_path: maybe_url_or_path.clone(),
+                maybe_path: maybe_url_or_path,
                 working_directory,
             })
-        };
-
-        if open {
-            cx.emit(Event::Open(target));
-        } else {
-            self.update_selected_word(prev_hovered_word, range, maybe_url_or_path, target, cx);
         }
     }
 
@@ -4625,6 +4666,34 @@ mod tests {
                     None
                 });
             }
+        }
+
+        #[gpui::test]
+        async fn test_navigation_target_at_resolves_the_hovered_link(cx: &mut TestAppContext) {
+            let (test_entities, _expected_hovered_word, cx) =
+                init_ctrl_hover_hyperlink_test_with_window(cx).await;
+
+            let over_link = cx.update_entity(&test_entities.terminal, |terminal, _| {
+                terminal.navigation_target_at(ZED_DEV_PT)
+            });
+            assert_eq!(
+                over_link,
+                Some(MaybeNavigationTarget::Url(ZED_DEV_STR.to_string())),
+                "Hovering the URL should resolve to a URL navigation target"
+            );
+
+            // The same line holds this text, so the miss proves the lookup is
+            // anchored to the clicked cell rather than to the line.
+            let beside_link = cx.update_entity(&test_entities.terminal, |terminal, _| {
+                terminal.navigation_target_at(point(px(0.0), px(2.5)))
+            });
+            assert_eq!(beside_link, None);
+
+            // Positions outside the terminal never resolve.
+            let outside = cx.update_entity(&test_entities.terminal, |terminal, _| {
+                terminal.navigation_target_at(point(px(-10.0), px(-10.0)))
+            });
+            assert_eq!(outside, None);
         }
     }
 

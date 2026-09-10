@@ -59,7 +59,11 @@ actions!(
         /// Closes the focused pane; the last pane closes the window.
         ClosePane,
         /// Toggles the focused pane between split layout and full content area.
-        ToggleZoom
+        ToggleZoom,
+        /// Opens the link under the terminal context menu's right-click.
+        OpenLink,
+        /// Copies the link under the terminal context menu's right-click.
+        CopyLink
     ]
 );
 

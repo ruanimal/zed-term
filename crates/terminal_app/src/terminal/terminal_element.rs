@@ -39,6 +39,9 @@ pub struct LayoutState {
     mode: Modes,
     display_offset: usize,
     base_text_style: TextStyle,
+    /// Whether the pointer sits on a link with the secondary modifier held,
+    /// decided during prepaint so paint does not re-read the terminal.
+    hovered_link: bool,
 }
 
 /// Helper struct for converting terminal cursor points to displayed cursor points.
@@ -1275,10 +1278,28 @@ impl Element for TerminalElement {
                     cursor_char,
                     selection,
                     cursor,
+                    last_hovered_word,
                     ..
                 } = &self.terminal.read(cx).last_content;
                 let mode = *mode;
                 let display_offset = *display_offset;
+
+                // Only the hovered match is styled here; the match itself was
+                // found (and throttled) in `terminal_core`, so this adds one
+                // range check per cell and nothing else to the frame.
+                let link_highlight = last_hovered_word.as_ref().map(|hovered_word| {
+                    (
+                        HighlightStyle {
+                            underline: Some(UnderlineStyle {
+                                color: Some(theme.colors().link_text_hover),
+                                thickness: Pixels::from(2.0),
+                                wavy: false,
+                            }),
+                            ..Default::default()
+                        },
+                        &hovered_word.word_match,
+                    )
+                });
 
                 // searches, highlights to a single range representations
                 let mut relative_highlighted_ranges = Vec::new();
@@ -1320,7 +1341,7 @@ impl Element for TerminalElement {
                         cells.iter(),
                         0,
                         &text_style,
-                        None,
+                        link_highlight,
                         minimum_contrast,
                         cx,
                     )
@@ -1349,7 +1370,7 @@ impl Element for TerminalElement {
                             .flat_map(|(_, line_cells)| line_cells),
                         rows_above_viewport as i32,
                         &text_style,
-                        None,
+                        link_highlight,
                         minimum_contrast,
                         cx,
                     )
@@ -1431,6 +1452,9 @@ impl Element for TerminalElement {
                     mode,
                     display_offset,
                     base_text_style: text_style,
+                    // Same source as the highlight above, so the cursor can
+                    // never advertise a link that just stopped being one.
+                    hovered_link: last_hovered_word.is_some(),
                 }
             },
         )
@@ -1470,7 +1494,13 @@ impl Element for TerminalElement {
             };
 
             self.register_mouse_listeners(layout.mode, &layout.hitbox, window);
-            window.set_cursor_style(gpui::CursorStyle::IBeam, &layout.hitbox);
+            // A held Cmd/Ctrl over a link advertises that clicking opens it.
+            let cursor_style = if layout.hovered_link && window.modifiers().secondary() {
+                gpui::CursorStyle::PointingHand
+            } else {
+                gpui::CursorStyle::IBeam
+            };
+            window.set_cursor_style(cursor_style, &layout.hitbox);
 
             let original_cursor = layout.cursor.take();
             self.interactivity.paint(

@@ -10,20 +10,21 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Decorations, DismissEvent, Entity,
-    FocusHandle, Focusable as _, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels,
-    PromptLevel, Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _, Subscription,
-    WeakEntity, Window, anchored, deferred, div, prelude::FluentBuilder, px,
+    AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Decorations,
+    DismissEvent, Entity, FocusHandle, Focusable as _, InteractiveElement as _, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement as _, Pixels, PromptLevel, Render, ScrollHandle, StatefulInteractiveElement as _,
+    Styled as _, Subscription, WeakEntity, Window, anchored, deferred, div, prelude::FluentBuilder,
+    px,
 };
 use settings::Settings as _;
 use settings::settings_content::TerminalBell;
 use terminal_core::terminal_settings::TerminalSettings;
 use terminal_core::{
-    Clear as TerminalClear, Copy as TerminalCopyAction, Paste as TerminalPasteAction,
-    PasteText as TerminalPasteTextAction, ScrollLineDown, ScrollLineUp, ScrollPageDown,
-    ScrollPageUp, ScrollToBottom, ScrollToTop, SearchTest, SelectAll as TerminalSelectAll,
-    ShowCharacterPalette, Terminal, TerminalBuilder,
+    Clear as TerminalClear, Copy as TerminalCopyAction, MaybeNavigationTarget,
+    Paste as TerminalPasteAction, PasteText as TerminalPasteTextAction, ScrollLineDown,
+    ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SearchTest,
+    SelectAll as TerminalSelectAll, ShowCharacterPalette, Terminal, TerminalBuilder,
 };
 use theme::ActiveTheme as _;
 use ui::scrollbars::{ScrollbarVisibility, ShowScrollbar};
@@ -37,13 +38,15 @@ use util::ResultExt;
 use util::paths::PathStyle;
 
 use crate::terminal::split::{self, SplitDirection, SplitNode};
-use crate::terminal::tab::{ScrollAction, TerminalTabEvent};
+use crate::terminal::tab::{
+    ScrollAction, TerminalTabEvent, navigation_target_text, open_navigation_target,
+};
 use crate::terminal::{TerminalElement, TerminalSearchBar, TerminalTab};
 use crate::window_chrome;
 use crate::{
     ActivateNextPane, ActivatePreviousPane, CloseAll, CloseLeft, CloseOtherTabs, ClosePane,
-    CloseRight, CloseTab, NewTab, NewWindow, NextTab, OpenSettings, PreviousTab, SendKeystroke,
-    SendText, SplitDown, SplitLeft, SplitRight, SplitUp, ToggleZoom,
+    CloseRight, CloseTab, CopyLink, NewTab, NewWindow, NextTab, OpenLink, OpenSettings,
+    PreviousTab, SendKeystroke, SendText, SplitDown, SplitLeft, SplitRight, SplitUp, ToggleZoom,
 };
 
 /// Fixed content width for every tab so the tab bar does not reflow while
@@ -98,6 +101,9 @@ pub struct TerminalWindowView {
     pub(crate) active_tab_index: usize,
     /// Right-click context menu for the active terminal, if open.
     context_menu: Option<(Entity<ContextMenu>, gpui::Point<Pixels>, Subscription)>,
+    /// Link under the last right-click, if that cell held one. Its menu entries
+    /// act on the clicked cell rather than on the focused pane.
+    context_navigation_target: Option<MaybeNavigationTarget>,
     /// Left-button state for the titlebar strip drag gesture.
     titlebar_mouse_down: std::cell::Cell<bool>,
     /// Tracks the tab bar's horizontal scroll so an activated tab can be
@@ -224,6 +230,7 @@ impl TerminalWindowView {
             tabs: Vec::new(),
             active_tab_index: 0,
             context_menu: None,
+            context_navigation_target: None,
             titlebar_mouse_down: std::cell::Cell::new(false),
             tab_bar_scroll_handle: ScrollHandle::new(),
             terminal_error: None,
@@ -539,6 +546,22 @@ impl TerminalWindowView {
 
     fn copy(&mut self, _: &TerminalCopyAction, _window: &mut Window, cx: &mut Context<Self>) {
         self.with_active_tab(cx, |tab, cx| tab.copy_selection(cx));
+    }
+
+    /// Opens the link that was under the context-menu right-click.
+    fn open_link(&mut self, _: &OpenLink, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.context_navigation_target.clone() else {
+            return;
+        };
+        open_navigation_target(&target, cx);
+    }
+
+    /// Copies the link that was under the context-menu right-click.
+    fn copy_link(&mut self, _: &CopyLink, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.context_navigation_target.as_ref() else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(navigation_target_text(target)));
     }
 
     fn paste(&mut self, _: &TerminalPasteAction, window: &mut Window, cx: &mut Context<Self>) {
@@ -1148,13 +1171,23 @@ impl TerminalWindowView {
             .map(|tab| (tab.is_split_layout(), tab.is_pane_maximized()))
             .unwrap_or((false, false));
         let focus_handle = tab.read(cx).focus_handle.clone();
+        let has_link = self.context_navigation_target.is_some();
         self.show_context_menu(position, window, cx, |menu, _, _| {
+            let menu = menu.context(focus_handle);
+            // Link entries only exist when the click landed on a link, and they
+            // act on that link rather than on the pane's selection.
+            let menu = if has_link {
+                menu.action("Open Link", Box::new(OpenLink))
+                    .action("Copy Link", Box::new(CopyLink))
+                    .separator()
+            } else {
+                menu
+            };
             // Split entries are always shown so a pane can be split again
             // (into a horizontal/vertical pair) from any pane, not just one
             // that already has splits. `Split*` actions target the active
             // pane the right-click selected.
             let menu = menu
-                .context(focus_handle)
                 .action("New Terminal", Box::new(NewTab))
                 .separator()
                 .action("Split Right", Box::new(SplitRight))
@@ -1609,6 +1642,8 @@ impl Render for TerminalWindowView {
                 })
                 .child(div().flex_1().min_h_0().child(content))
                 .on_action(cx.listener(Self::copy))
+                .on_action(cx.listener(Self::copy_link))
+                .on_action(cx.listener(Self::open_link))
                 .on_action(cx.listener(Self::paste))
                 .on_action(cx.listener(Self::paste_text))
                 .on_action(cx.listener(Self::clear))
@@ -1738,6 +1773,16 @@ impl Render for TerminalWindowView {
                                     });
                                 });
                             }
+                            // Resolve the link under the clicked cell: the menu's
+                            // link entries must act on that cell, and a click that
+                            // misses a link must not offer them at all.
+                            let scroll_top = tab.read(cx).scroll_top;
+                            let mut position = event.position;
+                            if scroll_top > Pixels::ZERO {
+                                position.y += scroll_top;
+                            }
+                            this.context_navigation_target =
+                                tab.update(cx, |tab, cx| tab.navigation_target_at(position, cx));
                             this.deploy_terminal_context_menu(event.position, window, cx);
                             cx.notify();
                         }
@@ -1979,6 +2024,7 @@ mod tests {
                 tabs,
                 active_tab_index,
                 context_menu: None,
+                context_navigation_target: None,
                 titlebar_mouse_down: std::cell::Cell::new(false),
                 tab_bar_scroll_handle: ScrollHandle::new(),
                 terminal_error: None,

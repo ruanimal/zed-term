@@ -69,17 +69,18 @@
 
 ## 链接可打开支持
 
-现状：`terminal_core` 已有链接发现与 Cmd-click 打开链路（OSC8 / URL 正则 / path 正则三路 `find_from_grid_point`，`mouse_down` / `mouse_up` 手势仲裁，`Event::Open` 经 `TerminalTab` 调 `cx.open_url`），`open_links_in_mouse_mode` 设置已接线；但 app 层 hover 反馈与 `PathLike` 落点语义缺失，实际“可发现、可点击”体验不完整。
+**已完成（2026-09-10）**：`terminal_core` 既有的链接发现与 Cmd-click 链路（OSC8 / URL 正则 / path 正则三路 `find_from_grid_point`，`mouse_down` / `mouse_up` 手势仲裁，`Event::Open` 经 `TerminalTab` 调 `cx.open_url`）语义不变，本阶段补齐 app 层的 hover 反馈与 `PathLike` 落点。
 
-缺口：
-- hover 高亮未接线：`terminal_element` 两处 `layout_grid` 均传 `hyperlink = None`，`last_hovered_word` 未用于渲染；只有 OSC8 单元格有下划线，正则命中的 URL/path 悬停无高亮。
-- 光标反馈缺失：paint 固定 `CursorStyle::IBeam`，按住 secondary 修饰键悬停链接时未切换为手型。
-- `Event::NewNavigationTarget` 无人订阅，hover 状态未进入 UI 层，无法驱动高亮、光标与右键菜单。
-- 右键菜单缺少“打开链接 / 拷贝链接”（应只在命中链接时出现，且作用于命中位置而非仅焦点 pane）。
-- `PathLike` 打开语义简陋：当前 `file://{maybe_path}` 拼接，未按命中行 `working_directory` 解析相对路径，未剥离 / 利用 `:line[:column]`，未处理不存在路径。
-- `path_hyperlink_regexes` 自定义仍按“明确不支持”处理（仅 `default.json` 默认值生效），本需求不改变该决策。
+- hover 高亮：`terminal_element` 两处 `layout_grid` 由 `hyperlink = None` 改为传入 `last_hovered_word.word_match` 与 `link_text_hover` 下划线样式；样式仅在 hover 命中时构造，逐 cell 只多一次 range 判断，OSC8 与正则命中的 URL / path 现在都有悬停高亮。
+- 光标反馈：paint 由固定 `IBeam` 改为按 `hovered_link && window.modifiers().secondary()` 在 `PointingHand` 与 `IBeam` 间切换，松开修饰键即恢复；mouse_mode 下 `mouse_move` 本就不做链接搜索（Shift 逃逸除外），与点击语义一致。
+- hover 状态驱动 UI：`TerminalTab` 订阅 `Event::NewNavigationTarget` 并请求重绘 —— 清除 hover 时 `terminal_core` 只 emit 事件而不 notify，手型光标要靠这次重绘恢复；高亮与光标取自同一份 `last_hovered_word`，不会出现"已无链接仍显示手型"。
+- 右键菜单：右键按下时按命中位置解析链接（新增 `Terminal::navigation_target_at`，含 bounds 检查与 scroll 偏移换算），命中才追加 "Open Link" / "Copy Link"，作用于命中位置而非焦点 pane；`Copy Link` 复制终端内原始文本。
+- `PathLike` 落点：`resolve_path_like_target` 用 `PathWithPosition::parse_str` 剥离 `:line[:column]` 与 `(line,column)` 后缀，相对路径按命中行 `working_directory` 解析，路径不存在时不打开（仅记 warn 日志）；打开改用 `Url::from_file_path`，不再做 `file://{maybe_path}` 字符串拼接。
+- `path_hyperlink_regexes` 自定义仍按"明确不支持"处理（仅 `default.json` 默认值生效），本需求未改变该决策；hover tooltip 仍未实现（G8 已关闭）。
 
-建议验收：按住 Cmd（Linux / Windows 上为 Ctrl）悬停 URL / path / OSC8 链接时出现下划线高亮加手型光标，松开即恢复；Cmd-click（mouse_mode 下按 `open_links_in_mouse_mode` 语义，关闭时需 Shift 逃逸）能调起系统打开 http(s) / file / OSC8 链接；相对路径按命中行 `working_directory` 解析，`file:line:col` 能定位或至少打开文件本体；命中链接右键出现打开 / 拷贝项，不影响选择、拖拽与窗口拖动；hover tooltip 仍不做（G8 已关闭）。
+验收：按住 Cmd（Linux / Windows 上为 Ctrl）悬停 URL / path / OSC8 链接时出现下划线高亮加手型光标，松开即恢复；Cmd-click（mouse_mode 下按 `open_links_in_mouse_mode` 语义，关闭时需 Shift 逃逸）能调起系统打开 http(s) / file / OSC8 链接；相对路径按命中行 `working_directory` 解析，`file:line:col` 至少能打开文件本体；命中链接右键出现打开 / 拷贝项，不影响选择、拖拽与窗口拖动。
+
+验证：`cargo test -p terminal_app --lib` 64 passed / 0 failed；`cargo test -p terminal_core --lib` 96 passed / 5 failed（失败项均为 PTY spawn 用例，受限沙箱下 `Operation not permitted`，与本改动无关）；`cargo clippy -p terminal_app -p terminal_core --all-targets -- --deny warnings` 与 `cargo fmt --all -- --check` 通过。新增测试覆盖：`navigation_target_at` 命中 / 同文本未命中 / 越界（core）；`resolve_path_like_target` 的相对路径、`:` 与 `(,)` 后缀、绝对路径、缺失路径、无 cwd；`Copy Link` 文本；`Event::Open` → 系统打开 URL 与文件路径。真机视觉与交互验收待做。
 
 ## 传输文件支持
 需要考虑是否设计通用的扩展接口

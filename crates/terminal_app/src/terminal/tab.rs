@@ -5,16 +5,21 @@
 
 use std::{
     ops::Range as StdRange,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
-use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Pixels, ScrollWheelEvent, Window};
+use gpui::{
+    App, Context, Entity, EventEmitter, FocusHandle, Pixels, Point, ScrollWheelEvent, Window,
+};
 use settings::Settings as _;
 use terminal_core::{
     Event, MaybeNavigationTarget, Search, Terminal, TerminalBounds,
     terminal_settings::TerminalSettings,
 };
+use url::Url;
 use util::ResultExt;
+use util::paths::PathWithPosition;
 
 use super::TerminalScrollHandle;
 
@@ -106,13 +111,12 @@ impl TerminalTab {
                         this.blink_started_at = Instant::now();
                         cx.notify();
                     }
-                    Event::Open(target) => match target {
-                        // Cmd-click on a hyperlink or path: hand it to the OS.
-                        MaybeNavigationTarget::Url(url) => cx.open_url(url),
-                        MaybeNavigationTarget::PathLike(target) => {
-                            cx.open_url(&format!("file://{}", target.maybe_path));
-                        }
-                    },
+                    Event::Open(target) => open_navigation_target(target, cx),
+                    // Dropping a hover (modifier release, pointer leaving the
+                    // link) only emits this event; the terminal itself is not
+                    // notified, so the repaint that clears the pointing-hand
+                    // cursor has to be requested here.
+                    Event::NewNavigationTarget(_) => cx.notify(),
                     Event::Bell => {
                         let newly_notified = !this.has_bell;
                         this.has_bell = true;
@@ -148,6 +152,17 @@ impl TerminalTab {
 
     pub(crate) fn has_bell(&self) -> bool {
         self.has_bell
+    }
+
+    /// Resolves the link under a pane-local position, so the context menu acts
+    /// on the cell that was right-clicked rather than on the focused pane.
+    pub(crate) fn navigation_target_at(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<MaybeNavigationTarget> {
+        self.terminal
+            .update(cx, |terminal, _| terminal.navigation_target_at(position))
     }
 
     pub(crate) fn cursor_blinking_enabled(&self, cx: &App) -> bool {
@@ -387,6 +402,54 @@ impl TerminalTab {
 
 impl EventEmitter<TerminalTabEvent> for TerminalTab {}
 
+/// Opens a terminal link (URL or file path) with the platform default handler.
+pub(crate) fn open_navigation_target(target: &MaybeNavigationTarget, cx: &mut App) {
+    match target {
+        MaybeNavigationTarget::Url(url) => cx.open_url(url),
+        MaybeNavigationTarget::PathLike(target) => {
+            // `file://` matches are normalized into plain paths before they get
+            // here, so `working_directory` is the only thing left to resolve.
+            match resolve_path_like_target(&target.maybe_path, target.working_directory.as_deref())
+            {
+                Some(path) => match Url::from_file_path(&path) {
+                    Ok(url) => cx.open_url(url.as_str()),
+                    Err(()) => log::warn!("Not opening {path:?}: not an absolute file path"),
+                },
+                None => log::warn!(
+                    "Not opening {:?}: no working directory to resolve it against, or it does not exist",
+                    target.maybe_path
+                ),
+            }
+        }
+    }
+}
+
+/// Link text placed on the clipboard by the context menu's "Copy Link" entry.
+pub(crate) fn navigation_target_text(target: &MaybeNavigationTarget) -> String {
+    match target {
+        MaybeNavigationTarget::Url(url) => url.clone(),
+        MaybeNavigationTarget::PathLike(target) => target.maybe_path.clone(),
+    }
+}
+
+/// Resolves a path-like link into an existing file-system path.
+///
+/// Terminal output carries `path:line:column` suffixes (the path regex appends
+/// the line and column it captured), so the position suffix is stripped first
+/// and only the file itself is opened. Relative paths resolve against the
+/// working directory recorded for the matched line. A missing path yields
+/// `None`, so clicking a stale link does not surface a system error dialog.
+fn resolve_path_like_target(maybe_path: &str, working_directory: Option<&Path>) -> Option<PathBuf> {
+    let PathWithPosition { path, .. } = PathWithPosition::parse_str(maybe_path);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        working_directory?.join(path)
+    };
+
+    path.exists().then_some(path)
+}
+
 /// Which direction the `scroll` action family should scroll.
 #[derive(Clone, Copy)]
 pub(crate) enum ScrollAction {
@@ -406,7 +469,7 @@ mod tests {
     use gpui::{AppContext as _, UpdateGlobal as _};
     use proptest::strategy::{Just, Strategy as _};
     use settings::SettingsStore;
-    use terminal_core::TerminalBuilder;
+    use terminal_core::{PathLikeTarget, TerminalBuilder};
     use util::paths::PathStyle;
 
     fn terminal_blink_strategy()
@@ -468,6 +531,140 @@ mod tests {
                 elapsed,
             );
         }
+    }
+
+    /// Builds a display-only pane, mirroring the terminal launched at startup
+    /// but without a PTY.
+    fn test_pane(cx: &mut App) -> Entity<TerminalTab> {
+        let settings = TerminalSettings::get_global(cx);
+        let builder = TerminalBuilder::new_display_only(
+            settings.cursor_shape,
+            settings.alternate_scroll,
+            settings.max_scroll_history_lines,
+            1,
+            cx.background_executor(),
+            PathStyle::local(),
+        );
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+        cx.new(|cx| TerminalTab::new(terminal, cx))
+    }
+
+    #[test]
+    fn path_like_links_resolve_against_the_recorded_working_directory() {
+        let working_directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let manifest_path = working_directory.join("Cargo.toml");
+
+        // The position suffix the path regex appends is not part of the file.
+        assert_eq!(
+            resolve_path_like_target("Cargo.toml:12:3", Some(working_directory)),
+            Some(manifest_path.clone())
+        );
+        assert_eq!(
+            resolve_path_like_target("Cargo.toml(12,3)", Some(working_directory)),
+            Some(manifest_path.clone())
+        );
+        assert_eq!(
+            resolve_path_like_target("src/app.rs:1", Some(working_directory)),
+            Some(working_directory.join("src/app.rs"))
+        );
+
+        // Absolute paths ignore the working directory.
+        assert_eq!(
+            resolve_path_like_target(
+                manifest_path.to_str().expect("manifest path is UTF-8"),
+                Some(Path::new("/nonexistent-directory"))
+            ),
+            Some(manifest_path.clone())
+        );
+
+        // Nothing to open when the file is gone or the line has no directory.
+        assert_eq!(
+            resolve_path_like_target("missing/ghost.rs:1:1", Some(working_directory)),
+            None
+        );
+        assert_eq!(resolve_path_like_target("Cargo.toml:1", None), None);
+    }
+
+    #[test]
+    fn copied_link_text_matches_what_the_terminal_shows() {
+        assert_eq!(
+            navigation_target_text(&MaybeNavigationTarget::Url("https://zed.dev/".to_string())),
+            "https://zed.dev/"
+        );
+        assert_eq!(
+            navigation_target_text(&MaybeNavigationTarget::PathLike(PathLikeTarget {
+                maybe_path: "src/main.rs:12:3".to_string(),
+                working_directory: None,
+            })),
+            "src/main.rs:12:3"
+        );
+    }
+
+    #[gpui::test]
+    async fn opening_links_hands_existing_paths_to_the_os(cx: &mut gpui::TestAppContext) {
+        let working_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+        // A stale match must not reach the OS, which would surface an error.
+        cx.update(|cx| {
+            open_navigation_target(
+                &MaybeNavigationTarget::PathLike(PathLikeTarget {
+                    maybe_path: "missing/ghost.rs:1:1".to_string(),
+                    working_directory: Some(working_directory.clone()),
+                }),
+                cx,
+            );
+        });
+        assert_eq!(cx.opened_url(), None);
+
+        cx.update(|cx| {
+            open_navigation_target(
+                &MaybeNavigationTarget::PathLike(PathLikeTarget {
+                    maybe_path: "Cargo.toml:3:1".to_string(),
+                    working_directory: Some(working_directory.clone()),
+                }),
+                cx,
+            );
+        });
+
+        let expected = Url::from_file_path(working_directory.join("Cargo.toml"))
+            .expect("manifest path is absolute");
+        assert_eq!(cx.opened_url().as_deref(), Some(expected.as_str()));
+    }
+
+    #[gpui::test]
+    async fn open_events_reach_the_os_handler(cx: &mut gpui::TestAppContext) {
+        let (_pane, terminal) = cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            let pane = test_pane(cx);
+            let terminal = pane.read(cx).terminal.clone();
+            (pane, terminal)
+        });
+
+        cx.update(|cx| {
+            terminal.update(cx, |_terminal, cx| {
+                cx.emit(Event::Open(MaybeNavigationTarget::Url(
+                    "https://zed.dev/".to_string(),
+                )));
+            });
+        });
+        assert_eq!(cx.opened_url().as_deref(), Some("https://zed.dev/"));
+
+        let working_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        cx.update(|cx| {
+            terminal.update(cx, |_terminal, cx| {
+                cx.emit(Event::Open(MaybeNavigationTarget::PathLike(
+                    PathLikeTarget {
+                        maybe_path: "Cargo.toml:3:1".to_string(),
+                        working_directory: Some(working_directory.clone()),
+                    },
+                )));
+            });
+        });
+
+        let expected = Url::from_file_path(working_directory.join("Cargo.toml"))
+            .expect("manifest path is absolute");
+        assert_eq!(cx.opened_url().as_deref(), Some(expected.as_str()));
     }
 
     #[gpui::test]
