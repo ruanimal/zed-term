@@ -57,9 +57,9 @@
 
 ## Tab 溢出可见指示
 
-当前 tab 栏支持横向滚动，激活 tab 时也会自动滚回可视区。可增加类似 Zed 的边缘提示，例如用 2px 边框表示一侧仍有被裁剪的 tab。
+**已完成（2026-09-11）**：Tab 栏溢出时在右侧固定区域显示左右 Chevron 指示按钮。按钮根据 `ScrollHandle` 的实际滚动位置实时启用或禁用，点击后按可视区域滚动 Tab；新建、关闭和批量关闭 Tab 后会自动确保活动 Tab 可见。指示器复用现有 `IconButton` 的 `XSmall`、`Square`、`Subtle` 样式，不遮挡 Tab 内容，也不影响点击、拖拽排序和窗口拖动。
 
-建议验收：提示随滚动位置实时出现或消失，不遮挡 tab 内容，也不影响点击、拖拽排序和窗口拖动。
+验证：`cargo check -p terminal_app`、`cargo test -p terminal_app`、`cargo fmt --all -- --check` 与 `git diff --check` 通过。
 
 ## 跨窗口 Tab 拖拽
 
