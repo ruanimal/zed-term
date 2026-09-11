@@ -8,11 +8,12 @@ use std::{
 
 use collections::HashMap;
 use gpui::{
-    App, AppContext as _, Bounds, ClickEvent, Context, Decorations, Element, FocusHandle,
-    GlobalElementId, InputHandler, InspectorElementId, InteractiveElement as _, IntoElement,
-    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement as _, Pixels, PromptLevel, Render, SharedString, Style, Styled as _,
-    UTF16Selection, UpdateGlobal, WeakEntity, Window, WindowBounds, WindowKind, px, size,
+    App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, Decorations,
+    Element, FocusHandle, GlobalElementId, InputHandler, InspectorElementId,
+    InteractiveElement as _, IntoElement, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, PromptLevel, Render, SharedString,
+    Style, Styled as _, UTF16Selection, UpdateGlobal, WeakEntity, Window, WindowBounds, WindowKind,
+    px, size,
 };
 use settings::Settings as _;
 use settings::SettingsStore;
@@ -31,14 +32,17 @@ use util::{ResultExt, shell::Shell as TerminalShell};
 use crate::window_chrome;
 use crate::window_options;
 
-type OptionAction = Box<dyn Fn(&mut App) + 'static>;
+type OptionAction = Box<dyn Fn(&mut Window, &mut App) + 'static>;
 type DropdownOptions = Vec<(&'static str, OptionAction)>;
 
 fn element_id_for(title: &str) -> gpui::ElementId {
     format!("setting-{title}").into()
 }
 
-fn opt(label: &'static str, apply: impl Fn(&mut App) + 'static) -> (&'static str, OptionAction) {
+fn opt(
+    label: &'static str,
+    apply: impl Fn(&mut Window, &mut App) + 'static,
+) -> (&'static str, OptionAction) {
     (label, Box::new(apply))
 }
 
@@ -174,6 +178,8 @@ pub struct SettingsPage {
     titlebar_mouse_down: std::cell::Cell<bool>,
     editing_field: Option<EditableField>,
     editing_selection: Range<usize>,
+    editing_anchor: usize,
+    editing_cursor: usize,
     marked_range: Option<Range<usize>>,
     draft_settings: TerminalSettings,
     theme_name: String,
@@ -476,6 +482,8 @@ impl SettingsPage {
             titlebar_mouse_down: std::cell::Cell::new(false),
             editing_field: None,
             editing_selection: 0..0,
+            editing_anchor: 0,
+            editing_cursor: 0,
             marked_range: None,
             draft_settings,
             theme_name,
@@ -674,9 +682,7 @@ impl SettingsPage {
         self.shell_form = draft.shell_form;
         self.environment = draft.environment;
         self.working_directory = draft.working_directory;
-        self.editing_field = None;
-        self.editing_selection = 0..0;
-        self.marked_range = None;
+        self.clear_active_edit();
     }
 
     fn replay_field(&mut self, setting: DirtySetting, source: &SettingsPageDraft) {
@@ -885,11 +891,24 @@ impl SettingsPage {
         cx.notify();
     }
 
-    fn begin_edit(&mut self, field: EditableField, window: &mut Window, cx: &mut Context<Self>) {
-        self.editing_field = Some(field);
-        let length = self.editing_text().encode_utf16().count();
-        self.editing_selection = 0..length;
+    fn clear_active_edit(&mut self) {
+        self.editing_field = None;
+        self.editing_selection = 0..0;
+        self.editing_anchor = 0;
+        self.editing_cursor = 0;
         self.marked_range = None;
+    }
+
+    fn begin_edit(&mut self, field: EditableField, window: &mut Window, cx: &mut Context<Self>) {
+        let field_changed = self.editing_field.as_ref() != Some(&field);
+        self.editing_field = Some(field);
+        if field_changed {
+            let length = self.editing_text().encode_utf16().count();
+            self.editing_selection = 0..length;
+            self.editing_anchor = 0;
+            self.editing_cursor = length;
+            self.marked_range = None;
+        }
         if self.pending_write.is_none() {
             self.status_message = None;
         }
@@ -977,10 +996,191 @@ impl SettingsPage {
         self.editing_selection = new_selected_range
             .map(|range| range_start + range.start..range_start + range.end)
             .unwrap_or(cursor..cursor);
+        self.editing_anchor = self.editing_selection.start;
+        self.editing_cursor = self.editing_selection.end;
         if let Some(setting) = dirty_setting {
             self.mark_dirty(setting, cx);
         } else {
             cx.notify();
+        }
+    }
+
+    fn update_editing_cursor(
+        &mut self,
+        cursor: usize,
+        extend_selection: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let length = self.editing_text().encode_utf16().count();
+        let cursor = cursor.min(length);
+        if extend_selection {
+            self.editing_cursor = cursor;
+            self.editing_selection = if self.editing_anchor <= cursor {
+                self.editing_anchor..cursor
+            } else {
+                cursor..self.editing_anchor
+            };
+        } else {
+            self.editing_anchor = cursor;
+            self.editing_cursor = cursor;
+            self.editing_selection = cursor..cursor;
+        }
+        self.marked_range = None;
+        cx.notify();
+    }
+
+    fn move_editing_horizontally(
+        &mut self,
+        move_left: bool,
+        extend_selection: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editing_field.is_none() {
+            return;
+        }
+        let current_text = self.editing_text();
+        let target = if !extend_selection && !self.editing_selection.is_empty() {
+            if move_left {
+                self.editing_selection.start
+            } else {
+                self.editing_selection.end
+            }
+        } else if move_left {
+            previous_utf16_boundary(&current_text, self.editing_cursor)
+        } else {
+            next_utf16_boundary(&current_text, self.editing_cursor)
+        };
+        self.update_editing_cursor(target, extend_selection, cx);
+    }
+
+    fn move_editing_to_boundary(
+        &mut self,
+        move_to_start: bool,
+        extend_selection: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editing_field.is_none() {
+            return;
+        }
+        let target = if move_to_start {
+            0
+        } else {
+            self.editing_text().encode_utf16().count()
+        };
+        self.update_editing_cursor(target, extend_selection, cx);
+    }
+
+    fn delete_editing_backward(&mut self, cx: &mut Context<Self>) {
+        if self.editing_field.is_none() {
+            return;
+        }
+        self.marked_range = None;
+        if self.editing_selection.is_empty() {
+            let previous = previous_utf16_boundary(&self.editing_text(), self.editing_cursor);
+            if previous == self.editing_cursor {
+                return;
+            }
+            self.editing_selection = previous..self.editing_cursor;
+        }
+        self.replace_editing_text(None, String::new(), None, false, cx);
+    }
+
+    fn delete_editing_forward(&mut self, cx: &mut Context<Self>) {
+        if self.editing_field.is_none() {
+            return;
+        }
+        self.marked_range = None;
+        if self.editing_selection.is_empty() {
+            let next = next_utf16_boundary(&self.editing_text(), self.editing_cursor);
+            if next == self.editing_cursor {
+                return;
+            }
+            self.editing_selection = self.editing_cursor..next;
+        }
+        self.replace_editing_text(None, String::new(), None, false, cx);
+    }
+
+    fn select_all_editing_text(&mut self, cx: &mut Context<Self>) {
+        if self.editing_field.is_none() {
+            return;
+        }
+        let length = self.editing_text().encode_utf16().count();
+        self.editing_anchor = 0;
+        self.editing_cursor = length;
+        self.editing_selection = 0..length;
+        self.marked_range = None;
+        cx.notify();
+    }
+
+    fn copy_editing_selection(&self, cx: &mut App) {
+        if self.editing_selection.is_empty() {
+            return;
+        }
+        let text = substring_utf16(&self.editing_text(), self.editing_selection.clone());
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
+    fn paste_editing_text(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .map(|text| text.replace('\n', " ").replace('\r', " "))
+        else {
+            return;
+        };
+        self.replace_editing_text(None, text, None, false, cx);
+    }
+
+    fn cut_editing_selection(&mut self, cx: &mut Context<Self>) {
+        if self.editing_selection.is_empty() {
+            return;
+        }
+        self.copy_editing_selection(cx);
+        self.replace_editing_text(None, String::new(), None, false, cx);
+    }
+
+    fn editable_fields(&self) -> Vec<EditableField> {
+        let mut fields = Vec::new();
+        if self.shell_form.mode != ShellMode::System {
+            fields.push(EditableField::ShellProgram);
+        }
+        if self.shell_form.mode == ShellMode::WithArguments {
+            fields.push(EditableField::ShellTitleOverride);
+            fields.extend((0..self.shell_form.arguments.len()).map(EditableField::ShellArgument));
+        }
+        for index in 0..self.environment.len() {
+            fields.push(EditableField::EnvironmentKey(index));
+            fields.push(EditableField::EnvironmentValue(index));
+        }
+        if self.working_directory.mode == WorkingDirectoryMode::Fixed {
+            fields.push(EditableField::WorkingDirectory);
+        }
+        fields
+    }
+
+    fn move_to_adjacent_editing_field(
+        &mut self,
+        move_forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let fields = self.editable_fields();
+        if fields.is_empty() {
+            return;
+        }
+        let current_index = self
+            .editing_field
+            .as_ref()
+            .and_then(|field| fields.iter().position(|candidate| candidate == field));
+        let next_index = match current_index {
+            Some(index) if move_forward => (index + 1) % fields.len(),
+            Some(0) => fields.len() - 1,
+            Some(index) => index - 1,
+            None if move_forward => 0,
+            None => fields.len() - 1,
+        };
+        if let Some(field) = fields.into_iter().nth(next_index) {
+            self.begin_edit(field, window, cx);
         }
     }
 
@@ -1154,9 +1354,64 @@ impl SettingsPage {
     }
 
     fn commit_active_edit(&mut self, cx: &mut Context<Self>) {
-        self.editing_field = None;
-        self.marked_range = None;
+        self.clear_active_edit();
         cx.notify();
+    }
+
+    fn text_input_content(
+        &self,
+        value: &str,
+        placeholder: &'static str,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        if !active {
+            return Label::new(if value.is_empty() {
+                placeholder.to_string()
+            } else {
+                value.to_string()
+            })
+            .color(if value.is_empty() {
+                Color::Muted
+            } else {
+                Color::Default
+            })
+            .into_any_element();
+        }
+
+        let text_length = value.encode_utf16().count();
+        let selection_start = self.editing_selection.start.min(text_length);
+        let selection_end = self
+            .editing_selection
+            .end
+            .min(text_length)
+            .max(selection_start);
+        let mut content = h_flex().items_center().min_w_0().flex_1();
+        let cursor = div().w(px(1.)).h_4().bg(cx.theme().colors().border_focused);
+
+        if selection_start == selection_end {
+            let before = substring_utf16(value, 0..selection_start);
+            let after = substring_utf16(value, selection_start..text_length);
+            if before.is_empty() && after.is_empty() {
+                content = content.child(Label::new(placeholder).color(Color::Muted));
+            } else {
+                content = content.child(Label::new(before));
+            }
+            content = content.child(cursor).child(Label::new(after));
+        } else {
+            let before = substring_utf16(value, 0..selection_start);
+            let selected = substring_utf16(value, selection_start..selection_end);
+            let after = substring_utf16(value, selection_end..text_length);
+            content = content
+                .child(Label::new(before))
+                .child(
+                    div()
+                        .bg(cx.theme().colors().ghost_element_selected)
+                        .child(Label::new(selected)),
+                )
+                .child(Label::new(after));
+        }
+        content.into_any_element()
     }
 
     fn text_input(
@@ -1167,7 +1422,8 @@ impl SettingsPage {
         placeholder: &'static str,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let is_empty = value.is_empty();
+        let is_active = self.editing_field.as_ref() == Some(&field);
+        let field_for_click = field.clone();
         div()
             .id(id)
             .min_w_48()
@@ -1177,27 +1433,21 @@ impl SettingsPage {
             .flex()
             .items_center()
             .rounded_md()
+            .cursor(CursorStyle::IBeam)
             .border_1()
-            .border_color(cx.theme().colors().border)
+            .border_color(if is_active {
+                cx.theme().colors().border_focused
+            } else {
+                cx.theme().colors().border
+            })
             .bg(cx.theme().colors().editor_background)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                    this.begin_edit(field.clone(), window, cx);
+                    this.begin_edit(field_for_click.clone(), window, cx);
                 }),
             )
-            .child(
-                Label::new(if is_empty {
-                    placeholder.to_string()
-                } else {
-                    value
-                })
-                .color(if is_empty {
-                    Color::Muted
-                } else {
-                    Color::Default
-                }),
-            )
+            .child(self.text_input_content(&value, placeholder, is_active, cx))
             .into_any_element()
     }
 
@@ -1277,10 +1527,16 @@ impl SettingsPage {
         value: String,
         options: DropdownOptions,
     ) -> gpui::AnyElement {
-        let menu = ContextMenu::build(window, cx, |menu, _, _| {
+        let page = cx.weak_entity();
+        let menu = ContextMenu::build(window, cx, move |menu, _, _| {
             let mut menu = menu;
             for (option_label, apply) in options {
-                menu = menu.entry(option_label, None, move |_window, cx| apply(cx));
+                let page = page.clone();
+                menu = menu.entry(option_label, None, move |window, cx| {
+                    page.update(cx, |this, _| this.clear_active_edit())
+                        .log_err();
+                    apply(window, cx);
+                });
             }
             menu
         });
@@ -1522,9 +1778,14 @@ impl SettingsPage {
         .into_iter()
         .map(|(label, mode)| {
             let page = cx.weak_entity();
-            opt(label, move |cx| {
+            opt(label, move |window, cx| {
                 page.update(cx, |this, cx| {
                     this.shell_form.mode = mode;
+                    if mode == ShellMode::System {
+                        this.clear_active_edit();
+                    } else {
+                        this.begin_edit(EditableField::ShellProgram, window, cx);
+                    }
                     this.mark_dirty(DirtySetting::Shell, cx);
                 })
                 .log_err();
@@ -1599,6 +1860,7 @@ impl SettingsPage {
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
                                     if remove_index < this.shell_form.arguments.len() {
+                                        this.clear_active_edit();
                                         this.shell_form.arguments.remove(remove_index);
                                         this.mark_dirty(DirtySetting::Shell, cx);
                                     }
@@ -1611,8 +1873,10 @@ impl SettingsPage {
                 "add-shell-argument",
                 "Add argument",
                 true,
-                |this, _, _, cx| {
+                |this, _, window, cx| {
+                    let index = this.shell_form.arguments.len();
                     this.shell_form.arguments.push(String::new());
+                    this.begin_edit(EditableField::ShellArgument(index), window, cx);
                     this.mark_dirty(DirtySetting::Shell, cx);
                 },
                 cx,
@@ -1652,6 +1916,7 @@ impl SettingsPage {
                             .icon_size(IconSize::XSmall)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if remove_index < this.environment.len() {
+                                    this.clear_active_edit();
                                     this.environment.remove(remove_index);
                                     this.mark_dirty(DirtySetting::Environment, cx);
                                 }
@@ -1664,11 +1929,13 @@ impl SettingsPage {
                 "add-environment-variable",
                 "Add variable",
                 true,
-                |this, _, _, cx| {
+                |this, _, window, cx| {
+                    let index = this.environment.len();
                     this.environment.push(EnvironmentVariable {
                         key: String::new(),
                         value: String::new(),
                     });
+                    this.begin_edit(EditableField::EnvironmentKey(index), window, cx);
                     this.mark_dirty(DirtySetting::Environment, cx);
                 },
                 cx,
@@ -1684,9 +1951,14 @@ impl SettingsPage {
         .into_iter()
         .map(|(label, mode)| {
             let page = cx.weak_entity();
-            opt(label, move |cx| {
+            opt(label, move |window, cx| {
                 page.update(cx, |this, cx| {
                     this.working_directory.mode = mode;
+                    if mode == WorkingDirectoryMode::Fixed {
+                        this.begin_edit(EditableField::WorkingDirectory, window, cx);
+                    } else {
+                        this.clear_active_edit();
+                    }
                     this.mark_dirty(DirtySetting::WorkingDirectory, cx);
                 })
                 .log_err();
@@ -2219,14 +2491,68 @@ impl Render for SettingsPage {
                 .track_focus(&self.focus_handle)
                 .size_full()
                 .bg(cx.theme().colors().panel_background)
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                    match event.keystroke.key.as_ref() {
-                        "enter" => this.commit_active_edit(cx),
-                        "escape" => {
-                            this.editing_field = None;
-                            cx.notify();
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    let key = event.keystroke.key.as_ref();
+                    let extend_selection = event.keystroke.modifiers.shift;
+                    let secondary_modifier = event.keystroke.modifiers.secondary();
+                    let handled = match key {
+                        "enter" => {
+                            this.commit_active_edit(cx);
+                            true
                         }
-                        _ => {}
+                        "escape" => {
+                            this.clear_active_edit();
+                            cx.notify();
+                            true
+                        }
+                        "tab" => {
+                            this.move_to_adjacent_editing_field(!extend_selection, window, cx);
+                            true
+                        }
+                        "left" => {
+                            this.move_editing_horizontally(true, extend_selection, cx);
+                            true
+                        }
+                        "right" => {
+                            this.move_editing_horizontally(false, extend_selection, cx);
+                            true
+                        }
+                        "home" => {
+                            this.move_editing_to_boundary(true, extend_selection, cx);
+                            true
+                        }
+                        "end" => {
+                            this.move_editing_to_boundary(false, extend_selection, cx);
+                            true
+                        }
+                        "backspace" => {
+                            this.delete_editing_backward(cx);
+                            true
+                        }
+                        "delete" => {
+                            this.delete_editing_forward(cx);
+                            true
+                        }
+                        "a" if secondary_modifier => {
+                            this.select_all_editing_text(cx);
+                            true
+                        }
+                        "c" if secondary_modifier => {
+                            this.copy_editing_selection(cx);
+                            true
+                        }
+                        "x" if secondary_modifier => {
+                            this.cut_editing_selection(cx);
+                            true
+                        }
+                        "v" if secondary_modifier => {
+                            this.paste_editing_text(cx);
+                            true
+                        }
+                        _ => false,
+                    };
+                    if handled {
+                        cx.stop_propagation();
                     }
                 }))
                 .child(SettingsPageInputElement {
@@ -2354,10 +2680,39 @@ fn draft_setting_option(
     setting: DirtySetting,
     update: impl Fn(&mut TerminalSettings) + 'static,
 ) -> (&'static str, OptionAction) {
-    opt(label, move |cx| {
+    opt(label, move |_window, cx| {
         page.update(cx, |this, cx| this.update_draft(setting, &update, cx))
             .log_err();
     })
+}
+
+fn previous_utf16_boundary(text: &str, offset: usize) -> usize {
+    let mut previous = 0;
+    let mut current = 0;
+    for character in text.chars() {
+        let next = current + character.len_utf16();
+        if offset <= current {
+            return previous;
+        }
+        if offset <= next {
+            return current;
+        }
+        previous = current;
+        current = next;
+    }
+    current
+}
+
+fn next_utf16_boundary(text: &str, offset: usize) -> usize {
+    let mut current = 0;
+    for character in text.chars() {
+        let next = current + character.len_utf16();
+        if offset < next {
+            return next;
+        }
+        current = next;
+    }
+    current
 }
 
 fn byte_offset_for_utf16(text: &str, utf16_offset: usize) -> usize {
@@ -4632,6 +4987,8 @@ mod tests {
             titlebar_mouse_down: std::cell::Cell::new(false),
             editing_field: None,
             editing_selection: 0..0,
+            editing_anchor: 0,
+            editing_cursor: 0,
             marked_range: None,
             draft_settings: TerminalSettings::get_global(cx).clone(),
             theme_name: String::new(),
@@ -5777,7 +6134,7 @@ impl InputHandler for SettingsPageInput {
                 let end = page.editing_selection.end.min(length).max(start);
                 UTF16Selection {
                     range: start..end,
-                    reversed: false,
+                    reversed: page.editing_cursor < page.editing_anchor,
                 }
             })
             .ok()
@@ -5864,6 +6221,8 @@ impl InputHandler for SettingsPageInput {
                 let start = range_utf16.start.min(length);
                 let end = range_utf16.end.min(length).max(start);
                 page.editing_selection = start..end;
+                page.editing_anchor = start;
+                page.editing_cursor = end;
                 page.marked_range = None;
                 cx.notify();
             })
@@ -5900,5 +6259,9 @@ impl InputHandler for SettingsPageInput {
 
     fn apple_press_and_hold_enabled(&mut self) -> bool {
         false
+    }
+
+    fn prefers_ime_for_printable_keys(&mut self, _window: &mut Window, _cx: &mut App) -> bool {
+        true
     }
 }
