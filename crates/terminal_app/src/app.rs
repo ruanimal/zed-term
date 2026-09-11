@@ -1,7 +1,7 @@
 //! ZedTerm — a standalone terminal application forked out of Zed's terminal.
 //!
 //! Keeps only traditional terminal capabilities and terminal-related settings
-//! (including a settings page). See `terminal-app/PLAN.md` for the split plan.
+//! (including a settings page). See `docs/PLAN.md` for the split plan.
 
 use std::sync::Arc;
 use std::time::Duration;

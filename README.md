@@ -6,12 +6,10 @@
 
 ZedTerm 是从 Zed workspace 中提取出的独立终端应用。它复用 GPUI、UI、主题和设置基础设施，但不引入 `workspace`、`project`、`editor`、`language` 等编辑器依赖。
 
-需要注意：`terminal-app/` 是本项目的开发文档目录，不是 Rust crate。可执行应用的源码位于 `crates/terminal_app`，终端内核位于 `crates/terminal_core`。
-
 ## 代码导航
 
 ```text
-terminal-app/                         # 本目录：计划、缺口和开发说明
+docs/                                # 本目录：计划、缺口和开发说明
 ├── README.md
 ├── TODO.md                            # 当前后续需求入口
 ├── PLAN.md                            # 架构决策和历史实施计划
