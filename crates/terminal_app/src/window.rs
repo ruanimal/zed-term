@@ -30,9 +30,10 @@ use theme::ActiveTheme as _;
 use ui::scrollbars::{ScrollbarVisibility, ShowScrollbar};
 use ui::utils::TRAFFIC_LIGHT_PADDING;
 use ui::{
-    ButtonCommon as _, ButtonSize, Clickable as _, Color, ContextMenu, DynamicSpacing, IconButton,
-    IconName, IconSize, Indicator, Label, LabelCommon as _, LabelSize, ScrollAxes, Scrollbars, Tab,
-    TabBar, TabPosition, Toggleable as _, Tooltip, WithScrollbar,
+    ButtonCommon as _, ButtonSize, ButtonStyle, Clickable as _, Color, ContextMenu,
+    Disableable as _, DynamicSpacing, IconButton, IconButtonShape, IconName, IconSize, Indicator,
+    Label, LabelCommon as _, LabelSize, ScrollAxes, Scrollbars, Tab, TabBar, TabPosition,
+    Toggleable as _, Tooltip, WithScrollbar,
 };
 use util::ResultExt;
 use util::paths::PathStyle;
@@ -58,6 +59,12 @@ const TAB_TITLE_WIDTH: gpui::Pixels = px(100.);
 /// `MAX_TAB_TITLE_LEN`; keeps tooltips and copy-paste from carrying absurd
 /// titles even though the layout already truncates visually.
 const TAB_TITLE_MAX_CHARS: usize = 24;
+
+#[derive(Clone, Copy)]
+enum TabBarScrollDirection {
+    Left,
+    Right,
+}
 
 #[derive(Default)]
 struct TerminalScrollbarSettingsWrapper;
@@ -110,6 +117,8 @@ pub struct TerminalWindowView {
     /// scrolled back into view when the tabs overflow.
     tab_bar_scroll_handle: ScrollHandle,
     tab_bar_has_overflow: bool,
+    tab_bar_can_scroll_left: bool,
+    tab_bar_can_scroll_right: bool,
     terminal_error: Option<String>,
     live_settings: LiveTerminalSettings,
     _subscriptions: Vec<Subscription>,
@@ -235,6 +244,8 @@ impl TerminalWindowView {
             titlebar_mouse_down: std::cell::Cell::new(false),
             tab_bar_scroll_handle: ScrollHandle::new(),
             tab_bar_has_overflow: false,
+            tab_bar_can_scroll_left: false,
+            tab_bar_can_scroll_right: false,
             terminal_error: None,
             live_settings,
             _subscriptions: vec![settings_subscription],
@@ -339,6 +350,8 @@ impl TerminalWindowView {
                     this.observe_tab(&tab, cx);
                     this.tabs.push(WindowTab::new(tab));
                     this.active_tab_index = this.tabs.len() - 1;
+                    this.tab_bar_scroll_handle
+                        .scroll_to_item(this.active_tab_index);
                     Self::focus_handle_after_update(focus_handle, cx);
                     cx.notify();
                 })
@@ -937,6 +950,10 @@ impl TerminalWindowView {
             // tree chose as the new active pane.
             self.focus_pane(window, cx);
         }
+        if !self.tabs.is_empty() {
+            self.tab_bar_scroll_handle
+                .scroll_to_item(self.active_tab_index);
+        }
         cx.notify();
     }
 
@@ -1068,6 +1085,8 @@ impl TerminalWindowView {
             // Refocus the surviving tab's terminal; the closed tab's focus
             // handle is gone and keyboard input must land in a live pane.
             self.focus_pane(window, cx);
+            self.tab_bar_scroll_handle
+                .scroll_to_item(self.active_tab_index);
             cx.notify();
         }
     }
@@ -1110,17 +1129,23 @@ impl TerminalWindowView {
         }
         self.tabs = kept;
         self.active_tab_index = 0;
+        self.tab_bar_scroll_handle
+            .scroll_to_item(self.active_tab_index);
         cx.notify();
     }
 
     fn close_left(&mut self, _: &CloseLeft, _window: &mut Window, cx: &mut Context<Self>) {
         self.tabs.drain(..self.active_tab_index);
         self.active_tab_index = 0;
+        self.tab_bar_scroll_handle
+            .scroll_to_item(self.active_tab_index);
         cx.notify();
     }
 
     fn close_right(&mut self, _: &CloseRight, _window: &mut Window, cx: &mut Context<Self>) {
         self.tabs.truncate(self.active_tab_index + 1);
+        self.tab_bar_scroll_handle
+            .scroll_to_item(self.active_tab_index);
         cx.notify();
     }
 
@@ -1311,13 +1336,86 @@ impl TerminalWindowView {
             )
     }
 
+    fn scroll_tab_bar(&mut self, direction: TabBarScrollDirection, cx: &mut Context<Self>) {
+        let max_offset = self.tab_bar_scroll_handle.max_offset().x;
+        if max_offset <= px(0.) {
+            return;
+        }
+
+        let offset = self.tab_bar_scroll_handle.offset();
+        let viewport_width = self.tab_bar_scroll_handle.bounds().size.width;
+        let scroll_distance = (viewport_width * 0.8).max(px(96.));
+        let target_x = match direction {
+            TabBarScrollDirection::Left => offset.x + scroll_distance,
+            TabBarScrollDirection::Right => offset.x - scroll_distance,
+        }
+        .clamp(-max_offset, px(0.));
+
+        if target_x == offset.x {
+            return;
+        }
+
+        self.tab_bar_scroll_handle
+            .set_offset(gpui::Point::new(target_x, offset.y));
+        cx.notify();
+    }
+
+    fn render_tab_scroll_button(
+        &self,
+        direction: TabBarScrollDirection,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (button_id, icon, label) = match direction {
+            TabBarScrollDirection::Left => (
+                "scroll-tabs-left",
+                IconName::ChevronLeft,
+                "Scroll tabs left",
+            ),
+            TabBarScrollDirection::Right => (
+                "scroll-tabs-right",
+                IconName::ChevronRight,
+                "Scroll tabs right",
+            ),
+        };
+        div()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                IconButton::new(button_id, icon)
+                    .icon_size(IconSize::XSmall)
+                    .shape(IconButtonShape::Square)
+                    .style(ButtonStyle::Subtle)
+                    .disabled(!enabled)
+                    .aria_label(label)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.scroll_tab_bar(direction, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
     fn render_tab_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> TabBar {
-        // max_offset is updated during prepaint, so refresh the view after the
-        // frame before switching the button between inline and fixed layouts.
+        // max_offset and offset are updated during prepaint, so refresh the view after the
+        // frame to keep both indicator buttons in sync with the actual scroll position.
         cx.on_next_frame(window, |view, _window, cx| {
-            let has_overflow = view.tab_bar_scroll_handle.max_offset().x > px(0.);
-            if view.tab_bar_has_overflow != has_overflow {
+            let max_offset = view.tab_bar_scroll_handle.max_offset().x;
+            let offset = view.tab_bar_scroll_handle.offset().x;
+            let epsilon = px(0.5);
+            let has_overflow = max_offset > epsilon;
+            let can_scroll_left = offset < -epsilon;
+            let can_scroll_right = offset > -max_offset + epsilon;
+            if view.tab_bar_has_overflow != has_overflow
+                || view.tab_bar_can_scroll_left != can_scroll_left
+                || view.tab_bar_can_scroll_right != can_scroll_right
+            {
                 view.tab_bar_has_overflow = has_overflow;
+                view.tab_bar_can_scroll_left = can_scroll_left;
+                view.tab_bar_can_scroll_right = can_scroll_right;
                 cx.notify();
             }
         });
@@ -1332,7 +1430,18 @@ impl TerminalWindowView {
             );
         let new_tab_button = self.render_new_tab_button(cx);
         if self.tab_bar_has_overflow {
-            tab_bar = tab_bar.end_child(new_tab_button);
+            tab_bar = tab_bar
+                .end_child(self.render_tab_scroll_button(
+                    TabBarScrollDirection::Left,
+                    self.tab_bar_can_scroll_left,
+                    cx,
+                ))
+                .end_child(self.render_tab_scroll_button(
+                    TabBarScrollDirection::Right,
+                    self.tab_bar_can_scroll_right,
+                    cx,
+                ))
+                .end_child(new_tab_button);
         } else {
             tab_bar = tab_bar.child(new_tab_button);
         }
@@ -2047,6 +2156,9 @@ mod tests {
                 context_navigation_target: None,
                 titlebar_mouse_down: std::cell::Cell::new(false),
                 tab_bar_scroll_handle: ScrollHandle::new(),
+                tab_bar_has_overflow: false,
+                tab_bar_can_scroll_left: false,
+                tab_bar_can_scroll_right: false,
                 terminal_error: None,
                 live_settings,
                 _subscriptions: vec![settings_subscription],
