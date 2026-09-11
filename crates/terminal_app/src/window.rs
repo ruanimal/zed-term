@@ -109,6 +109,7 @@ pub struct TerminalWindowView {
     /// Tracks the tab bar's horizontal scroll so an activated tab can be
     /// scrolled back into view when the tabs overflow.
     tab_bar_scroll_handle: ScrollHandle,
+    tab_bar_has_overflow: bool,
     terminal_error: Option<String>,
     live_settings: LiveTerminalSettings,
     _subscriptions: Vec<Subscription>,
@@ -233,6 +234,7 @@ impl TerminalWindowView {
             context_navigation_target: None,
             titlebar_mouse_down: std::cell::Cell::new(false),
             tab_bar_scroll_handle: ScrollHandle::new(),
+            tab_bar_has_overflow: false,
             terminal_error: None,
             live_settings,
             _subscriptions: vec![settings_subscription],
@@ -1250,7 +1252,7 @@ impl TerminalWindowView {
     /// titlebar. Dragging follows Zed's PlatformTitleBar pattern: flag on
     /// mouse-down, `start_window_move` on drag; interactive children stop
     /// propagation so presses on them don't move the window.
-    fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_title_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let titlebar_height = window_chrome::TITLE_BAR_HEIGHT;
         let titlebar_background = cx.theme().colors().tab_bar_background;
         let is_server_decorations = matches!(window.window_decorations(), Decorations::Server);
@@ -1259,7 +1261,7 @@ impl TerminalWindowView {
         });
         let (left_controls, right_controls) =
             window_chrome::render_window_controls(window, cx, close_window);
-        let tab_bar = self.render_tab_bar(cx);
+        let tab_bar = self.render_tab_bar(window, cx);
         let tab_bar = if is_server_decorations {
             tab_bar
         } else {
@@ -1309,8 +1311,17 @@ impl TerminalWindowView {
             )
     }
 
-    fn render_tab_bar(&self, cx: &mut Context<Self>) -> TabBar {
-        TabBar::new("window-tabs")
+    fn render_tab_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> TabBar {
+        // max_offset is updated during prepaint, so refresh the view after the
+        // frame before switching the button between inline and fixed layouts.
+        cx.on_next_frame(window, |view, _window, cx| {
+            let has_overflow = view.tab_bar_scroll_handle.max_offset().x > px(0.);
+            if view.tab_bar_has_overflow != has_overflow {
+                view.tab_bar_has_overflow = has_overflow;
+                cx.notify();
+            }
+        });
+        let mut tab_bar = TabBar::new("window-tabs")
             .height(window_chrome::TITLE_BAR_HEIGHT)
             .track_scroll(&self.tab_bar_scroll_handle)
             .children(
@@ -1318,26 +1329,35 @@ impl TerminalWindowView {
                 // that follows the focused pane; split panes do not become
                 // separate tabs (per product decision).
                 self.render_tab_children(cx),
+            );
+        let new_tab_button = self.render_new_tab_button(cx);
+        if self.tab_bar_has_overflow {
+            tab_bar = tab_bar.end_child(new_tab_button);
+        } else {
+            tab_bar = tab_bar.child(new_tab_button);
+        }
+        tab_bar
+    }
+
+    fn render_new_tab_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .ml(DynamicSpacing::Base02.rems(cx))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                    // Keep button presses out of the titlebar drag
+                    // gesture (IconButton has no mouse-down hook).
+                    cx.stop_propagation();
+                }),
             )
             .child(
-                div()
-                    .ml(DynamicSpacing::Base02.rems(cx))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|_, _: &MouseDownEvent, _, cx| {
-                            // Keep button presses out of the titlebar drag
-                            // gesture (IconButton has no mouse-down hook).
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child(
-                        IconButton::new("new-tab-button", IconName::Plus)
-                            .icon_size(IconSize::XSmall)
-                            .on_click(cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
-                                this.spawn_new_tab(cx, None);
-                            })),
-                    ),
+                IconButton::new("new-tab-button", IconName::Plus)
+                    .icon_size(IconSize::XSmall)
+                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
+                        this.spawn_new_tab(cx, None);
+                    })),
             )
+            .into_any_element()
     }
 
     /// The tab bar's tab columns, one per open tab. Each tab's title comes
