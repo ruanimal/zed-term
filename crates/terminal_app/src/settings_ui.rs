@@ -25,7 +25,7 @@ use ui::prelude::*;
 use ui::utils::TRAFFIC_LIGHT_PADDING;
 use ui::{
     Color, ContextMenu, Divider, DividerColor, DropdownMenu, Icon, IconButton, IconName, IconSize,
-    Label, LabelSize, Switch, ToggleState,
+    Label, LabelSize, Switch, TabBar, ToggleState,
 };
 use util::{ResultExt, shell::Shell as TerminalShell};
 
@@ -52,6 +52,23 @@ enum SaveStatus {
     Saving,
     Succeeded,
     Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsTab {
+    Terminal,
+    Keymap,
+    Themes,
+}
+
+impl SettingsTab {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Terminal => "Terminal",
+            Self::Keymap => "Keymap",
+            Self::Themes => "Themes",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,6 +193,7 @@ struct PendingWrite {
 pub struct SettingsPage {
     focus_handle: FocusHandle,
     titlebar_mouse_down: std::cell::Cell<bool>,
+    active_tab: SettingsTab,
     editing_field: Option<EditableField>,
     editing_selection: Range<usize>,
     editing_anchor: usize,
@@ -480,6 +498,7 @@ impl SettingsPage {
         Self {
             focus_handle: cx.focus_handle(),
             titlebar_mouse_down: std::cell::Cell::new(false),
+            active_tab: SettingsTab::Terminal,
             editing_field: None,
             editing_selection: 0..0,
             editing_anchor: 0,
@@ -1124,7 +1143,7 @@ impl SettingsPage {
         let Some(text) = cx
             .read_from_clipboard()
             .and_then(|item| item.text())
-            .map(|text| text.replace('\n', " ").replace('\r', " "))
+            .map(|text| text.replace(['\n', '\r'], " "))
         else {
             return;
         };
@@ -2042,7 +2061,7 @@ impl Render for SettingsPage {
         let page = cx.weak_entity();
 
         let title_bar = self.render_title_bar(window, cx);
-        let content = v_flex()
+        let terminal_content = v_flex()
             .id("settings-content")
             .w_full()
             .child(self.status_row())
@@ -2566,7 +2585,11 @@ impl Render for SettingsPage {
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
-                        .child(content),
+                        .child(match self.active_tab {
+                            SettingsTab::Terminal => terminal_content.into_any_element(),
+                            SettingsTab::Keymap => self.render_keymap_tab(cx).into_any_element(),
+                            SettingsTab::Themes => self.render_themes_tab(cx).into_any_element(),
+                        }),
                 ),
             window,
             cx,
@@ -2575,6 +2598,12 @@ impl Render for SettingsPage {
 }
 
 impl SettingsPage {
+    /// Renders the merged title bar: the TabBar acts as the window title
+    /// bar (as in the terminal window). Window controls are injected as
+    /// TabBar start/end children on client-side decorations; on server-side
+    /// decorations the traffic lights are system-drawn and a left padding
+    /// reserves space for them. Save/Discard buttons sit in the TabBar's
+    /// end area.
     fn render_title_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let titlebar_height = window_chrome::TITLE_BAR_HEIGHT;
         let has_unsaved_changes = !self.dirty_settings.is_empty();
@@ -2587,11 +2616,9 @@ impl SettingsPage {
             "Save"
         }
         .to_string();
-        let is_client_decorations =
-            matches!(window.window_decorations(), Decorations::Client { .. });
-        let is_server_decorations = !is_client_decorations;
+        let is_server_decorations = matches!(window.window_decorations(), Decorations::Server);
         let can_maximize =
-            is_client_decorations && window.is_resizable() && window.window_controls().maximize;
+            !is_server_decorations && window.is_resizable() && window.window_controls().maximize;
         let close_window = cx.listener(|this, _: &ClickEvent, window, cx| {
             if this.request_close(window, cx) {
                 window.remove_window();
@@ -2599,6 +2626,41 @@ impl SettingsPage {
         });
         let (left_controls, right_controls) =
             window_chrome::render_window_controls(window, cx, close_window);
+
+        let save_discard = h_flex()
+            .gap_2()
+            .child(self.title_bar_action_button(
+                "discard-settings",
+                "Discard".to_string(),
+                has_unsaved_changes && !saving,
+                false,
+                false,
+                |this, _, _, cx| this.discard_drafts(cx),
+                cx,
+            ))
+            .child(self.title_bar_action_button(
+                "save-settings",
+                save_label,
+                has_unsaved_changes && !saving,
+                has_unsaved_changes,
+                self.save_status == SaveStatus::Succeeded && !has_unsaved_changes,
+                |this, _, _, cx| this.save_drafts(cx),
+                cx,
+            ));
+
+        let tab_bar = TabBar::new("settings-tab-bar")
+            .height(titlebar_height)
+            .child(self.render_settings_tab(SettingsTab::Terminal, cx))
+            .child(self.render_settings_tab(SettingsTab::Keymap, cx))
+            .child(self.render_settings_tab(SettingsTab::Themes, cx))
+            .end_child(save_discard);
+
+        let tab_bar = if is_server_decorations {
+            tab_bar
+        } else {
+            tab_bar.start_child(left_controls).end_child(right_controls)
+        };
+
         div()
             .id("settings-title-bar")
             .h(titlebar_height)
@@ -2608,7 +2670,6 @@ impl SettingsPage {
             .when(is_server_decorations, |this| {
                 this.pl(px(TRAFFIC_LIGHT_PADDING))
             })
-            .when(!is_server_decorations, |this| this.pl_2())
             .bg(cx.theme().colors().tab_bar_background)
             .on_mouse_down(
                 MouseButton::Left,
@@ -2633,43 +2694,92 @@ impl SettingsPage {
                     window.zoom_window();
                 }
             }))
-            .child(left_controls)
             .child(
-                h_flex()
-                    .h_full()
+                div()
+                    .flex()
+                    .flex_row()
                     .flex_1()
                     .min_w_0()
-                    .when(is_server_decorations, |this| this.pr_4())
-                    .justify_between()
-                    .child(
-                        Label::new("ZedTerm — Settings")
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(self.title_bar_action_button(
-                                "discard-settings",
-                                "Discard".to_string(),
-                                has_unsaved_changes && !saving,
-                                false,
-                                false,
-                                |this, _, _, cx| this.discard_drafts(cx),
-                                cx,
-                            ))
-                            .child(self.title_bar_action_button(
-                                "save-settings",
-                                save_label,
-                                has_unsaved_changes && !saving,
-                                has_unsaved_changes,
-                                self.save_status == SaveStatus::Succeeded && !has_unsaved_changes,
-                                |this, _, _, cx| this.save_drafts(cx),
-                                cx,
-                            )),
-                    ),
+                    .h_full()
+                    .child(tab_bar),
             )
-            .child(right_controls)
+            .into_any_element()
+    }
+
+    fn render_settings_tab(&self, tab: SettingsTab, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let selected = self.active_tab == tab;
+        let colors = cx.theme().colors();
+        let text_color = if selected {
+            colors.text
+        } else {
+            colors.text_muted
+        };
+        div()
+            .id(format!("settings-tab-{}", tab.label()))
+            .h_full()
+            .flex()
+            .items_center()
+            .px_4()
+            .cursor_pointer()
+            .text_color(text_color)
+            .when(selected, |this| {
+                this.border_t_2().border_color(colors.border)
+            })
+            .when(!selected, |this| {
+                this.hover(|style| style.bg(colors.ghost_element_hover))
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.switch_tab(tab, cx);
+            }))
+            .child(Label::new(tab.label()).size(LabelSize::Small))
+            .into_any_element()
+    }
+
+    fn switch_tab(&mut self, tab: SettingsTab, cx: &mut Context<Self>) {
+        if self.active_tab == tab {
+            return;
+        }
+        self.clear_active_edit();
+        self.active_tab = tab;
+        cx.notify();
+    }
+
+    fn render_keymap_tab(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        v_flex()
+            .id("settings-keymap-content")
+            .w_full()
+            .child(self.section_header("Keymap", cx))
+            .child(
+                self.row(
+                    "Keybindings",
+                    "Keybindings are currently managed via the app configuration. \
+                 Editing of keymap.json is not yet available in this tab.",
+                    Label::new("Coming soon")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .into_any_element(),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn render_themes_tab(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        v_flex()
+            .id("settings-themes-content")
+            .w_full()
+            .child(self.section_header("Theme Download", cx))
+            .child(
+                self.row(
+                    "Theme extensions",
+                    "Theme extension download, installation, update, and uninstall \
+                 will be available here. Currently, locally installed themes \
+                 can be selected in the Terminal tab's Appearance section.",
+                    Label::new("Coming soon")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .into_any_element(),
+                ),
+            )
             .into_any_element()
     }
 }
@@ -4985,6 +5095,7 @@ mod tests {
         SettingsPage {
             focus_handle: cx.focus_handle(),
             titlebar_mouse_down: std::cell::Cell::new(false),
+            active_tab: SettingsTab::Terminal,
             editing_field: None,
             editing_selection: 0..0,
             editing_anchor: 0,

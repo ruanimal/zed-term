@@ -41,13 +41,20 @@
 
 ## 设置页多 Tab 化
 
-目标：设置窗口改为多 tab，现有设置内容不变（整体成为其中一个 tab），另增快捷键设置 tab（keymap）与主题下载 tab（复用 Zed 插件的主题下载）。
+**已完成（2026-09-11）**：设置窗口已改为多 tab 结构，现有终端设置内容原样成为「Terminal」tab，另增「Keymap」与「Themes」tab 占位。Tab 切换不清除 draft / 保存 / revision / 校验状态。
 
-- Tab「终端设置」：现有 `SettingsPage` 内容原样迁移，仅外层加 tab 容器；draft / 保存 / revision / 校验语义不变；「设置页扩展」下的待实现（搜索/过滤）与低优先级项归属此 tab。
-- Tab「快捷键」：现状按键全在 `app.rs` 硬编码 `bind_keys`，无 `keymap.json` 加载与编辑入口；需补 `paths::keymap_file()` 读写、按键列表/搜索/改键、冲突提示、重置默认。
-- Tab「主题下载」：现状仅内嵌主题 + 本地 `themes_dir()`；需复用 Zed 扩展 registry 的主题扩展下载 / 安装 / 更新 / 卸载链路，注意 extension 系统依赖重，需先评估裁剪再接入；本地已安装主题仍走现有 `ThemeRegistry` + 设置页主题下拉。
+- 新增 `SettingsTab` 枚举（`Terminal`、`Keymap`、`Themes`）与 `active_tab` 字段，`render` 在标题栏与内容区之间渲染 `TabBar`，根据 `active_tab` 切换内容区。
+- Tab「终端设置」：现有 `SettingsPage` render 逻辑不变，仅外层包 tab 容器；draft / 保存 / revision / 校验语义全部保持。
+- Tab「快捷键」：占位内容，展示"Coming soon"说明 keymap.json 编辑待实现。
+- Tab「主题下载」：占位内容，展示"Coming soon"说明主题扩展下载链路待接入。
+- `switch_tab` 方法切换前调用 `clear_active_edit`，确保内联编辑不会跨 tab 泄漏。
 
-建议验收：三 tab 切换不丢各 tab 未保存状态；快捷键改键后新窗口生效、重置可恢复；主题下载安装后出现在主题下拉并可即时切换，卸载后回落默认主题。
+待实现（后续阶段）：
+
+- Tab「快捷键」：补 `paths::keymap_file()` 读写、按键列表/搜索/改键、冲突提示、重置默认。
+- Tab「主题下载」：复用 Zed 扩展 registry 的主题扩展下载 / 安装 / 更新 / 卸载链路，需先评估 extension 系统裁剪。
+
+验证：`cargo check -p terminal_app`、`cargo test -p terminal_app --lib` 64 passed / 0 failed、`cargo clippy -p terminal_app --all-targets -- --deny warnings` 与 `cargo fmt --all -- --check` 通过。
 
 ## Pane 方向性跳转
 
