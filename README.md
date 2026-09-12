@@ -12,8 +12,8 @@ ZedTerm 是从 Zed workspace 中提取出的独立终端应用。它复用 GPUI�
 docs/                                # 本目录：计划、缺口和开发说明
 ├── README.md
 ├── TODO.md                            # 当前后续需求入口
-├── PLAN.md                            # 架构决策和历史实施计划
-└── GAPS.md                            # 已归档的缺口与验收记录
+├── PLAN.md                            # 架构决策和历史实施计划 （历史文档，非必要不读取）
+└── GAPS.md                            # 已归档的缺口与验收记录  （历史文档，非必要不读取）
 
 crates/terminal_app/
 ├── src/main.rs                        # terminal-app 进程入口
