@@ -65,6 +65,18 @@
 - 冲突提示：移植 Zed 的 `ConflictState`，同按键同上下文按来源判定覆盖关系；提交前检测冲突并阻止写入，行内用警告图标标注。
 - 重置默认：把 `keymap.json` 写回 `keymaps/initial.json` 模板内容并重载。
 
+已移除 `base_keymap`（2026-09-12）：该设置在本 fork 中无法生效——它加载的是**叠加层**（`keymaps/{linux,macos}/*.json`，注释自述"只包含与 Zed 默认键位不同的部分"），需叠在 Zed 完整的 IDE 默认键位上；ZedTerm 没有那份基底，也没有 `Editor`/`Workspace`/`Pane` 等上下文。实测加载 `vscode.json` 只能解析出 2/15 条绑定，且全部因 action 不存在或上下文不匹配而无效。
+
+- 删除 `crates/settings/src/base_keymap_setting.rs`（含 `from_settings` 里的 `s.base_keymap.unwrap()`）。
+- 删除 `SettingsContent::base_keymap` 字段与 `BaseKeymapContent` 枚举。
+- 删除 `assets/settings/default.json` 的 `"base_keymap": "Zed"` —— 此前正是靠这一行才没让上面那个 `unwrap()` 在启动时 panic（`SettingsStore::new` → `load_settings_types()` → `from_settings`）。
+- 删除 `crates/settings/src/vscode_import.rs`（1179 行）及 `SettingsStore::import_vscode_settings` / `get_vscode_edits`；调用方仅剩测试。
+- 删除 `assets/keymaps/{linux,macos}/` 共 13 个死资产，以及 `DEFAULT_KEYMAP_PATH` / `VIM_KEYMAP_PATH` / `SPECIFIC_OVERRIDES_KEYMAP_PATH` / `default_keymap` / `vim_keymap` 等无调用方的访问器（运行时实际只用 `keymaps/initial.json`）。
+- 删除仅服务该导入链路的 `paths::{vscode,cursor}_settings_file_paths` 等 3 个函数。
+- 测试夹具改用 `reduce_motion` 作为"非 terminal 设置应原样保留"的样本；保留 `test_edits_for_update_*`（JSONC 合并逻辑另有独立覆盖）。
+
+验证：`cargo test -p terminal_app -p settings -p settings_content -p paths --lib` 78 + 30 + 38 passed / 0 failed；`cargo build -p terminal_app` 并实机启动无 panic；clippy / fmt 通过（`window_chrome.rs` 两条既有 lint 与本改动无关）。
+
 未移植（依赖已删除的 IDE crate，无法复用）：Zed keymap_editor 的表格视图、命令面板 action 补全、JSON 语法高亮、action 参数编辑器、键位搜索模式（`KeystrokeInput` 的 search 变体保留但未接线）。
 
 修复（2026-09-12，真机反馈）：改键后 status 卡在「Saving keybinding…」——成功/失败分支都没有复用 `clear_write_status`，`write_in_progress` 也未复位，导致后续保存被静默拒绝；搜索框混入按键——录制走的是页面 IME 处理器，会追加到当时活跃的内联字段（`KeymapSearch`），改为打开编辑器前先 `clear_active_edit`；改键结果变成 `super-v ctrl-shift-v` 组合键——旧按键被当作输入值而非 placeholder，重录时追加到旧组合上；另外补上 `keystroke_input` 上下文的 `enter` / `escape escape escape` / `delete` 绑定，否则录制可以开始但无法结束。

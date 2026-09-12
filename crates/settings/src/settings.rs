@@ -1,4 +1,3 @@
-mod base_keymap_setting;
 mod content_into_gpui;
 mod editable_setting_control;
 mod editorconfig_store;
@@ -6,7 +5,6 @@ mod granted_write_path;
 mod keymap_file;
 mod settings_file;
 mod settings_store;
-mod vscode_import;
 
 pub use settings_macros::RegisterSetting;
 
@@ -32,7 +30,6 @@ use std::{borrow::Cow, fmt, str};
 use util::asset_str;
 
 pub use ::settings_content::*;
-pub use base_keymap_setting::*;
 pub use content_into_gpui::IntoGpui;
 pub use editable_setting_control::*;
 pub use editorconfig_store::{
@@ -50,8 +47,6 @@ pub use settings_store::{
     LocalSettingsKind, LocalSettingsPath, MigrationStatus, Settings, SettingsFile,
     SettingsJsonSchemaParams, SettingsKey, SettingsLocation, SettingsParseResult, SettingsStore,
 };
-
-pub use vscode_import::{VsCodeSettings, VsCodeSettingsSource};
 
 pub use keymap_file::ActionSequence;
 
@@ -137,36 +132,6 @@ pub fn default_settings() -> Cow<'static, str> {
 pub fn default_semantic_token_rules() -> Cow<'static, str> {
     asset_str::<SettingsAssets>("settings/default_semantic_token_rules.json")
 }
-
-#[cfg(target_os = "macos")]
-pub const DEFAULT_KEYMAP_PATH: &str = "keymaps/default-macos.json";
-
-#[cfg(target_os = "windows")]
-pub const DEFAULT_KEYMAP_PATH: &str = "keymaps/default-windows.json";
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub const DEFAULT_KEYMAP_PATH: &str = "keymaps/default-linux.json";
-
-pub fn default_keymap() -> Cow<'static, str> {
-    asset_str::<SettingsAssets>(DEFAULT_KEYMAP_PATH)
-}
-
-pub const VIM_KEYMAP_PATH: &str = "keymaps/vim.json";
-
-pub fn vim_keymap() -> Cow<'static, str> {
-    asset_str::<SettingsAssets>(VIM_KEYMAP_PATH)
-}
-
-/// Specific keybinding overrides. Loaded after the base keymap so they win over
-/// conflicting base-keymap (and default `Editor`) bindings for the same chords,
-/// while still allowing user keymaps (loaded last) to override them. Shared
-/// across features - prefer adding a context block here over creating another
-/// override keymap file.
-#[cfg(target_os = "macos")]
-pub const SPECIFIC_OVERRIDES_KEYMAP_PATH: &str = "keymaps/specific-overrides-macos.json";
-
-#[cfg(not(target_os = "macos"))]
-pub const SPECIFIC_OVERRIDES_KEYMAP_PATH: &str = "keymaps/specific-overrides.json";
 
 pub fn initial_user_settings_content() -> Cow<'static, str> {
     asset_str::<SettingsAssets>("settings/initial_user_settings.json")

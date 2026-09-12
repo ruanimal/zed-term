@@ -3347,7 +3347,7 @@ pub(crate) mod tests {
   // retained theme comment
   "theme": "One Dark",
   "auto_update": false,
-  "base_keymap": "VSCode"
+  "reduce_motion": "on"
 }
 "#;
 
@@ -3800,7 +3800,7 @@ pub(crate) mod tests {
             "// retained theme comment",
             "\"theme\": \"One Dark\"",
             "\"auto_update\": false",
-            "\"base_keymap\": \"VSCode\"",
+            "\"reduce_motion\": \"on\"",
         ] {
             assert!(updated_text.contains(retained_fragment));
         }
@@ -3904,7 +3904,7 @@ pub(crate) mod tests {
                     let blank_lines = "\n".repeat(blank_line_count);
                     let trailing_comma = if trailing_comma { "," } else { "" };
                     let retained_content = format!(
-                        "{indentation}{theme_comment}\n{indentation}\"theme\": \"{theme_name}\", {theme_inline_comment}\n{blank_lines}{indentation}{auto_update_comment}\n{indentation}\"auto_update\": false, {auto_update_inline_comment}\n{indentation}\"base_keymap\": \"VSCode\"{trailing_comma}\n"
+                        "{indentation}{theme_comment}\n{indentation}\"theme\": \"{theme_name}\", {theme_inline_comment}\n{blank_lines}{indentation}{auto_update_comment}\n{indentation}\"auto_update\": false, {auto_update_inline_comment}\n{indentation}\"reduce_motion\": \"on\"{trailing_comma}\n"
                     );
                     let original = format!("{{\n{terminal_section}{retained_content}}}\n");
                     let expected = format!("{{\n{retained_content}}}\n");
@@ -3919,7 +3919,7 @@ pub(crate) mod tests {
                             blank_lines,
                             auto_update_comment,
                             auto_update_inline_comment,
-                            format!("{indentation}\"base_keymap\": \"VSCode\""),
+                            format!("{indentation}\"reduce_motion\": \"on\""),
                         ],
                     }
                 },
@@ -5331,13 +5331,13 @@ pub(crate) mod tests {
         );
         assert_eq!(
             parsed_object
-                .get("base_keymap")
+                .get("reduce_motion")
                 .and_then(serde_json::Value::as_str),
-            Some("VSCode")
+            Some("on")
         );
 
         let retained_key_positions =
-            ["\"theme\"", "\"auto_update\"", "\"base_keymap\""].map(|key| reset_text.find(key));
+            ["\"theme\"", "\"auto_update\"", "\"reduce_motion\""].map(|key| reset_text.find(key));
         assert!(
             retained_key_positions
                 .windows(2)
