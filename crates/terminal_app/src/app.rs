@@ -21,6 +21,7 @@ use terminal_core::{
 };
 use util::ResultExt;
 
+pub mod keymap;
 pub mod persistence;
 pub mod settings_ui;
 pub mod terminal;
@@ -266,7 +267,23 @@ pub fn run(cx: &mut App, initial_directory: Option<std::path::PathBuf>) {
     load_fonts(cx);
     persist_window_geometry_on_quit(cx);
 
-    cx.bind_keys([
+    bind_default_keys(cx);
+    load_user_keymap(cx);
+    watch_keymap_file(cx);
+
+    #[cfg(target_os = "macos")]
+    {
+        // Dock menu actions have no active window to receive them after all windows close.
+        cx.on_action(|_: &NewWindow, cx| open_new_window(cx));
+        cx.set_dock_menu(vec![MenuItem::action("New Window", NewWindow)]);
+    }
+
+    open_first_window(cx, initial_directory);
+}
+
+/// Registers the built-in key bindings.
+pub fn bind_default_keys(cx: &mut App) {
+    let mut bindings = vec![
         // Window / tab management.
         KeyBinding::new("cmd-t", NewTab, Some("TerminalWindow")),
         KeyBinding::new("cmd-w", CloseTab, Some("TerminalWindow")),
@@ -364,16 +381,79 @@ pub fn run(cx: &mut App, initial_directory: Option<std::path::PathBuf>) {
         KeyBinding::new("cmd-alt-left", ActivatePreviousPane, Some("TerminalWindow")),
         KeyBinding::new("cmd-alt-right", ActivateNextPane, Some("TerminalWindow")),
         KeyBinding::new("shift-escape", ToggleZoom, Some("TerminalWindow")),
+    ];
+    // The keystroke recorder in the settings page's keymap tab looks these up in
+    // its own context, mirroring Zed's `keystroke_input` bindings. Without them
+    // recording could be started but never stopped.
+    bindings.extend([
+        KeyBinding::new("enter", keymap::StartRecording, Some("KeystrokeInput")),
+        KeyBinding::new(
+            "escape escape escape",
+            keymap::StopRecording,
+            Some("KeystrokeInput"),
+        ),
+        KeyBinding::new("delete", keymap::ClearKeystrokes, Some("KeystrokeInput")),
     ]);
+    // Tagging the built-ins lets the settings page's keymap tab tell them apart
+    // from `keymap.json` overrides.
+    for binding in &mut bindings {
+        binding.set_meta(settings::KeybindSource::Default.meta());
+    }
+    cx.bind_keys(bindings);
+}
 
-    #[cfg(target_os = "macos")]
-    {
-        // Dock menu actions have no active window to receive them after all windows close.
-        cx.on_action(|_: &NewWindow, cx| open_new_window(cx));
-        cx.set_dock_menu(vec![MenuItem::action("New Window", NewWindow)]);
+/// Reloads the whole keymap: built-in bindings first, then the user's
+/// `keymap.json` overrides on top. `App::bind_keys` only appends, so the
+/// keymap has to be cleared before every rebuild.
+pub fn reload_keymaps(user_keymap_contents: &str, cx: &mut App) {
+    let (user_bindings, error) = keymap::parse_user_bindings(user_keymap_contents, cx);
+    if let Some(error) = error {
+        log::error!("Failed to load keymap.json: {error}");
     }
 
-    open_first_window(cx, initial_directory);
+    cx.clear_key_bindings();
+    bind_default_keys(cx);
+
+    let mut user_bindings = user_bindings;
+    for binding in &mut user_bindings {
+        binding.set_meta(settings::KeybindSource::User.meta());
+    }
+    cx.bind_keys(user_bindings);
+}
+
+/// Loads `keymap.json` from disk, falling back to the initial template when the
+/// file does not exist yet.
+pub fn load_user_keymap(cx: &mut App) {
+    let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
+    cx.spawn(async move |cx| {
+        let contents = match keymap::load_user_keymap(&fs).await {
+            Ok(contents) => contents,
+            Err(error) => {
+                log::error!("Failed to read keymap.json: {error:#}");
+                return;
+            }
+        };
+        cx.update(|cx| reload_keymaps(&contents, cx));
+    })
+    .detach();
+}
+
+/// Rewatches `keymap.json` so edits made outside ZedTerm take effect, and keeps
+/// the settings page's keymap tab in sync.
+fn watch_keymap_file(cx: &mut App) {
+    let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
+    let (mut receiver, _task) =
+        settings::watch_config_file(cx.background_executor(), fs, paths::keymap_file().clone());
+    cx.spawn(async move |cx| {
+        use futures::StreamExt as _;
+        while let Some(contents) = receiver.next().await {
+            cx.update(|cx| {
+                reload_keymaps(&contents, cx);
+                settings_ui::keymap_changed(cx);
+            });
+        }
+    })
+    .detach();
 }
 
 /// Opens the first window, restoring its geometry from the previous session

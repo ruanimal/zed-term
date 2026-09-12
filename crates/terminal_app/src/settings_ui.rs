@@ -107,6 +107,7 @@ struct WorkingDirectoryForm {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum EditableField {
+    KeymapSearch,
     ShellProgram,
     ShellTitleOverride,
     ShellArgument(usize),
@@ -194,6 +195,7 @@ pub struct SettingsPage {
     focus_handle: FocusHandle,
     titlebar_mouse_down: std::cell::Cell<bool>,
     active_tab: SettingsTab,
+    pub(crate) keymap_tab: crate::keymap::KeymapTab,
     editing_field: Option<EditableField>,
     editing_selection: Range<usize>,
     editing_anchor: usize,
@@ -499,6 +501,7 @@ impl SettingsPage {
             focus_handle: cx.focus_handle(),
             titlebar_mouse_down: std::cell::Cell::new(false),
             active_tab: SettingsTab::Terminal,
+            keymap_tab: crate::keymap::KeymapTab::empty(),
             editing_field: None,
             editing_selection: 0..0,
             editing_anchor: 0,
@@ -910,7 +913,40 @@ impl SettingsPage {
         cx.notify();
     }
 
-    fn clear_active_edit(&mut self) {
+    /// Opens the key binding editor for `index`, taking over text input from
+    /// the page: while recording keystrokes the IME handler must not keep
+    /// appending them to whichever inline field was last active.
+    pub(crate) fn begin_keymap_binding_edit(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_active_edit();
+        self.keymap_tab.begin_edit(index, window, cx);
+    }
+
+    /// Rebuilds the app keymap from `contents` and refreshes the Keymap tab.
+    pub(crate) fn apply_user_keymap(&mut self, contents: &str, cx: &mut Context<Self>) {
+        crate::reload_keymaps(contents, cx);
+        self.keymap_tab.reload_bindings(cx);
+        self.keymap_tab.clear_write_status("Keybinding saved.");
+        cx.notify();
+    }
+
+    /// Reports a failed keymap write without discarding the user's edit state.
+    pub(crate) fn fail_keymap_write(&mut self, error: String, cx: &mut Context<Self>) {
+        self.keymap_tab.set_failure(error);
+        cx.notify();
+    }
+
+    /// Refreshes the Keymap tab after the keymap changed outside this page.
+    pub(crate) fn refresh_keymap_tab(&mut self, cx: &mut Context<Self>) {
+        self.keymap_tab.reload_bindings(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn clear_active_edit(&mut self) {
         self.editing_field = None;
         self.editing_selection = 0..0;
         self.editing_anchor = 0;
@@ -937,6 +973,7 @@ impl SettingsPage {
 
     fn editing_text(&self) -> String {
         match self.editing_field.as_ref() {
+            Some(EditableField::KeymapSearch) => self.keymap_tab.search_query().to_string(),
             Some(EditableField::ShellProgram) => self.shell_form.program.clone(),
             Some(EditableField::ShellTitleOverride) => self.shell_form.title_override.clone(),
             Some(EditableField::ShellArgument(index)) => self
@@ -978,6 +1015,10 @@ impl SettingsPage {
         let range_start = range.start.min(current_text.encode_utf16().count());
         let (updated_text, cursor) = replace_utf16_range(&current_text, range, &text);
         let dirty_setting = match field {
+            EditableField::KeymapSearch => {
+                self.keymap_tab.set_search_query(updated_text, cx);
+                None
+            }
             EditableField::ShellProgram => {
                 self.shell_form.program = updated_text;
                 Some(DirtySetting::Shell)
@@ -1160,6 +1201,9 @@ impl SettingsPage {
 
     fn editable_fields(&self) -> Vec<EditableField> {
         let mut fields = Vec::new();
+        if self.active_tab == SettingsTab::Keymap && !self.keymap_tab.is_editing() {
+            fields.push(EditableField::KeymapSearch);
+        }
         if self.shell_form.mode != ShellMode::System {
             fields.push(EditableField::ShellProgram);
         }
@@ -1467,6 +1511,37 @@ impl SettingsPage {
                 }),
             )
             .child(self.text_input_content(&value, placeholder, is_active, cx))
+            .into_any_element()
+    }
+
+    /// A full-width text field for the Keymap tab's binding filter.
+    fn keymap_search_input(&self, value: String, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let is_active = self.editing_field.as_ref() == Some(&EditableField::KeymapSearch);
+        div()
+            .id("keymap-search")
+            .debug_selector(|| "keymap-search".to_string())
+            .flex_1()
+            .min_w_0()
+            .h_8()
+            .px_2()
+            .flex()
+            .items_center()
+            .rounded_md()
+            .cursor(CursorStyle::IBeam)
+            .border_1()
+            .border_color(if is_active {
+                cx.theme().colors().border_focused
+            } else {
+                cx.theme().colors().border
+            })
+            .bg(cx.theme().colors().editor_background)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    this.begin_edit(EditableField::KeymapSearch, window, cx);
+                }),
+            )
+            .child(self.text_input_content(&value, "Filter by action or keystroke…", is_active, cx))
             .into_any_element()
     }
 
@@ -2587,7 +2662,11 @@ impl Render for SettingsPage {
                         .overflow_y_scroll()
                         .child(match self.active_tab {
                             SettingsTab::Terminal => terminal_content.into_any_element(),
-                            SettingsTab::Keymap => self.render_keymap_tab(cx).into_any_element(),
+                            SettingsTab::Keymap => {
+                                let search_query = self.keymap_tab.search_query().to_string();
+                                let search_input = self.keymap_search_input(search_query, cx);
+                                self.keymap_tab.render(search_input, cx)
+                            }
                             SettingsTab::Themes => self.render_themes_tab(cx).into_any_element(),
                         }),
                 ),
@@ -2754,26 +2833,12 @@ impl SettingsPage {
         }
         self.clear_active_edit();
         self.active_tab = tab;
+        // The keymap tab starts empty and is populated on first open; without
+        // this it would render an empty list.
+        if tab == SettingsTab::Keymap {
+            self.keymap_tab.reload_bindings(cx);
+        }
         cx.notify();
-    }
-
-    fn render_keymap_tab(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        v_flex()
-            .id("settings-keymap-content")
-            .w_full()
-            .child(self.section_header("Keymap", cx))
-            .child(
-                self.row(
-                    "Keybindings",
-                    "Keybindings are currently managed via the app configuration. \
-                 Editing of keymap.json is not yet available in this tab.",
-                    Label::new("Coming soon")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted)
-                        .into_any_element(),
-                ),
-            )
-            .into_any_element()
     }
 
     fn render_themes_tab(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -3016,7 +3081,7 @@ fn adjust_bounded(value: f32, delta: f32, minimum: f32, maximum: f32) -> f32 {
 
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use gpui::ReadGlobal as _;
     use proptest::strategy::Strategy as _;
@@ -5101,6 +5166,19 @@ mod tests {
         }
     }
 
+    /// A minimal settings page for keymap-tab tests, with default form state.
+    pub(crate) fn test_settings_page_stub(cx: &mut Context<SettingsPage>) -> SettingsPage {
+        test_settings_page(
+            ShellForm {
+                mode: ShellMode::System,
+                program: String::new(),
+                arguments: Vec::new(),
+                title_override: String::new(),
+            },
+            cx,
+        )
+    }
+
     fn test_settings_page(shell_form: ShellForm, cx: &mut Context<SettingsPage>) -> SettingsPage {
         theme::SystemAppearance::init(cx);
         let mut draft_revisions = DraftRevisions::default();
@@ -5109,6 +5187,7 @@ mod tests {
             focus_handle: cx.focus_handle(),
             titlebar_mouse_down: std::cell::Cell::new(false),
             active_tab: SettingsTab::Terminal,
+            keymap_tab: crate::keymap::KeymapTab::empty(),
             editing_field: None,
             editing_selection: 0..0,
             editing_anchor: 0,
@@ -5312,6 +5391,86 @@ mod tests {
                 "settings tab {label} should start at the top of the title bar"
             );
         }
+    }
+
+    /// The Keymap tab must render real binding rows and its search/filter
+    /// controls, not the former "Coming soon" placeholder.
+    /// Regression: opening the binding editor must take text input away from
+    /// the page, otherwise recorded keys land in the search box.
+    #[gpui::test]
+    fn opening_the_editor_clears_the_page_inline_edit(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            settings::init(cx);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            crate::bind_default_keys(cx);
+        });
+
+        let (settings_page, cx) = cx.add_window_view(|_, cx| test_settings_page_stub(cx));
+        settings_page.update(cx, |page, cx| page.keymap_tab.reload_bindings(cx));
+        cx.run_until_parked();
+
+        settings_page.update_in(cx, |page, window, cx| {
+            // Simulate the user having the search box focused.
+            page.begin_edit(EditableField::KeymapSearch, window, cx);
+            assert!(page.editing_field.is_some());
+
+            page.begin_keymap_binding_edit(0, window, cx);
+            assert!(
+                page.editing_field.is_none(),
+                "recorded keystrokes must not be routed into the search box"
+            );
+            assert!(page.keymap_tab.is_editing());
+        });
+    }
+
+    #[gpui::test]
+    fn keymap_tab_renders_bindings_and_controls(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            crate::bind_default_keys(cx);
+        });
+        let (settings_page, cx) = cx.add_window_view(|_, cx| {
+            test_settings_page(
+                ShellForm {
+                    mode: ShellMode::System,
+                    program: String::new(),
+                    arguments: Vec::new(),
+                    title_override: String::new(),
+                },
+                cx,
+            )
+        });
+        cx.simulate_resize(size(px(900.), px(3_000.)));
+        cx.run_until_parked();
+
+        // Deliberately does not pre-load the bindings: opening the tab must
+        // populate them by itself.
+        settings_page.update(cx, |page, cx| {
+            page.switch_tab(SettingsTab::Keymap, cx);
+        });
+        cx.run_until_parked();
+
+        // The list is populated from the real keymap rather than being empty.
+        for selector in [
+            "keymap-search",
+            "keymap-user-filter",
+            "keymap-conflict-filter",
+            "keymap-reset-defaults",
+            "keymap-binding-0",
+        ] {
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "the keymap tab should render {selector}"
+            );
+        }
+
+        // The first row's edit control is what opens the rebind editor.
+        assert!(
+            cx.debug_bounds("keymap-edit-0").is_some(),
+            "the first binding row should offer an edit control"
+        );
     }
 
     #[gpui::test]
@@ -6434,5 +6593,18 @@ impl InputHandler for SettingsPageInput {
 
     fn prefers_ime_for_printable_keys(&mut self, _window: &mut Window, _cx: &mut App) -> bool {
         true
+    }
+}
+
+/// Notifies every open settings page that the keymap changed on disk.
+pub fn keymap_changed(cx: &mut App) {
+    let pages: Vec<_> = cx
+        .windows()
+        .into_iter()
+        .filter_map(|handle| handle.downcast::<SettingsPage>())
+        .collect();
+    for page in pages {
+        page.update(cx, |page, _window, cx| page.refresh_keymap_tab(cx))
+            .log_err();
     }
 }

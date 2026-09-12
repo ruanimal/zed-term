@@ -45,16 +45,31 @@
 
 - 新增 `SettingsTab` 枚举（`Terminal`、`Keymap`、`Themes`）与 `active_tab` 字段，`render` 在标题栏与内容区之间渲染 `TabBar`，根据 `active_tab` 切换内容区。
 - Tab「终端设置」：现有 `SettingsPage` render 逻辑不变，仅外层包 tab 容器；draft / 保存 / revision / 校验语义全部保持。
-- Tab「快捷键」：占位内容，展示"Coming soon"说明 keymap.json 编辑待实现。
+- Tab「快捷键」：初始为占位内容；2026-09-12 起已实现 keymap.json 编辑（见下）。
 - Tab「主题下载」：占位内容，展示"Coming soon"说明主题扩展下载链路待接入。
 - `switch_tab` 方法切换前调用 `clear_active_edit`，确保内联编辑不会跨 tab 泄漏。
 
 待实现（后续阶段）：
 
-- Tab「快捷键」：补 `paths::keymap_file()` 读写、按键列表/搜索/改键、冲突提示、重置默认。
 - Tab「主题下载」：复用 Zed 扩展 registry 的主题扩展下载 / 安装 / 更新 / 卸载链路，需先评估 extension 系统裁剪。
 
 验证：`cargo check -p terminal_app`、`cargo test -p terminal_app --lib` 64 passed / 0 failed、`cargo clippy -p terminal_app --all-targets -- --deny warnings` 与 `cargo fmt --all -- --check` 通过。
+
+已实现 Tab「快捷键」（2026-09-12）：
+
+- `keymap.json` 读写：启动时 `app::load_user_keymap` 读取并在内置绑定之后叠加，`watch_config_file` 监听外部改动；重建 keymap 走 `clear_key_bindings` + 内置绑定 + 用户绑定（`App::bind_keys` 只能追加，无法覆盖）。
+- 内置绑定补上 `KeybindSource::Default` 元数据，用户覆盖标 `User`，tab 内因此能区分来源。这是"来源"列与冲突判定的前提。
+- 按键列表：`keymap::process_bindings` 汇总全部生效绑定，未绑定的 action 也列出以便新增；按来源 + action 名排序。
+- 搜索/过滤：按 action 名、humanized 名、按键显示文本过滤，另有"仅用户覆盖""仅冲突"两个开关。
+- 改键/新增：点击行内铅笔打开编辑器，复用从已删除的 `crates/keymap_editor` 移植来的 `KeystrokeInput` 录制控件（仅依赖 gpui + ui）；写回复用 `KeymapFile::update_keybinding`，保留 JSONC 注释、按 tab size 缩进、必要时自动追加 `unbind` 抑制默认绑定。无绑定的 action 走 `Add`，有绑定的走 `Replace`。
+- 冲突提示：移植 Zed 的 `ConflictState`，同按键同上下文按来源判定覆盖关系；提交前检测冲突并阻止写入，行内用警告图标标注。
+- 重置默认：把 `keymap.json` 写回 `keymaps/initial.json` 模板内容并重载。
+
+未移植（依赖已删除的 IDE crate，无法复用）：Zed keymap_editor 的表格视图、命令面板 action 补全、JSON 语法高亮、action 参数编辑器、键位搜索模式（`KeystrokeInput` 的 search 变体保留但未接线）。
+
+修复（2026-09-12，真机反馈）：改键后 status 卡在「Saving keybinding…」——成功/失败分支都没有复用 `clear_write_status`，`write_in_progress` 也未复位，导致后续保存被静默拒绝；搜索框混入按键——录制走的是页面 IME 处理器，会追加到当时活跃的内联字段（`KeymapSearch`），改为打开编辑器前先 `clear_active_edit`；改键结果变成 `super-v ctrl-shift-v` 组合键——旧按键被当作输入值而非 placeholder，重录时追加到旧组合上；另外补上 `keystroke_input` 上下文的 `enter` / `escape escape escape` / `delete` 绑定，否则录制可以开始但无法结束。
+
+验证：`cargo test -p terminal_app --lib` 78 passed / 0 failed（新增 8 个 keymap 测试：humanize、上下文谓词等价、内置绑定自冲突、action 覆盖完整性、用户覆盖判定、搜索过滤、写回往返、无绑定走 Add 路径；另有 4 个回归测试覆盖上述 4 个缺陷）；`cargo check -p terminal_app --all-targets` 通过；`cargo clippy -p terminal_app --all-targets -- --deny warnings` 与 `cargo fmt --all -- --check` 通过（`window_chrome.rs` 两条既有 lint 与本次改动无关，已 stash 验证为改动前同样失败）。真机视觉与交互验收待做。
 
 ## Pane 方向性跳转
 
