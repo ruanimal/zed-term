@@ -343,12 +343,24 @@ fn humanize_action_name(action_name: &str) -> SharedString {
     humanized.into()
 }
 
-/// Snapshot of every binding in the app, split into displayable rows.
+fn is_displayable_action(action_name: &str) -> bool {
+    matches!(
+        action_name.split_once("::"),
+        Some(("terminal_app" | "terminal", _))
+    )
+}
+
+/// Snapshot of the terminal app's bindings, split into displayable rows.
 pub fn process_bindings(cx: &App) -> Vec<ProcessedBinding> {
     let key_bindings = cx.key_bindings();
     let lock = key_bindings.borrow();
     let key_bindings = lock.bindings().collect::<Vec<_>>();
-    let mut unmapped_action_names = HashSet::from_iter(cx.all_action_names().iter().copied());
+    let mut unmapped_action_names = HashSet::from_iter(
+        cx.all_action_names()
+            .iter()
+            .copied()
+            .filter(|action_name| is_displayable_action(action_name)),
+    );
     let action_documentation = cx.action_documentation();
 
     let mut processed_bindings = Vec::new();
@@ -371,6 +383,9 @@ pub fn process_bindings(cx: &App) -> Vec<ProcessedBinding> {
             .map(|predicate| predicate.to_string().into());
 
         let action_name = key_binding.action().name();
+        if !is_displayable_action(action_name) {
+            continue;
+        }
         unmapped_action_names.remove(&action_name);
 
         let keystroke_text: SharedString =
@@ -1474,9 +1489,9 @@ mod tests {
         });
     }
 
-    /// Every built-in action should be discoverable in the processed list.
+    /// Every terminal action should be discoverable in the processed list.
     #[gpui::test]
-    fn process_bindings_covers_all_registered_actions(cx: &mut TestAppContext) {
+    fn process_bindings_covers_displayable_actions(cx: &mut TestAppContext) {
         cx.update(|cx| {
             settings::init(cx);
             crate::bind_default_keys(cx);
@@ -1486,7 +1501,14 @@ mod tests {
                 .iter()
                 .map(|binding| binding.action().name)
                 .collect::<HashSet<_>>();
+            assert!(
+                names.iter().all(|name| is_displayable_action(name)),
+                "the keymap list should only contain terminal app actions"
+            );
             for action_name in cx.all_action_names() {
+                if !is_displayable_action(action_name) {
+                    continue;
+                }
                 assert!(
                     names.contains(action_name),
                     "action {action_name} should be present in the keymap list"
