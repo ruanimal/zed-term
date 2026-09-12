@@ -108,6 +108,7 @@ struct WorkingDirectoryForm {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum EditableField {
     KeymapSearch,
+    ThemesSearch,
     ShellProgram,
     ShellTitleOverride,
     ShellArgument(usize),
@@ -196,6 +197,7 @@ pub struct SettingsPage {
     titlebar_mouse_down: std::cell::Cell<bool>,
     active_tab: SettingsTab,
     pub(crate) keymap_tab: crate::keymap::KeymapTab,
+    pub(crate) themes_tab: crate::themes_tab::ThemesTab,
     editing_field: Option<EditableField>,
     editing_selection: Range<usize>,
     editing_anchor: usize,
@@ -502,6 +504,7 @@ impl SettingsPage {
             titlebar_mouse_down: std::cell::Cell::new(false),
             active_tab: SettingsTab::Terminal,
             keymap_tab: crate::keymap::KeymapTab::empty(),
+            themes_tab: crate::themes_tab::ThemesTab::empty(),
             editing_field: None,
             editing_selection: 0..0,
             editing_anchor: 0,
@@ -974,6 +977,7 @@ impl SettingsPage {
     fn editing_text(&self) -> String {
         match self.editing_field.as_ref() {
             Some(EditableField::KeymapSearch) => self.keymap_tab.search_query().to_string(),
+            Some(EditableField::ThemesSearch) => self.themes_tab.search_query().to_string(),
             Some(EditableField::ShellProgram) => self.shell_form.program.clone(),
             Some(EditableField::ShellTitleOverride) => self.shell_form.title_override.clone(),
             Some(EditableField::ShellArgument(index)) => self
@@ -1017,6 +1021,10 @@ impl SettingsPage {
         let dirty_setting = match field {
             EditableField::KeymapSearch => {
                 self.keymap_tab.set_search_query(updated_text, cx);
+                None
+            }
+            EditableField::ThemesSearch => {
+                self.themes_tab.set_search_query(updated_text, cx);
                 None
             }
             EditableField::ShellProgram => {
@@ -1203,6 +1211,9 @@ impl SettingsPage {
         let mut fields = Vec::new();
         if self.active_tab == SettingsTab::Keymap && !self.keymap_tab.is_editing() {
             fields.push(EditableField::KeymapSearch);
+        }
+        if self.active_tab == SettingsTab::Themes && !self.themes_tab.is_busy() {
+            fields.push(EditableField::ThemesSearch);
         }
         if self.shell_form.mode != ShellMode::System {
             fields.push(EditableField::ShellProgram);
@@ -1542,6 +1553,37 @@ impl SettingsPage {
                 }),
             )
             .child(self.text_input_content(&value, "Filter by action or keystroke…", is_active, cx))
+            .into_any_element()
+    }
+
+    /// A full-width text field for the Themes tab's extension filter.
+    fn themes_search_input(&self, value: String, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let is_active = self.editing_field.as_ref() == Some(&EditableField::ThemesSearch);
+        div()
+            .id("themes-search")
+            .debug_selector(|| "themes-search".to_string())
+            .flex_1()
+            .min_w_0()
+            .h_8()
+            .px_2()
+            .flex()
+            .items_center()
+            .rounded_md()
+            .cursor(CursorStyle::IBeam)
+            .border_1()
+            .border_color(if is_active {
+                cx.theme().colors().border_focused
+            } else {
+                cx.theme().colors().border
+            })
+            .bg(cx.theme().colors().editor_background)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    this.begin_edit(EditableField::ThemesSearch, window, cx);
+                }),
+            )
+            .child(self.text_input_content(&value, "Filter theme extensions…", is_active, cx))
             .into_any_element()
     }
 
@@ -2129,19 +2171,25 @@ impl Render for SettingsPage {
         let alternate_scroll = format!("{:?}", settings.alternate_scroll).to_lowercase();
         let bell = format!("{:?}", settings.bell).to_lowercase();
         let current_theme = self.theme_name.clone();
-        let theme_names = ThemeRegistry::global(cx).list_names();
-        let font_families = FontFamilyCache::global(cx)
-            .try_list_font_families()
-            .unwrap_or_default();
         let page = cx.weak_entity();
 
         let title_bar = self.render_title_bar(window, cx);
-        let terminal_content = v_flex()
+        // `render` runs on every keystroke, so the Terminal tab's large tree is
+        // built lazily and only while that tab is visible.
+        let terminal_content = |cx: &mut Context<Self>| {
+            // Enumerating themes and font families is comparatively expensive, so
+            // it happens only when this tab is actually built. `render` runs on
+            // every keystroke.
+            let theme_names = ThemeRegistry::global(cx).list_names();
+            let font_families = FontFamilyCache::global(cx)
+                .try_list_font_families()
+                .unwrap_or_default();
+            v_flex()
             .id("settings-content")
             .w_full()
             .child(self.status_row())
             .child(self.section_header("Appearance", cx))
-            .child(self.theme_row(window, cx, current_theme, theme_names))
+            .child(self.theme_row(window, cx, current_theme.clone(), theme_names))
             .child(self.font_family_row(window, cx, font_families))
             .child(self.number_row(
                 cx,
@@ -2576,7 +2624,9 @@ impl Render for SettingsPage {
                     |this, _, _, cx| this.reset_terminal_defaults(cx),
                     cx,
                 ),
-            ));
+            ))
+            .into_any_element()
+        };
 
         window_chrome::client_side_decorations(
             v_flex()
@@ -2661,13 +2711,17 @@ impl Render for SettingsPage {
                         .min_h_0()
                         .overflow_y_scroll()
                         .child(match self.active_tab {
-                            SettingsTab::Terminal => terminal_content.into_any_element(),
+                            SettingsTab::Terminal => terminal_content(cx),
                             SettingsTab::Keymap => {
                                 let search_query = self.keymap_tab.search_query().to_string();
                                 let search_input = self.keymap_search_input(search_query, cx);
                                 self.keymap_tab.render(search_input, cx)
                             }
-                            SettingsTab::Themes => self.render_themes_tab(cx).into_any_element(),
+                            SettingsTab::Themes => {
+                                let search_query = self.themes_tab.search_query().to_string();
+                                let search_input = self.themes_search_input(search_query, cx);
+                                self.themes_tab.render(search_input, cx)
+                            }
                         }),
                 ),
             window,
@@ -2833,32 +2887,24 @@ impl SettingsPage {
         }
         self.clear_active_edit();
         self.active_tab = tab;
-        // The keymap tab starts empty and is populated on first open; without
-        // this it would render an empty list.
-        if tab == SettingsTab::Keymap {
-            self.keymap_tab.reload_bindings(cx);
+        match tab {
+            // The keymap tab starts empty and is populated on first open;
+            // without this it would render an empty list.
+            SettingsTab::Keymap => self.keymap_tab.reload_bindings(cx),
+            // The catalog is fetched on first open so the settings window still
+            // opens instantly and offline; later opens reuse the loaded list.
+            SettingsTab::Themes if !self.themes_tab.has_loaded() => {
+                let page = cx.weak_entity();
+                let http_client = cx.http_client();
+                self.themes_tab.begin_load(http_client, page, cx);
+            }
+            // Installed extensions may have changed while the tab was closed
+            // (another app sharing the data directory, a manual install), so
+            // the disk state is re-read even when the catalog is cached.
+            SettingsTab::Themes => self.themes_tab.refresh_installed(),
+            SettingsTab::Terminal => {}
         }
         cx.notify();
-    }
-
-    fn render_themes_tab(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        v_flex()
-            .id("settings-themes-content")
-            .w_full()
-            .child(self.section_header("Theme Download", cx))
-            .child(
-                self.row(
-                    "Theme extensions",
-                    "Theme extension download, installation, update, and uninstall \
-                 will be available here. Currently, locally installed themes \
-                 can be selected in the Terminal tab's Appearance section.",
-                    Label::new("Coming soon")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted)
-                        .into_any_element(),
-                ),
-            )
-            .into_any_element()
     }
 }
 
@@ -5188,6 +5234,7 @@ pub(crate) mod tests {
             titlebar_mouse_down: std::cell::Cell::new(false),
             active_tab: SettingsTab::Terminal,
             keymap_tab: crate::keymap::KeymapTab::empty(),
+            themes_tab: crate::themes_tab::ThemesTab::for_test(),
             editing_field: None,
             editing_selection: 0..0,
             editing_anchor: 0,
@@ -5471,6 +5518,361 @@ pub(crate) mod tests {
             cx.debug_bounds("keymap-edit-0").is_some(),
             "the first binding row should offer an edit control"
         );
+    }
+
+    /// Builds a fake HTTP client that answers the extension catalog request.
+    fn fake_extension_api(entries: &[(&str, &str, &str)]) -> Arc<dyn http_client::HttpClient> {
+        let data: Vec<String> = entries
+            .iter()
+            .enumerate()
+            .map(|(index, (id, name, version))| {
+                // Distinct counts let a test assert the badge reflects the
+                // catalog value rather than a constant.
+                let download_count = 1_250 * (index as u64 + 1);
+                format!(
+                    r#"{{"id":"{id}","name":"{name}","version":"{version}","description":"A test theme","schema_version":1,"provides":["themes"],"download_count":{download_count}}}"#
+                )
+            })
+            .collect();
+        let body = format!(r#"{{"data":[{}]}}"#, data.join(","));
+
+        http_client::FakeHttpClient::create(move |_| {
+            let body = body.clone();
+            async move {
+                Ok(http_client::Response::builder()
+                    .status(200)
+                    .body(http_client::AsyncBody::from(body))
+                    .expect("the fake response should be buildable"))
+            }
+        })
+    }
+
+    /// An extension already on disk must offer Update and Uninstall rather than
+    /// Install.
+    #[gpui::test]
+    fn themes_tab_offers_update_and_uninstall_for_an_installed_extension(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The installed set is built from a real (temporary) extension
+        // directory, then injected, because the tab normally reads the
+        // developer's data directory, which a test must not touch.
+        let extensions_dir =
+            tempfile::tempdir().expect("a temporary directory should be creatable");
+        let extension_dir = extensions_dir.path().join("catppuccin");
+        std::fs::create_dir_all(&extension_dir).unwrap();
+        std::fs::write(
+            extension_dir.join("extension.toml"),
+            "id = \"catppuccin\"\nname = \"Catppuccin\"\nversion = \"1.0.0\"\n\
+             description = \"Installed copy\"\nthemes = []\n",
+        )
+        .unwrap();
+        let installed = crate::extension_store::load_installed_extensions_in(extensions_dir.path());
+        assert_eq!(installed.len(), 1, "the fixture should read as installed");
+
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            cx.set_http_client(fake_extension_api(&[("catppuccin", "Catppuccin", "2.0.0")]));
+        });
+        let (settings_page, cx) = cx.add_window_view(|_, cx| {
+            test_settings_page(
+                ShellForm {
+                    mode: ShellMode::System,
+                    program: String::new(),
+                    arguments: Vec::new(),
+                    title_override: String::new(),
+                },
+                cx,
+            )
+        });
+        cx.simulate_resize(size(px(900.), px(3_000.)));
+        cx.run_until_parked();
+
+        // Open the tab first so its own load completes, then inject the
+        // installed set: the tab re-reads the real data directory on open, and
+        // the injected fixture must survive that.
+        settings_page.update(cx, |page, cx| {
+            page.switch_tab(SettingsTab::Themes, cx);
+        });
+        cx.run_until_parked();
+        settings_page.update(cx, |page, cx| {
+            page.themes_tab.set_installed_for_test(installed);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("themes-update-catppuccin").is_some(),
+            "a newer catalog version should offer Update"
+        );
+        assert!(
+            cx.debug_bounds("themes-uninstall-catppuccin").is_some(),
+            "an installed extension should offer Uninstall"
+        );
+        assert!(
+            cx.debug_bounds("themes-install-catppuccin").is_none(),
+            "an installed extension must not offer Install"
+        );
+    }
+
+    /// A large catalog must not build a row element for every entry: the tab
+    /// renders on every keystroke, so only visible rows may be constructed.
+    #[gpui::test]
+    fn themes_tab_virtualizes_a_large_catalog(cx: &mut gpui::TestAppContext) {
+        let entries: Vec<(String, String, String)> = (0..400)
+            .map(|index| {
+                (
+                    format!("theme-{index:03}"),
+                    format!("Theme {index:03}"),
+                    "1.0.0".to_string(),
+                )
+            })
+            .collect();
+        let borrowed: Vec<(&str, &str, &str)> = entries
+            .iter()
+            .map(|(id, name, version)| (id.as_str(), name.as_str(), version.as_str()))
+            .collect();
+
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            cx.set_http_client(fake_extension_api(&borrowed));
+        });
+        let (settings_page, cx) = cx.add_window_view(|_, cx| {
+            test_settings_page(
+                ShellForm {
+                    mode: ShellMode::System,
+                    program: String::new(),
+                    arguments: Vec::new(),
+                    title_override: String::new(),
+                },
+                cx,
+            )
+        });
+        // A short window so only a handful of rows can be visible.
+        cx.simulate_resize(size(px(900.), px(700.)));
+        cx.run_until_parked();
+
+        settings_page.update(cx, |page, cx| {
+            page.switch_tab(SettingsTab::Themes, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            settings_page.update(cx, |page, _| page.themes_tab.matches().len()),
+            400,
+            "the whole catalog should still be listed"
+        );
+
+        // Rows far past the viewport must not have been built.
+        assert!(
+            cx.debug_bounds("themes-row-150").is_none(),
+            "virtualization should not build off-screen rows"
+        );
+        assert!(
+            cx.debug_bounds("themes-row-0").is_some(),
+            "the first visible row should still render"
+        );
+    }
+
+    /// The installed filter must actually hide uninstalled extensions, so it can
+    /// be used to find something to update or remove.
+    #[gpui::test]
+    fn themes_tab_installed_filter_hides_uninstalled_extensions(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            cx.set_http_client(fake_extension_api(&[
+                ("catppuccin", "Catppuccin", "1.0.0"),
+                ("gruvbox", "Gruvbox", "1.0.0"),
+            ]));
+        });
+        let (settings_page, cx) = cx.add_window_view(|_, cx| {
+            test_settings_page(
+                ShellForm {
+                    mode: ShellMode::System,
+                    program: String::new(),
+                    arguments: Vec::new(),
+                    title_override: String::new(),
+                },
+                cx,
+            )
+        });
+        cx.simulate_resize(size(px(900.), px(3_000.)));
+        cx.run_until_parked();
+
+        settings_page.update(cx, |page, cx| {
+            page.switch_tab(SettingsTab::Themes, cx);
+        });
+        cx.run_until_parked();
+
+        // Both catalog entries are listed, so both rows are rendered.
+        assert!(cx.debug_bounds("themes-row-0").is_some());
+        assert!(cx.debug_bounds("themes-row-1").is_some());
+
+        // Installing only catppuccin must leave exactly one row once the filter
+        // is on, whichever row it lands in.
+        settings_page.update(cx, |page, cx| {
+            page.themes_tab.set_installed_for_test(vec![
+                crate::extension_store::InstalledExtension {
+                    id: "catppuccin".to_string(),
+                    name: "Catppuccin".to_string(),
+                    version: "1.0.0".to_string(),
+                    description: String::new(),
+                    repository: String::new(),
+                    theme_families: Vec::new(),
+                },
+            ]);
+            page.themes_tab.toggle_installed_filter(cx);
+        });
+        cx.run_until_parked();
+
+        // Exactly one of the two rows survives, and it is catppuccin's.
+        let first_visible = cx.debug_bounds("themes-row-0").is_some();
+        let second_visible = cx.debug_bounds("themes-row-1").is_some();
+        assert_eq!(
+            u8::from(first_visible) + u8::from(second_visible),
+            1,
+            "only the installed extension should remain visible"
+        );
+        assert!(
+            cx.debug_bounds("themes-row-0").is_some(),
+            "catppuccin is the first catalog entry and is the installed one"
+        );
+        assert!(
+            settings_page.update(cx, |page, _| page.themes_tab.only_installed()),
+            "the filter should be marked as active"
+        );
+    }
+
+    /// The Themes tab must render the catalog with real controls, not the
+    /// former "Coming soon" placeholder.
+    #[gpui::test]
+    fn themes_tab_renders_the_catalog_and_controls(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            cx.set_http_client(fake_extension_api(&[("catppuccin", "Catppuccin", "1.0.0")]));
+        });
+        let (settings_page, cx) = cx.add_window_view(|_, cx| {
+            test_settings_page(
+                ShellForm {
+                    mode: ShellMode::System,
+                    program: String::new(),
+                    arguments: Vec::new(),
+                    title_override: String::new(),
+                },
+                cx,
+            )
+        });
+        cx.simulate_resize(size(px(900.), px(3_000.)));
+        cx.run_until_parked();
+
+        // Deliberately does not pre-load the catalog: opening the tab must
+        // fetch it by itself.
+        settings_page.update(cx, |page, cx| {
+            page.switch_tab(SettingsTab::Themes, cx);
+        });
+        cx.run_until_parked();
+
+        for selector in [
+            "themes-search",
+            "themes-reload",
+            "themes-installed-filter",
+            "themes-installed-count",
+        ] {
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "the themes tab should render {selector}"
+            );
+        }
+        assert!(
+            cx.debug_bounds("themes-row-0").is_some(),
+            "the catalog should produce at least one row"
+        );
+        assert!(
+            cx.debug_bounds("themes-install-catppuccin").is_some(),
+            "an uninstalled extension should offer an install control"
+        );
+        assert!(
+            cx.debug_bounds("themes-uninstall-catppuccin").is_none(),
+            "an uninstalled extension must not offer uninstall"
+        );
+        assert!(
+            cx.debug_bounds("themes-downloads-catppuccin").is_some(),
+            "a catalog row should show its download count"
+        );
+
+        let (text, is_success) = settings_page
+            .update(cx, |page, _| {
+                page.themes_tab
+                    .status_text()
+                    .map(|(text, success)| (text.to_string(), success))
+            })
+            .expect("a status should be shown after loading");
+        assert!(text.contains('1'), "got: {text}");
+        assert!(is_success);
+    }
+
+    /// A failing catalog request must surface an error instead of rendering an
+    /// empty, unexplained list.
+    #[gpui::test]
+    fn themes_tab_reports_a_failed_catalog_fetch(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            cx.set_http_client(http_client::FakeHttpClient::create(|_| async move {
+                Ok(http_client::Response::builder()
+                    .status(503)
+                    .body(http_client::AsyncBody::from("service unavailable"))
+                    .expect("the fake response should be buildable"))
+            }));
+        });
+        let (settings_page, cx) = cx.add_window_view(|_, cx| {
+            test_settings_page(
+                ShellForm {
+                    mode: ShellMode::System,
+                    program: String::new(),
+                    arguments: Vec::new(),
+                    title_override: String::new(),
+                },
+                cx,
+            )
+        });
+        cx.simulate_resize(size(px(900.), px(3_000.)));
+        cx.run_until_parked();
+
+        settings_page.update(cx, |page, cx| {
+            page.switch_tab(SettingsTab::Themes, cx);
+        });
+        cx.run_until_parked();
+
+        let (text, is_success) = settings_page
+            .update(cx, |page, _| {
+                page.themes_tab
+                    .status_text()
+                    .map(|(text, success)| (text.to_string(), success))
+            })
+            .expect("a status should be shown after a failed load");
+        assert!(text.contains("503"), "got: {text}");
+        assert!(!is_success);
+
+        // The user must be able to retry rather than being stuck.
+        assert!(cx.debug_bounds("themes-reload").is_some());
+        settings_page.update(cx, |page, cx| {
+            assert!(
+                !page.themes_tab.is_busy(),
+                "a failure must clear the busy state"
+            );
+            page.switch_tab(SettingsTab::Terminal, cx);
+            page.switch_tab(SettingsTab::Themes, cx);
+        });
+        cx.run_until_parked();
     }
 
     #[gpui::test]

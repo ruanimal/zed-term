@@ -121,11 +121,18 @@ fn init_paths() -> Result<()> {
     Ok(())
 }
 
-fn build_application() -> Application {
+fn build_application() -> Result<Application> {
     // Without an explicit asset source gpui defaults to an empty one, which
     // silently breaks embedded fonts and icon SVGs (the "+" / settings
     // buttons render blank). `assets::Assets` embeds Zed's theme/font/icon set.
-    gpui_platform::application().with_assets(assets::Assets)
+    let app = gpui_platform::application().with_assets(assets::Assets);
+
+    // gpui's default desktop client rejects every request, so the theme
+    // extension store needs a real one installed before the app starts.
+    let user_agent = format!("ZedTerm/{}", env!("CARGO_PKG_VERSION"));
+    let http_client = reqwest_client::ReqwestClient::user_agent(&user_agent)
+        .context("could not start the HTTP client")?;
+    Ok(app.with_http_client(std::sync::Arc::new(http_client)))
 }
 
 fn main() -> Result<()> {
@@ -133,7 +140,7 @@ fn main() -> Result<()> {
     let restart_arguments = launch_options.restart_arguments();
     let initial_directory = launch_options.initial_directory;
     init_paths()?;
-    let app = build_application().with_restart_arguments(restart_arguments);
+    let app = build_application()?.with_restart_arguments(restart_arguments);
     #[cfg(target_os = "macos")]
     app.on_reopen(terminal_app::reopen_window_if_needed);
     app.run(move |cx| terminal_app::run(cx, initial_directory));

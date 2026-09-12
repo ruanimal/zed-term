@@ -46,12 +46,38 @@
 - 新增 `SettingsTab` 枚举（`Terminal`、`Keymap`、`Themes`）与 `active_tab` 字段，`render` 在标题栏与内容区之间渲染 `TabBar`，根据 `active_tab` 切换内容区。
 - Tab「终端设置」：现有 `SettingsPage` render 逻辑不变，仅外层包 tab 容器；draft / 保存 / revision / 校验语义全部保持。
 - Tab「快捷键」：初始为占位内容；2026-09-12 起已实现 keymap.json 编辑（见下）。
-- Tab「主题下载」：占位内容，展示"Coming soon"说明主题扩展下载链路待接入。
+- Tab「主题下载」：初始为占位内容；2026-09-12 起已实现主题扩展下载链路（见下）。
 - `switch_tab` 方法切换前调用 `clear_active_edit`，确保内联编辑不会跨 tab 泄漏。
 
 待实现（后续阶段）：
 
-- Tab「主题下载」：复用 Zed 扩展 registry 的主题扩展下载 / 安装 / 更新 / 卸载链路，需先评估 extension 系统裁剪。
+- 无。
+
+已实现 Tab「主题下载」（2026-09-12）：
+
+- 新增 `crates/terminal_app/src/extension_store.rs`：直接对接 Zed 公开扩展 API（`https://api.zed.dev/extensions`）的裁剪版扩展商店。**未**复用 `extension_host`——它捆绑 WASM 运行时以及 language / grammar / LSP 支持，本 fork 都没有；主题扩展只需要下载 tar.gz、解包、读取 `extension.toml` 与 `themes/*.json`。
+- 能力：列目录（`GET /extensions?provides=themes`）、安装（`/extensions/{id}/{version}/download`）、更新（目录版本高于已装版本时）、卸载。安装目录与 Zed 兼容（`paths::extensions_dir()/{id}/`），两边可共用同一 data directory。
+- Tab UI（`crates/terminal_app/src/themes_tab.rs`）：搜索框（按 id / 名称 / 描述本地过滤，不重新请求 API）、「仅已安装」过滤开关、已装数量、reload 按钮、每行下载量徽标、Install / Update / Uninstall 与版本迁移显示（`1.0.0 → 2.0.0`）、主题数量徽标、逐行 busy 态与状态行（成功/失败）。
+- 下载量取自目录 API 的 `download_count`；1000 以下显示原值，以上缩写为 `1.5K` / `1M`（列表列宽有限，精确值不是核心信息）。目录里没有的本机已装扩展无此项（API 是唯一来源）。
+- 「仅已安装」过滤与搜索是叠加关系，便于集中处理更新与卸载；目录外的本机扩展同样保留，否则它们会变得无法卸载。
+- 主题 tab 读取的扩展目录是构造期注入的字段（`ThemesTab::new`），而非直接读全局 `paths`，因此测试可指向临时目录，不会读到开发者本机真实已装扩展。
+- 响应性（2026-09-12，真机反馈"输入框卡"）：目录有 628 个主题扩展，`render` 每次按键都会跑，原先三处开销叠加：
+  - 列表逐行构建：628 行一次性建 element。改为 `uniform_list` 虚拟化，只构建可见行。行高固定为 `THEME_ROW_HEIGHT`（uniform_list 只量首行，要求等高），名称与描述改 `truncate()` 以免长描述撑高行。
+  - Terminal tab 大树无条件构建：即使停在 Themes tab 也每帧重建整棵终端设置树（含全部行与下拉菜单）。改为惰性闭包，只在 Terminal tab 实际显示时构建。
+  - 主题名与字体族枚举无条件执行：`ThemeRegistry::list_names()`（排序全部主题名）与 `FontFamilyCache::try_list_font_families()`（克隆整个字体族列表）原先在 `Render` 顶部，每次按键都跑。一并移入上述惰性闭包。
+- 行的搜索文本（id/名称/描述的小写拼接，以 NUL 分隔）在 `rebuild_rows` 时预计算，避免每次按键对整目录做 `to_lowercase`；实测这项不是主要瓶颈（去掉后专门的时间断言仍通过，故未保留该断言），但改动廉价且语义等价。
+- 目录里不存在的本机已装扩展也会列出（可卸载），避免它变成无法移除的孤儿。
+- 主题生效：启动时 `app::load_extension_themes_in_background` 注册扩展主题；安装/卸载成功后 `app::load_extension_themes` 重新注册并 `theme_settings::reload_theme`，因此新装主题立即出现在 Terminal tab 的 Color theme 选择器里。
+- 原子性：下载先解包到 `staging/` 子目录，校验 manifest 的 `id` 与请求一致后才替换安装目录。校验失败或解包失败只清理 staging，**不会**破坏已可用安装。`staging/` 永不作为已装扩展被列出。
+- 安全：扩展 id 只允许 ASCII 字母数字与 `-` / `_`（防目录穿越）；archive 条目路径由 `async_tar` 校验不得逃出目标目录；manifest 里的 theme 路径同样拒绝非普通相对路径；下载体积上限 64 MiB。
+- 网络层：本 fork 的 `Remove unused ZedTerm files`（18c10650c5）删掉了 `reqwest_client` / `http_client_tls`，而 gpui 桌面端默认是 `NullHttpClient`（所有请求直接报错），因此主题下载原本无从发起。本阶段恢复 `crates/reqwest_client`，并改为依赖 crates.io 上游 `reqwest`（Zed 的 `zed-reqwest` 只以 GitHub git 依赖发布，本 fork 需要能仅靠 crates.io 构建）；`main.rs` 在启动时用 `with_http_client` 注入真实 client。
+- 适配上游 `reqwest` 的两处差异：上游只支持在 **构造 client** 时设定 redirect policy（Zed fork 支持逐请求设定），故按 policy 缓存少量 client；上游对代理 scheme 延迟到请求时才校验，故在构造期显式校验 scheme，保持「非法代理只被忽略、不拖垮 client」的既有语义。
+- `rustls` 显式选用 `ring` provider（`default-features = false`）：默认的 `aws-lc-rs` 需要 cmake 与 C 工具链；`ring` 也是 reqwest `rustls-tls-native-roots` 自身所用的 provider，两端一致。
+
+验证：`cargo test -p terminal_app --lib` 118 passed / 0 failed（新增 16 个 extension store 测试 + 24 个 themes tab 测试，含 archive 往返、重装替换、损坏/错配 archive 不破坏既有安装、路径穿越拒绝、staging 不被列出、搜索过滤、「仅已安装」过滤、下载量格式与渲染、更新判定、更新/卸载渲染、628 行目录一致性、虚拟化只构建可见行）；`cargo test -p reqwest_client` 4 passed / 0 failed；`cargo check --workspace --all-targets`、`cargo clippy -p terminal_app -p reqwest_client --all-targets -- --deny warnings` 与 `cargo fmt --all -- --check` 通过；`cargo build -p terminal_app --bin terminal-app` 成功。
+
+真机联调：对 `api.zed.dev` 实测抓取目录 → 下载 tar.gz → 解包 → 读取 manifest → 解析主题全部通过（`catppuccin 0.2.26` 解析出 2 个 family / 8 个主题；`gruvbox-material 1.1.0` 解析出 1 个主题），并验证卸载后目录被移除。真机 GUI 视觉与交互验收待做。
+
 
 验证：`cargo check -p terminal_app`、`cargo test -p terminal_app --lib` 64 passed / 0 failed、`cargo clippy -p terminal_app --all-targets -- --deny warnings` 与 `cargo fmt --all -- --check` 通过。
 

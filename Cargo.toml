@@ -32,6 +32,7 @@ members = [
     "crates/proto",
     "crates/refineable",
     "crates/refineable/derive_refineable",
+    "crates/reqwest_client",
     "crates/release_channel",
     "crates/rope",
     "crates/scheduler",
@@ -102,6 +103,7 @@ perf = { path = "tooling/perf" }
 proto = { path = "crates/proto" }
 refineable = { path = "crates/refineable" }
 release_channel = { path = "crates/release_channel" }
+reqwest_client = { path = "crates/reqwest_client" }
 rope = { path = "crates/rope" }
 scheduler = { path = "crates/scheduler" }
 settings = { path = "crates/settings" }
@@ -375,16 +377,16 @@ rand = "0.9"
 raw-window-handle = "0.6"
 rayon = "1.8"
 regex = "1.5"
-# WARNING: If you change this, you must also publish a new version of zed-reqwest to crates.io
-reqwest = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662463bda39148ba154100dd44d3fba5873a4", default-features = false, features = [
+# ZedTerm uses the upstream crate rather than Zed's `zed-reqwest` fork: the fork
+# is only published as a GitHub git dependency, and ZedTerm's build must work
+# from crates.io alone. See `crates/reqwest_client` for the adapter.
+reqwest = { version = "0.12", default-features = false, features = [
     "charset",
     "http2",
-    "macos-system-configuration",
-    "multipart",
     "rustls-tls-native-roots",
     "socks",
     "stream",
-], package = "zed-reqwest", version = "0.12.15-zed" }
+] }
 resvg = { version = "0.46.0", default-features = false, features = [
     "text",
     "system-fonts",
@@ -398,7 +400,14 @@ runtimelib = { version = "1.4.0", default-features = false, features = [
 rust-embed = { version = "8.11", features = ["include-exclude"] }
 rustc-hash = "2.1.0"
 rustix = { version = "1.1", features = ["fs"] }
-rustls = { version = "0.23.26" }
+# Default features pull in `aws-lc-rs`, which needs cmake and a C toolchain at
+# build time. `ring` is pure Rust plus generated C and is what reqwest uses for
+# its own `rustls-tls-native-roots` feature, so the two agree on a provider.
+rustls = { version = "0.23.26", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
 rustls-platform-verifier = "0.5.0"
 # WARNING: If you change this, you must also publish a new version of zed-scap to crates.io
 scap = { git = "https://github.com/zed-industries/scap", rev = "4afea48c3b002197176fb19cd0f9b180dd36eaac", default-features = false, package = "zed-scap", version = "0.0.8-zed" }

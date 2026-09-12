@@ -21,10 +21,12 @@ use terminal_core::{
 };
 use util::ResultExt;
 
+pub mod extension_store;
 pub mod keymap;
 pub mod persistence;
 pub mod settings_ui;
 pub mod terminal;
+pub mod themes_tab;
 pub mod window;
 pub(crate) mod window_chrome;
 
@@ -187,6 +189,49 @@ fn load_user_themes_in_background(cx: &mut App) {
     .detach();
 }
 
+/// Registers the themes contributed by installed theme extensions.
+///
+/// Returns the number of theme files loaded, so callers can skip re-resolving
+/// the active theme when nothing changed.
+pub fn load_extension_themes(cx: &mut App) -> usize {
+    let theme_files = extension_store::installed_theme_files();
+    apply_extension_themes(cx, &theme_files)
+}
+
+/// Registers extension theme files in the registry and re-resolves the active
+/// theme when any of them loaded.
+fn apply_extension_themes(cx: &mut App, theme_files: &[Vec<u8>]) -> usize {
+    let registry = theme::ThemeRegistry::global(cx);
+    let mut loaded = 0;
+    for bytes in theme_files {
+        match theme_settings::load_user_theme(&registry, bytes) {
+            Ok(()) => loaded += 1,
+            Err(error) => log::warn!("Could not load an extension theme: {error:#}"),
+        }
+    }
+    if loaded > 0 {
+        // A newly loaded theme may be the one settings.json selects, so the
+        // active theme is re-resolved now that the registry has grown.
+        theme_settings::reload_theme(cx);
+    }
+    loaded
+}
+
+/// Registers the themes contributed by installed theme extensions, on a
+/// background thread so a slow disk does not delay the first window.
+fn load_extension_themes_in_background(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        // Reading and parsing theme files is blocking work.
+        let theme_files =
+            cx.background_spawn(async move { extension_store::installed_theme_files() });
+        let theme_files = theme_files.await;
+        cx.update(|cx| {
+            apply_extension_themes(cx, &theme_files);
+        });
+    })
+    .detach();
+}
+
 /// Watches the ZedTerm user settings file and applies changes live.
 fn watch_user_settings(cx: &mut App) {
     let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
@@ -264,6 +309,7 @@ pub fn run(cx: &mut App, initial_directory: Option<std::path::PathBuf>) {
     load_embedded_themes(cx);
     theme_settings::reload_theme(cx);
     load_user_themes_in_background(cx);
+    load_extension_themes_in_background(cx);
     load_fonts(cx);
     persist_window_geometry_on_quit(cx);
 
