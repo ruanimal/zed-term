@@ -43,7 +43,7 @@ where
             controls,
             &mut close_handler,
         );
-        return (left, right);
+        (left, right)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
@@ -68,10 +68,8 @@ fn complete_button_layout(cx: &mut App) -> WindowButtonLayout {
             .iter()
             .chain(layout.right.iter())
             .any(|candidate| *candidate == Some(button));
-        if !is_present {
-            if let Some(slot) = layout.right.iter_mut().find(|slot| slot.is_none()) {
-                *slot = Some(button);
-            }
+        if !is_present && let Some(slot) = layout.right.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some(button);
         }
     }
     layout

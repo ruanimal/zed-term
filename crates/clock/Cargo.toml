@@ -13,9 +13,13 @@ path = "src/clock.rs"
 doctest = false
 
 [features]
-test-support = ["dep:parking_lot"]
+test-support = []
 
 [dependencies]
-parking_lot = { workspace = true, optional = true }
+# Not optional: `system_clock.rs` uses it under `cfg(test)`, which cannot enable
+# a feature. Upstream this was `optional = true` and only worked because sibling
+# crates enabled `clock/test-support`, keeping it unified in; those crates are
+# not part of this fork, so the dependency is unconditional here.
+parking_lot.workspace = true
 serde.workspace = true
 smallvec.workspace = true
