@@ -137,6 +137,7 @@ impl RenderOnce for TabBar {
                     .child(
                         h_flex()
                             .id("tabs")
+                            .h_full()
                             .flex_grow_1()
                             .overflow_x_scroll()
                             .when_some(self.scroll_handle, |cx, scroll_handle| {

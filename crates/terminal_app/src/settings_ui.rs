@@ -2716,6 +2716,8 @@ impl SettingsPage {
         };
         div()
             .id(format!("settings-tab-{}", tab.label()))
+            .debug_selector(|| format!("settings-tab-{}", tab.label()))
+            .relative()
             .h_full()
             .flex()
             .items_center()
@@ -2723,7 +2725,18 @@ impl SettingsPage {
             .cursor_pointer()
             .text_color(text_color)
             .when(selected, |this| {
-                this.border_t_2().border_color(colors.border)
+                // Painted as an absolutely positioned overlay rather than a border
+                // so the indicator does not push the label out of line with the
+                // unselected tabs.
+                this.child(
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .left_0()
+                        .right_0()
+                        .h_1()
+                        .bg(colors.border),
+                )
             })
             .when(!selected, |this| {
                 this.hover(|style| style.bg(colors.ghost_element_hover))
@@ -5252,6 +5265,53 @@ mod tests {
                 .all(|positions| positions[0] < positions[1]),
             "retained key order changed: {retained_key_positions:?}"
         );
+    }
+
+    /// The settings tabs share the title bar with the window controls, so a tab
+    /// that does not fill the bar's full height leaves its hover highlight short
+    /// of the bar's edges. Regression guard for the tabs being laid out at their
+    /// content height instead of the title bar height.
+    #[gpui::test]
+    fn settings_tabs_fill_the_title_bar_height(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let (_settings_page, cx) = cx.add_window_view(|_, cx| {
+            test_settings_page(
+                ShellForm {
+                    mode: ShellMode::System,
+                    program: String::new(),
+                    arguments: Vec::new(),
+                    title_override: String::new(),
+                },
+                cx,
+            )
+        });
+        cx.simulate_resize(size(px(700.), px(3_000.)));
+        cx.run_until_parked();
+
+        let title_bar_height = window_chrome::TITLE_BAR_HEIGHT;
+        let tab_selectors = [
+            ("Terminal", "settings-tab-Terminal"),
+            ("Keymap", "settings-tab-Keymap"),
+            ("Themes", "settings-tab-Themes"),
+        ];
+        for (label, selector) in tab_selectors {
+            let bounds = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("settings tab {label} should be rendered"));
+            assert_eq!(
+                bounds.size.height, title_bar_height,
+                "settings tab {label} should fill the title bar height"
+            );
+            assert_eq!(
+                bounds.origin.y,
+                px(0.),
+                "settings tab {label} should start at the top of the title bar"
+            );
+        }
     }
 
     #[gpui::test]
