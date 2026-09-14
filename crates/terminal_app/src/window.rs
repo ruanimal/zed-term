@@ -699,8 +699,13 @@ impl TerminalWindowView {
         if self.tabs[active_index].split_root.is_none() {
             self.tabs[active_index].split_root = Some(SplitNode::leaf(anchor_tab.clone()));
         }
+        let initial_directory = anchor_tab
+            .read(cx)
+            .terminal
+            .read(cx)
+            .working_directory_for_new_terminal();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let builder = match build_terminal(cx, None).await {
+            let builder = match build_terminal(cx, initial_directory).await {
                 Ok(builder) => builder,
                 Err(error) => {
                     this.update(cx, |this, cx| {

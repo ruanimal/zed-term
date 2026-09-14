@@ -2546,6 +2546,19 @@ impl Terminal {
         }
     }
 
+    /// Returns the best known local directory for starting another terminal.
+    ///
+    /// Process information may not have been refreshed yet when a pane is split,
+    /// but the initial directory and detected directory changes are already in
+    /// the cwd history.
+    pub fn working_directory_for_new_terminal(&self) -> Option<PathBuf> {
+        self.working_directory().or_else(|| {
+            self.cwd_history
+                .last()
+                .map(|entry| entry.working_directory.clone())
+        })
+    }
+
     /// Normalizes the command name of the foreground process, if one is known.
     pub fn foreground_process_command_name(&self) -> Option<String> {
         match &self.terminal_type {
