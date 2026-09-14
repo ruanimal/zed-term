@@ -1,6 +1,10 @@
 use gpui::{Context, Task};
 use parking_lot::{MappedRwLockReadGuard, Mutex, RwLock, RwLockReadGuard};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 #[cfg(target_os = "windows")]
 use windows::Win32::{Foundation::HANDLE, System::Threading::GetProcessId};
@@ -84,6 +88,7 @@ pub(crate) struct PtyProcessInfo {
     system: RwLock<System>,
     refresh_kind: ProcessRefreshKind,
     pid_getter: ProcessIdGetter,
+    shell_name: String,
     last_foreground_pid: Mutex<Option<Pid>>,
     /// Foreground pid whose info was last committed to `current`; used to
     /// detect foreground transitions that require stability confirmation.
@@ -93,7 +98,13 @@ pub(crate) struct PtyProcessInfo {
 }
 
 impl PtyProcessInfo {
-    pub(crate) fn new(pid_getter: ProcessIdGetter) -> PtyProcessInfo {
+    pub(crate) fn new(pid_getter: ProcessIdGetter, shell_program: String) -> PtyProcessInfo {
+        let shell_name = Path::new(&shell_program)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&shell_program)
+            .trim_end_matches(".exe")
+            .to_ascii_lowercase();
         // Task enumeration is on by default and would retain a `Process` entry
         // per thread, each pinning an open `/proc/<pid>/task/<tid>/stat` handle
         // on Linux (#58651).
@@ -118,6 +129,7 @@ impl PtyProcessInfo {
             system: RwLock::new(system),
             refresh_kind: process_refresh_kind,
             pid_getter,
+            shell_name,
             last_foreground_pid: Mutex::new(None),
             last_committed_pid: Mutex::new(None),
             current: RwLock::new(None),
@@ -189,6 +201,13 @@ impl PtyProcessInfo {
         Some(info)
     }
 
+    fn is_shell_process(&self, process: &ProcessInfo) -> bool {
+        process
+            .name
+            .trim_end_matches(".exe")
+            .eq_ignore_ascii_case(&self.shell_name)
+    }
+
     #[cfg(all(test, unix))]
     pub(crate) fn load_for_test(&self) -> Option<ProcessInfo> {
         self.load()
@@ -218,12 +237,30 @@ impl PtyProcessInfo {
                     executor.timer(STABLE_TITLE_DELAY).await;
                     // If the short-lived command is gone, the Wakeup loop will
                     // resample with the shell back in the foreground; skip this
-                    // transient snapshot entirely.
-                    if this.pid() != foreground_pid {
-                        return (false, None);
+                    // transient snapshot entirely. Returning to the shell still
+                    // matters because a nested session may have left mouse modes set.
+                    let current_pid = this.pid();
+                    if current_pid != foreground_pid {
+                        let current = this.load();
+                        let returned_to_shell = previous
+                            .as_ref()
+                            .is_some_and(|previous| this.is_shell_process(previous))
+                            && current
+                                .as_ref()
+                                .is_some_and(|current| this.is_shell_process(current));
+                        if let Some(pid) = current_pid {
+                            *this.last_committed_pid.lock() = Some(pid);
+                        }
+                        return (false, None, returned_to_shell);
                     }
                 }
                 let current = this.load();
+                let returned_to_shell = previous
+                    .as_ref()
+                    .is_some_and(|previous| !this.is_shell_process(previous))
+                    && current
+                        .as_ref()
+                        .is_some_and(|current| this.is_shell_process(current));
                 let has_changed = match (previous.as_ref(), current.as_ref()) {
                     (None, None) => false,
                     (Some(prev), Some(now)) => prev.cwd != now.cwd || prev.name != now.name,
@@ -240,18 +277,23 @@ impl PtyProcessInfo {
                     (None, Some(now)) => Some(now.cwd.clone()),
                     _ => None,
                 };
-                (has_changed, changed_cwd)
+                (has_changed, changed_cwd, returned_to_shell)
             }
         });
         let this = Arc::downgrade(self);
         *self.task.lock() = Some(cx.spawn(async move |term, cx| {
-            let (has_changed, new_cwd) = change_task.await;
-            if has_changed {
+            let (has_changed, new_cwd, returned_to_shell) = change_task.await;
+            if has_changed || returned_to_shell {
                 term.update(cx, |terminal, cx| {
-                    if let Some(cwd) = new_cwd {
-                        terminal.record_cwd_change(cwd);
+                    if returned_to_shell {
+                        terminal.reset_mouse_tracking(cx);
                     }
-                    cx.emit(Event::TitleChanged);
+                    if has_changed {
+                        if let Some(cwd) = new_cwd {
+                            terminal.record_cwd_change(cwd);
+                        }
+                        cx.emit(Event::TitleChanged);
+                    }
                 })
                 .ok();
             }
@@ -282,7 +324,10 @@ mod tests {
         reason = "the test needs real short-lived child processes and may block"
     )]
     fn process_map_stays_bounded() {
-        let mut info = PtyProcessInfo::new(ProcessIdGetter::new(-1, std::process::id()));
+        let mut info = PtyProcessInfo::new(
+            ProcessIdGetter::new(-1, std::process::id()),
+            "sh".to_string(),
+        );
         assert!(
             info.get_child().is_some(),
             "the spawned child must be inspectable for kill_child_process \

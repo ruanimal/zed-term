@@ -1100,7 +1100,7 @@ impl TerminalBuilder {
                     }
                 };
 
-                let pty_info = PtyProcessInfo::new(ProcessIdGetter::from(&pty));
+                let pty_info = PtyProcessInfo::new(ProcessIdGetter::from(&pty), shell.program());
 
                 //And connect them together
                 let pty_tx =
@@ -2114,6 +2114,29 @@ impl Terminal {
 
     pub fn mouse_mode(&self, shift: bool) -> bool {
         self.last_content.mode.intersects(Modes::MOUSE_MODE) && !shift
+    }
+
+    fn reset_mouse_tracking(&mut self, cx: &mut Context<Self>) {
+        let mut terminal = self.term.lock_unfair();
+        for mode in [
+            NamedPrivateMode::ReportMouseClicks,
+            NamedPrivateMode::ReportCellMouseMotion,
+            NamedPrivateMode::ReportAllMouseMotion,
+            NamedPrivateMode::SgrMouse,
+            NamedPrivateMode::Utf8Mouse,
+        ] {
+            terminal.unset_private_mode(PrivateMode::Named(mode));
+        }
+        drop(terminal);
+
+        self.last_content
+            .mode
+            .remove(Modes::MOUSE_MODE | Modes::SGR_MOUSE | Modes::UTF8_MOUSE);
+        self.last_mouse = None;
+        self.mouse_down_position = None;
+        self.mouse_down_hyperlink = None;
+        self.content_dirty = true;
+        cx.emit(Event::Wakeup);
     }
 
     pub fn mouse_move(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
