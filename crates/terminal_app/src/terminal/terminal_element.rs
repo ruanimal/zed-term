@@ -1084,6 +1084,14 @@ impl TerminalElement {
     }
 }
 
+/// Rounds a pixel value down to a whole device pixel.
+///
+/// Terminal rendering is grid-based; allowing fractional origins can cause the
+/// glyph rasterization to shift between frames, which looks like flicker.
+fn snap_to_device_pixel(value: Pixels, scale_factor: f32) -> Pixels {
+    Pixels::from((f32::from(value) * scale_factor).floor() / scale_factor)
+}
+
 impl Element for TerminalElement {
     type RequestLayoutState = ();
     type PrepaintState = LayoutState;
@@ -1185,7 +1193,7 @@ impl Element for TerminalElement {
                 let player_color = theme.players().local();
                 let match_color = theme.colors().search_match_background;
                 let gutter;
-                let (dimensions, line_height_px) = {
+                let (mut dimensions, line_height_px, bottom_padding) = {
                     let rem_size = window.rem_size();
                     let font_pixels = text_style.font_size.to_pixels(rem_size);
                     let line_height = f32::from(font_pixels) * line_height;
@@ -1211,48 +1219,37 @@ impl Element for TerminalElement {
                     let mut origin = bounds.origin;
                     origin.x += gutter;
 
-                    let should_anchor_to_bottom = {
-                        let content = self.terminal.read(cx).last_content();
-                        content.mode.contains(Modes::ALT_SCREEN)
-                            || (content.scrolled_to_bottom && content.bottom_row_occupied)
-                    };
-                    let scale_factor = window.scale_factor();
-                    let line_height_pixels = px(line_height);
-                    let line_height_device_px = (f32::from(line_height_pixels) * scale_factor)
-                        .round()
-                        .max(1.0) as i32;
-                    let available_height_device_px = (f32::from(available_height) * scale_factor)
+                    // Count rows with the device-snapped cell height and paint
+                    // the rows at that same height. Counting with a rounded
+                    // device height while painting with the unrounded one lets
+                    // the grid and the pane disagree by up to a row, which the
+                    // user sees as a blank strip along the bottom of the
+                    // terminal.
+                    let scale_factor = window.scale_factor().max(1.0);
+                    let line_height_device = (line_height * scale_factor).round().max(1.0);
+                    let line_height = line_height_device / scale_factor;
+                    let available_height_device = (f32::from(available_height) * scale_factor)
                         .floor()
-                        .max(0.0) as i32;
+                        .max(0.0);
 
                     let rows =
-                        ((available_height_device_px / line_height_device_px) as usize).max(1);
-                    let snapped_height_device_px = (rows as i32) * line_height_device_px;
-                    let padding_device_px =
-                        (available_height_device_px - snapped_height_device_px).max(0);
+                        ((available_height_device / line_height_device).floor() as usize).max(1);
+                    let grid_height_device = rows as f32 * line_height_device;
+                    let padding_device = (available_height_device - grid_height_device).max(0.0);
 
-                    let snapped_height =
-                        px(snapped_height_device_px as f32 / scale_factor.max(1.0));
-                    let padding = px(padding_device_px as f32 / scale_factor.max(1.0));
-
-                    size.height = snapped_height;
-                    if should_anchor_to_bottom {
-                        origin.y += padding;
-                    }
+                    size.height = px(grid_height_device / scale_factor);
+                    let bottom_padding = px(padding_device / scale_factor);
 
                     // Snap to device pixels to avoid subpixel jitter while resizing.
                     // Terminal rendering is grid-based; allowing fractional origins can cause the
                     // glyph rasterization to shift between frames, which looks like flicker.
-                    let scale_factor = window.scale_factor();
-                    let snap_px = |value: Pixels| {
-                        Pixels::from((f32::from(value) * scale_factor).floor() / scale_factor)
-                    };
-                    origin.x = snap_px(origin.x);
-                    origin.y = snap_px(origin.y);
+                    origin.x = snap_to_device_pixel(origin.x, scale_factor);
+                    origin.y = snap_to_device_pixel(origin.y, scale_factor);
 
                     (
                         TerminalBounds::new(px(line_height), cell_width, Bounds { origin, size }),
                         line_height,
+                        bottom_padding,
                     )
                 };
 
@@ -1267,6 +1264,29 @@ impl Element for TerminalElement {
                     terminal.set_size(dimensions);
                     terminal.sync(window, cx);
                 });
+
+                // Decide the vertical alignment only after the pending scroll
+                // events have been applied. Reading the scroll position before
+                // `sync` anchors the pane to the previous frame's position,
+                // which leaves a blank row below the prompt after scrolling
+                // back to the bottom.
+                let should_anchor_to_bottom = {
+                    let content = self.terminal.read(cx).last_content();
+                    content.mode.contains(Modes::ALT_SCREEN)
+                        || (content.scrolled_to_bottom && content.bottom_row_occupied)
+                };
+                if should_anchor_to_bottom {
+                    let scale_factor = window.scale_factor().max(1.0);
+                    dimensions.bounds.origin.y = snap_to_device_pixel(
+                        dimensions.bounds.origin.y + bottom_padding,
+                        scale_factor,
+                    );
+                    // Keep hit testing aligned with the shifted grid. The grid
+                    // size is unchanged, so this does not resize the PTY.
+                    self.terminal
+                        .update(cx, |terminal, _| terminal.set_size(dimensions));
+                }
+
                 self.terminal_view.update(cx, |terminal_view, cx| {
                     terminal_view.update_scrollbar(cx);
                 });
@@ -1477,10 +1497,10 @@ impl Element for TerminalElement {
             window.paint_quad(fill(bounds, layout.background_color));
             let origin = layout.dimensions.bounds.origin - GpuiPoint::new(px(0.), scroll_top);
             let scale_factor = window.scale_factor();
-            let snap_px = |value: Pixels| {
-                Pixels::from((f32::from(value) * scale_factor).floor() / scale_factor)
-            };
-            let origin = point(snap_px(origin.x), snap_px(origin.y));
+            let origin = point(
+                snap_to_device_pixel(origin.x, scale_factor),
+                snap_to_device_pixel(origin.y, scale_factor),
+            );
 
             let marked_text_cloned: Option<String> = self
                 .terminal_view

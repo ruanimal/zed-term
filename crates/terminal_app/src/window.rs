@@ -3376,4 +3376,143 @@ mod tests {
             "the focused pane should show the search bar"
         );
     }
+
+    /// The painted grid has to end flush with the pane it fills. When the row
+    /// count is derived from a device-rounded cell height while the rows are
+    /// painted at the unrounded height, the grid and the pane disagree by up to
+    /// a row: the terminal leaves a blank strip under the last line, and
+    /// scrolling back to the bottom can show that strip because the alignment
+    /// decision was made from the previous frame's scroll position.
+    #[gpui::test]
+    fn terminal_grid_fills_the_pane_and_keeps_the_last_row_visible(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        let pane = cx.update(|cx| {
+            let settings = TerminalSettings::get_global(cx).clone();
+            let pane = new_test_pane(&settings, 96_000, cx);
+            pane.update(cx, |pane, cx| {
+                pane.terminal.update(cx, |terminal, cx| {
+                    for index in 0..200 {
+                        terminal.write_output(format!("line {index}\r\n").as_bytes(), cx);
+                    }
+                });
+            });
+            pane
+        });
+
+        let tabs = vec![WindowTab::new(pane.clone())];
+        let (_view, window) = cx.add_window_view(move |_, cx| {
+            let live_settings =
+                LiveTerminalSettings::from_settings(TerminalSettings::get_global(cx));
+            let settings_subscription =
+                cx.observe_global::<settings::SettingsStore>(TerminalWindowView::settings_changed);
+            TerminalWindowView {
+                focus_handle: cx.focus_handle(),
+                tabs,
+                active_tab_index: 0,
+                context_menu: None,
+                context_navigation_target: None,
+                titlebar_mouse_down: std::cell::Cell::new(false),
+                tab_bar_scroll_handle: ScrollHandle::new(),
+                tab_bar_has_overflow: false,
+                tab_bar_can_scroll_left: false,
+                tab_bar_can_scroll_right: false,
+                terminal_error: None,
+                live_settings,
+                _subscriptions: vec![settings_subscription],
+            }
+        });
+        window.run_until_parked();
+
+        // Distance between the bottom of the painted grid and the bottom of the
+        // pane, plus the painted cell height.
+        let grid_geometry = |window: &mut gpui::VisualTestContext| -> (f32, f32) {
+            window.update(|window, cx| {
+                let bounds = pane
+                    .read(cx)
+                    .terminal
+                    .read(cx)
+                    .last_content()
+                    .terminal_bounds;
+                let painted_bottom = f32::from(bounds.bounds.origin.y)
+                    + bounds.num_lines() as f32 * f32::from(bounds.line_height);
+                let pane_bottom = f32::from(window.viewport_size().height);
+                (pane_bottom - painted_bottom, f32::from(bounds.line_height))
+            })
+        };
+        let write_bottom_prompt = |window: &mut gpui::VisualTestContext| {
+            window.update(|_window, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.terminal.update(cx, |terminal, cx| {
+                        terminal.write_output(b"\x1b[999;1Hprompt\x1b[K", cx);
+                    });
+                    cx.notify();
+                });
+            });
+            window.run_until_parked();
+        };
+
+        let line_heights = [
+            settings::TerminalLineHeight::Standard,
+            settings::TerminalLineHeight::Custom(1.21),
+            settings::TerminalLineHeight::Custom(1.24),
+            settings::TerminalLineHeight::Custom(1.29),
+        ];
+        for line_height in line_heights {
+            window.update(|_window, cx| {
+                SettingsStore::update_global(cx, |store, cx| {
+                    store.update_user_settings(cx, |content| {
+                        let terminal = content
+                            .terminal
+                            .get_or_insert_with(settings::TerminalSettingsContent::default);
+                        terminal.line_height = Some(line_height.clone());
+                    });
+                });
+            });
+            for (width, height) in [(934., 596.), (1000., 700.), (901., 533.)] {
+                window.simulate_resize(gpui::size(px(width), px(height)));
+                window.run_until_parked();
+
+                // At the bottom with content on the last row the grid is
+                // anchored, so it must end exactly at the pane bottom.
+                write_bottom_prompt(window);
+                let (gap, _) = grid_geometry(window);
+                assert!(
+                    gap.abs() < 0.5,
+                    "anchored grid must end at the pane bottom for {line_height:?} at {width}x{height}, gap was {gap}",
+                );
+
+                // Scrolled into history the grid is top-aligned; the blank
+                // remainder below it must stay smaller than one row.
+                window.update(|_window, cx| {
+                    pane.update(cx, |pane, cx| {
+                        pane.terminal
+                            .update(cx, |terminal, _| terminal.scroll_up_by(5));
+                        cx.notify();
+                    });
+                });
+                window.run_until_parked();
+                let (gap, line_height_px) = grid_geometry(window);
+                assert!(
+                    gap >= 0.0 && gap < line_height_px,
+                    "scrolled grid must fill the pane up to less than one row for {line_height:?} at {width}x{height}, gap was {gap}",
+                );
+
+                // Returning to the bottom has to anchor in the same frame that
+                // applies the scroll, not the one after it.
+                window.update(|_window, cx| {
+                    pane.update(cx, |pane, cx| {
+                        pane.terminal
+                            .update(cx, |terminal, _| terminal.scroll_to_bottom());
+                        cx.notify();
+                    });
+                });
+                window.run_until_parked();
+                let (gap, _) = grid_geometry(window);
+                assert!(
+                    gap.abs() < 0.5,
+                    "scrolling back to the bottom must anchor the grid immediately for {line_height:?} at {width}x{height}, gap was {gap}",
+                );
+            }
+        }
+    }
 }
