@@ -24,8 +24,8 @@ use theme::{ActiveTheme as _, FontFamilyCache, ThemeRegistry};
 use ui::prelude::*;
 use ui::utils::TRAFFIC_LIGHT_PADDING;
 use ui::{
-    Color, ContextMenu, Divider, DividerColor, DropdownMenu, Icon, IconButton, IconName, IconSize,
-    Label, LabelSize, Switch, TabBar, ToggleState,
+    ButtonLink, Color, ContextMenu, Divider, DividerColor, DropdownMenu, Icon, IconButton,
+    IconName, IconSize, Label, LabelSize, Switch, TabBar, ToggleState,
 };
 use util::{ResultExt, shell::Shell as TerminalShell};
 
@@ -59,6 +59,7 @@ enum SettingsTab {
     Terminal,
     Keymap,
     Themes,
+    About,
 }
 
 impl SettingsTab {
@@ -67,6 +68,7 @@ impl SettingsTab {
             Self::Terminal => "Terminal",
             Self::Keymap => "Keymap",
             Self::Themes => "Themes",
+            Self::About => "About",
         }
     }
 }
@@ -2722,6 +2724,7 @@ impl Render for SettingsPage {
                                 let search_input = self.themes_search_input(search_query, cx);
                                 self.themes_tab.render(search_input, cx)
                             }
+                            SettingsTab::About => self.render_about_tab(),
                         }),
                 ),
             window,
@@ -2731,6 +2734,43 @@ impl Render for SettingsPage {
 }
 
 impl SettingsPage {
+    fn render_about_tab(&self) -> gpui::AnyElement {
+        v_flex()
+            .id("about-content")
+            .w_full()
+            .px_8()
+            .py_4()
+            .gap_2()
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(Label::new("ZedTerm").size(LabelSize::Large))
+                    .child(
+                        Label::new("A standalone terminal application based on Zed's terminal.")
+                            .color(Color::Muted),
+                    ),
+            )
+            .child(self.row(
+                "Version",
+                "The version of ZedTerm currently running.",
+                Label::new(env!("CARGO_PKG_VERSION")).into_any_element(),
+            ))
+            .child(
+                self.row(
+                    "Repository",
+                    "View the ZedTerm source code.",
+                    ButtonLink::new("GitHub repository", "https://github.com/ruanimal/zed-term")
+                        .into_any_element(),
+                ),
+            )
+            .child(self.row(
+                "License",
+                "ZedTerm is distributed under the GPL-3.0-or-later license.",
+                Label::new("GPL-3.0-or-later").into_any_element(),
+            ))
+            .into_any_element()
+    }
+
     /// Renders the merged title bar: the TabBar acts as the window title
     /// bar (as in the terminal window). Window controls are injected as
     /// TabBar start/end children on client-side decorations; on server-side
@@ -2786,6 +2826,7 @@ impl SettingsPage {
             .child(self.render_settings_tab(SettingsTab::Terminal, cx))
             .child(self.render_settings_tab(SettingsTab::Keymap, cx))
             .child(self.render_settings_tab(SettingsTab::Themes, cx))
+            .child(self.render_settings_tab(SettingsTab::About, cx))
             .end_child(save_discard);
 
         let tab_bar = if is_server_decorations {
@@ -2902,7 +2943,7 @@ impl SettingsPage {
             // (another app sharing the data directory, a manual install), so
             // the disk state is re-read even when the catalog is cached.
             SettingsTab::Themes => self.themes_tab.refresh_installed(),
-            SettingsTab::Terminal => {}
+            SettingsTab::Terminal | SettingsTab::About => {}
         }
         cx.notify();
     }
