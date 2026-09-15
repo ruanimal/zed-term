@@ -29,6 +29,9 @@ use ui::{
 };
 use util::{ResultExt, shell::Shell as TerminalShell};
 
+use crate::text_edit::{
+    next_utf16_boundary, previous_utf16_boundary, replace_utf16_range, substring_utf16,
+};
 use crate::window_chrome;
 use crate::window_options;
 
@@ -1450,68 +1453,6 @@ fn draft_setting_option(
         page.update(cx, |this, cx| this.update_draft(setting, &update, cx))
             .log_err();
     })
-}
-
-fn previous_utf16_boundary(text: &str, offset: usize) -> usize {
-    let mut previous = 0;
-    let mut current = 0;
-    for character in text.chars() {
-        let next = current + character.len_utf16();
-        if offset <= current {
-            return previous;
-        }
-        if offset <= next {
-            return current;
-        }
-        previous = current;
-        current = next;
-    }
-    current
-}
-
-fn next_utf16_boundary(text: &str, offset: usize) -> usize {
-    let mut current = 0;
-    for character in text.chars() {
-        let next = current + character.len_utf16();
-        if offset < next {
-            return next;
-        }
-        current = next;
-    }
-    current
-}
-
-fn byte_offset_for_utf16(text: &str, utf16_offset: usize) -> usize {
-    let mut consumed_utf16 = 0;
-    for (byte_offset, character) in text.char_indices() {
-        if consumed_utf16 >= utf16_offset {
-            return byte_offset;
-        }
-        let next = consumed_utf16 + character.len_utf16();
-        if utf16_offset < next {
-            return byte_offset;
-        }
-        consumed_utf16 = next;
-    }
-    text.len()
-}
-
-fn substring_utf16(text: &str, range: Range<usize>) -> String {
-    let start = byte_offset_for_utf16(text, range.start);
-    let end = byte_offset_for_utf16(text, range.end.max(range.start));
-    text[start..end].to_string()
-}
-
-fn replace_utf16_range(text: &str, range: Range<usize>, replacement: &str) -> (String, usize) {
-    let start_utf16 = range.start.min(text.encode_utf16().count());
-    let end_utf16 = range.end.max(start_utf16).min(text.encode_utf16().count());
-    let start = byte_offset_for_utf16(text, start_utf16);
-    let end = byte_offset_for_utf16(text, end_utf16);
-    let mut updated = String::with_capacity(text.len() + replacement.len());
-    updated.push_str(&text[..start]);
-    updated.push_str(replacement);
-    updated.push_str(&text[end..]);
-    (updated, start_utf16 + replacement.encode_utf16().count())
 }
 
 fn validate_shell_form(form: &ShellForm) -> Result<settings::Shell, String> {

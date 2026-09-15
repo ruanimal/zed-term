@@ -26,6 +26,7 @@ pub mod keymap;
 pub mod persistence;
 pub mod settings_ui;
 pub mod terminal;
+pub(crate) mod text_edit;
 pub mod themes_tab;
 pub mod window;
 pub(crate) mod window_chrome;

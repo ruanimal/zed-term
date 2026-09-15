@@ -142,6 +142,28 @@
 
 验证：`cargo test -p terminal_app --lib` 64 passed / 0 failed；`cargo test -p terminal_core --lib` 96 passed / 5 failed（失败项均为 PTY spawn 用例，受限沙箱下 `Operation not permitted`，与本改动无关）；`cargo clippy -p terminal_app -p terminal_core --all-targets -- --deny warnings` 与 `cargo fmt --all -- --check` 通过。新增测试覆盖：`navigation_target_at` 命中 / 同文本未命中 / 越界（core）；`resolve_path_like_target` 的相对路径、`:` 与 `(,)` 后缀、绝对路径、缺失路径、无 cwd；`Copy Link` 文本；`Event::Open` → 系统打开 URL 与文件路径。真机视觉与交互验收待做。
 
+## 终端搜索补全
+
+**已完成（2026-09-15）**：此前的搜索条只有一个 InputHandler 骨架，存在三个致命缺陷——查询串不渲染（只显示匹配数）、`selected_text_range` 恒返回 `0..len` 且 `replace_text_in_range` 每次用新字符整体覆盖查询（因此永远只能搜到单字符）、`find_matches` 的结果只写入 `terminal.matches` 而从不调用 `activate_match`（既不选中也不滚动，无法定位）。本阶段按 Zed 终端搜索的语义补齐。
+
+**复用结论**：Zed 的终端搜索分成两半。终端侧（`terminal_view` 对 `SearchableItem` 的实现：`find_matches` / `activate_match` / `select_matches` / `selection_head` / `active_match_index`）本 fork 已经在 `terminal_core` 里保留并继续复用；搜索条侧（`crates/search` 的 `BufferSearchBar` + `crates/workspace` 的 `SearchableItem` trait）依赖 `editor` / `workspace` / `project` / `multi_buffer` / `language` / `picker` 等已被删除的 IDE crate，无法直接复用（重新引入等于把整个 IDE 栈拖回来，与本 fork 的定位冲突）。因此搜索条按 Zed 的*行为*重写为自包含实现。
+
+- 查询框成为真正的文本框：`TerminalTab` 保存 UTF-16 的 selection / anchor / cursor / marked range，`InputHandler` 按平台协议读写，并用 `Label` 顺序拼出 before / caret / after（有选区时改画选区底色），因此查询串、光标与选区都可见；IME 走 `prefers_ime_for_printable_keys = true` + `replace_and_mark_text_in_range`，输入法候选窗定位用真实字段 bounds（自定义 `Element` 在 paint 阶段注册 `handle_input`）。搜索条与设置页内联字段共用的 UTF-16 转换（`previous/next_utf16_boundary`、`substring_utf16`、`replace_utf16_range`）从 `settings_ui.rs` 提到新的 `text_edit.rs`，避免 `terminal -> settings_ui` 的依赖。
+- 编辑键在 `on_key_down` 中处理（macOS 的方向键 / 退格经 `doCommandBySelector` 回到 key event）：左右（Shift 扩选）、Home / End、Backspace / Delete、Cmd-A/C/X/V；失败不再整体覆盖查询，多字符查询可正常输入。
+- 匹配语义对齐 Zed 的 `regex_search_for_query` 与 `SearchOptions`（终端只开放 regex）：默认大小写不敏感（pattern 内联 `(?i)`），非 regex 模式先 `regex::escape`；regex 开关为工具条上的 `.*` 按钮；非法 pattern 在输入框旁显示 `Invalid pattern` 而非 `No matches`。
+- 定位能力：扫描完成后按 Zed 的 `active_match_index`（取包含 selection head 或其后最近的匹配，无选区时取最后一个）调用 `terminal_core::activate_match`，即选中并 `scroll_to_point`——滚动缓冲里的匹配也会被拉进视口；匹配高亮沿用 `search_match_background`，活动匹配靠 player selection 颜色区分（与 Zed 终端一致，不额外使用 `search_active_match_background`）。
+- 导航与状态：Enter / Shift-Enter 与工具条左右箭头在匹配间环绕（`match_index_for_direction` 的取模语义），状态显示 `N/M` / `No matches`；Esc 关闭并清空匹配、焦点回到终端；Cmd-F 在搜索条已打开时改为重新聚焦并全选查询（对应 Zed 的 `FocusSearch`）。
+- 结果时效性：每次搜索自增 generation 并 drop 上一个 task，慢扫描不会覆盖新结果；`Event::Wakeup`（新输出 / resize）时重扫以刷新高亮，但**不**重新激活，避免输出流把视口一直拽到匹配处（Zed 的 `MatchesInvalidated` 同样只刷新不滚动）。
+- 视觉修正：搜索条持有焦点时 pane 仍按"活动 pane"渲染（不再整体降到 `INACTIVE_PANE_OPACITY`），只有终端光标回落到非聚焦形状。
+
+跟进修正（2026-09-15，真机反馈「多 pane 的搜索框要正确处理；输入光标不够明显」，并新增右键菜单入口）：
+
+- 多 pane 归属：搜索条原本挂在窗口层（`active_tab()` 决定搜哪个 pane），而左键点击 pane 只移动窗口焦点、不会更新 `active_pane_tab`，于是 bar 与实际焦点脱节（点 B 后 bar 仍指向 A / Cmd-F 把搜索开在 A）。现在：① `Render::render` 开头用 `focused_tab(window, cx)` 把 `active_pane_tab` 与真实窗口焦点对齐（只写缓存、不 notify，幂等）；② 搜索条移进 `render_terminal_pane`，只在该 pane 是活动 pane 时渲染，视觉上贴在它搜索的那个 pane 顶部（`render_terminal_pane` 新增 `active: bool`；最大化 / 单 pane 恒为 true，split 用 `active_pane_tab` 比较）；③ `toggle_search` 改走新增的 `focused_tab_updated`（等价于 `with_focused_tab` 的解析 + 回写），因此 Cmd-F 与右键菜单的 Search 都作用在真正持有焦点的 pane 上。窗口层不再有跨 pane 的搜索条。
+- 光标可见性：caret 由 1px `border_focused` 改为 2px、用 `colors.text`，并且**空查询时也画**（此前只有占位文字，聚焦后没有任何落点提示）；只在字段真正持有焦点时绘制，失焦隐藏（`terminal-search-caret` debug selector 便于测试）。保持常亮而非闪烁：闪烁有 50% 时间不可见，与"更明显"的目标相反。
+- 右键菜单：终端右键菜单在 Copy / Paste / Paste Text / Select All 之后新增 `Search`（复用 `SearchTest` action）。右键本身已把 `active_pane_tab` 指向命中的 pane 并聚焦它，因此菜单里的 Search 一定开在被右键的那个 pane 上。
+
+验证：`cargo test -p terminal_app --lib` 138 passed / 0 failed（在原有 11 个 tab 搜索测试 + 1 个 `text_edit` 测试之上，新增/扩展 window 渲染与多 pane 测试：搜索条与查询字段真实布局、空查询聚焦后出现 2px caret、split 中只有活动 pane 显示自己的 bar 且焦点切走即隐藏、焦点切回即恢复、`SearchTest` 作用在真正持有焦点的 pane 上；`SearchTest` 用例在旧实现下会失败——旧 `active_tab()` 仍指向点击前的 pane）；`cargo test -p terminal_core --lib` 100 passed / 0 failed；`cargo clippy -p terminal_app --all-targets -- --deny warnings`、`cargo fmt --all -- --check`、`git diff --check` 与 `cargo check --workspace --all-targets` 通过。真机视觉与 IME 验收待做。
+
 ## 传输文件支持
 需要考虑是否设计通用的扩展接口
 - rz/sz 支持

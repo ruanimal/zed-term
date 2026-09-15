@@ -10,11 +10,12 @@ use std::{
 };
 
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Pixels, Point, ScrollWheelEvent, Window,
+    App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Pixels, Point,
+    ScrollWheelEvent, Task, Window,
 };
 use settings::Settings as _;
 use terminal_core::{
-    Event, MaybeNavigationTarget, Search, Terminal, TerminalBounds,
+    Event, MaybeNavigationTarget, Range as MatchRange, Search, Terminal, TerminalBounds,
     terminal_settings::TerminalSettings,
 };
 use url::Url;
@@ -22,6 +23,9 @@ use util::ResultExt;
 use util::paths::PathWithPosition;
 
 use super::TerminalScrollHandle;
+use crate::text_edit::{
+    next_utf16_boundary, previous_utf16_boundary, replace_utf16_range, substring_utf16,
+};
 
 fn cursor_is_visible(
     mode: settings::TerminalBlink,
@@ -65,8 +69,24 @@ pub struct TerminalTab {
     /// Active search query and whether the search bar is showing.
     pub search_query: String,
     pub search_active: bool,
+    /// Whether the query is interpreted as a regular expression.
+    pub search_regex: bool,
+    /// UTF-16 selection in the search field, plus the anchor/cursor and the
+    /// IME marked range that the platform input handler reads back.
+    pub(crate) search_selection: StdRange<usize>,
+    pub(crate) search_anchor: usize,
+    pub(crate) search_cursor: usize,
+    pub(crate) search_marked_range: Option<StdRange<usize>>,
     /// Index into `terminal.matches` of the match the user last activated.
     pub active_match: Option<usize>,
+    /// Set when regex mode is on and the query does not compile; the bar shows
+    /// this instead of "No matches" so a broken pattern is distinguishable from
+    /// a pattern that simply has no hits.
+    pub(crate) search_invalid_regex: bool,
+    /// Bumped for every search so results from a superseded query are dropped.
+    search_generation: u64,
+    /// In-flight scan; dropping it cancels work the user has already replaced.
+    search_task: Option<Task<()>>,
     /// Sticky unread bell state, cleared when input is sent to this pane.
     has_bell: bool,
     terminal_blinking_enabled: bool,
@@ -88,7 +108,15 @@ impl TerminalTab {
             ime_state: None,
             search_query: String::new(),
             search_active: false,
+            search_regex: false,
+            search_selection: 0..0,
+            search_anchor: 0,
+            search_cursor: 0,
+            search_marked_range: None,
             active_match: None,
+            search_invalid_regex: false,
+            search_generation: 0,
+            search_task: None,
             has_bell: false,
             terminal_blinking_enabled: false,
             blink_started_at: Instant::now(),
@@ -102,7 +130,14 @@ impl TerminalTab {
                 cx.subscribe(&this.terminal, |this, terminal, event, cx| match event {
                     // PTY output arrives as a Wakeup event, not an `Entity::notify`;
                     // repaint immediately (this is the no-heartbeat path).
-                    Event::Wakeup | Event::TitleChanged | Event::BreadcrumbsChanged => {
+                    Event::Wakeup => {
+                        this.scroll_handle.update(terminal.read(cx));
+                        // New output invalidates both the match positions and the
+                        // active match, so an open search has to rescan.
+                        this.refresh_search_for_output(cx);
+                        cx.notify();
+                    }
+                    Event::TitleChanged | Event::BreadcrumbsChanged => {
                         this.scroll_handle.update(terminal.read(cx));
                         cx.notify();
                     }
@@ -311,93 +346,351 @@ impl TerminalTab {
         cx.notify();
     }
 
-    // Search (§4.4): a minimal search bar backed by `Terminal::find_matches`;
-    // the element already renders `terminal.matches` as highlights.
+    // Search (§4.4). `terminal_core` owns matching, selection and scrolling;
+    // this is the view state for the search bar's text field plus the
+    // navigation that Zed's search bar performs over a searchable item.
 
     pub(crate) fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.search_active = !self.search_active;
         if self.search_active {
-            // Seed the query with the current selection, like Zed's search does
-            let seed = self
-                .terminal
-                .read(cx)
-                .last_content
-                .selection_text
-                .clone()
-                .unwrap_or_default();
-            self.search_query = seed.clone();
-            self.run_search(seed, cx);
+            // `cmd-f` on an open bar re-focuses and re-selects the query instead
+            // of dismissing it, matching Zed's `FocusSearch`.
+            self.select_all_search_text(cx);
             self.search_focus_handle.clone().focus(window, cx);
-        } else {
-            self.search_query.clear();
-            self.active_match = None;
-            self.terminal.update(cx, |term, _| term.matches.clear());
-            self.focus_handle.clone().focus(window, cx);
+            cx.notify();
+            return;
         }
+        self.search_active = true;
+        // Seed the query with the current selection, like Zed's search does.
+        let seed = self
+            .terminal
+            .read(cx)
+            .last_content
+            .selection_text
+            .clone()
+            .unwrap_or_default();
+        self.search_query = seed;
+        self.select_all_search_text(cx);
+        self.run_search(true, cx);
+        self.search_focus_handle.clone().focus(window, cx);
         cx.notify();
     }
 
-    /// Entry point for the search bar's input handler: replaces the whole
-    /// query and re-runs the search.
-    pub(crate) fn update_search_query(&mut self, query: String, cx: &mut Context<Self>) {
-        self.search_query = query.clone();
-        self.active_match = None;
-        self.run_search(query, cx);
-        cx.notify();
-    }
-
-    /// Closes the search bar and clears highlights (bound to Escape). The
-    /// caller moves focus back to the terminal.
-    pub(crate) fn close_search(&mut self, cx: &mut Context<Self>) {
+    /// Closes the search bar, clears the highlights and returns focus to the
+    /// terminal (bound to Escape).
+    pub(crate) fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.search_active {
             return;
         }
         self.search_active = false;
         self.search_query.clear();
+        self.search_selection = 0..0;
+        self.search_anchor = 0;
+        self.search_cursor = 0;
+        self.search_marked_range = None;
         self.active_match = None;
+        self.search_invalid_regex = false;
+        // Invalidate in-flight results so a scan started before the close
+        // cannot repopulate the highlights afterwards.
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_task = None;
         self.terminal.update(cx, |term, _| term.matches.clear());
+        self.focus_handle.clone().focus(window, cx);
         cx.notify();
     }
 
+    /// Replaces the selected range of the query with `text`, moving the caret
+    /// to the end of the insertion. This is the single entry point for both
+    /// platform text input and the editing keys.
+    pub(crate) fn replace_search_text(
+        &mut self,
+        replacement_range: Option<StdRange<usize>>,
+        text: String,
+        new_selected_range: Option<StdRange<usize>>,
+        mark_text: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let current_text = self.search_query.clone();
+        let range = replacement_range
+            .or_else(|| self.search_marked_range.clone())
+            .unwrap_or_else(|| self.search_selection.clone());
+        let range_start = range.start.min(current_text.encode_utf16().count());
+        let (updated_text, cursor) = replace_utf16_range(&current_text, range, &text);
+        self.search_query = updated_text;
+        self.search_marked_range = mark_text
+            .then_some(range_start..cursor)
+            .filter(|range| !range.is_empty());
+        self.search_selection = new_selected_range
+            .map(|range| range_start + range.start..range_start + range.end)
+            .unwrap_or(cursor..cursor);
+        self.search_anchor = self.search_selection.start;
+        self.search_cursor = self.search_selection.end;
+        self.run_search(true, cx);
+    }
+
+    pub(crate) fn move_search_cursor(
+        &mut self,
+        move_left: bool,
+        extend_selection: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let target = if !extend_selection && !self.search_selection.is_empty() {
+            if move_left {
+                self.search_selection.start
+            } else {
+                self.search_selection.end
+            }
+        } else if move_left {
+            previous_utf16_boundary(&self.search_query, self.search_cursor)
+        } else {
+            next_utf16_boundary(&self.search_query, self.search_cursor)
+        };
+        self.update_search_cursor(target, extend_selection, cx);
+    }
+
+    pub(crate) fn move_search_to_boundary(
+        &mut self,
+        move_to_start: bool,
+        extend_selection: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let target = if move_to_start {
+            0
+        } else {
+            self.search_query.encode_utf16().count()
+        };
+        self.update_search_cursor(target, extend_selection, cx);
+    }
+
+    fn update_search_cursor(
+        &mut self,
+        cursor: usize,
+        extend_selection: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let length = self.search_query.encode_utf16().count();
+        let cursor = cursor.min(length);
+        if extend_selection {
+            self.search_cursor = cursor;
+            self.search_selection = if self.search_anchor <= cursor {
+                self.search_anchor..cursor
+            } else {
+                cursor..self.search_anchor
+            };
+        } else {
+            self.search_anchor = cursor;
+            self.search_cursor = cursor;
+            self.search_selection = cursor..cursor;
+        }
+        self.search_marked_range = None;
+        cx.notify();
+    }
+
+    pub(crate) fn delete_search_backward(&mut self, cx: &mut Context<Self>) {
+        self.search_marked_range = None;
+        if self.search_selection.is_empty() {
+            let previous = previous_utf16_boundary(&self.search_query, self.search_cursor);
+            if previous == self.search_cursor {
+                return;
+            }
+            self.search_selection = previous..self.search_cursor;
+        }
+        self.replace_search_text(None, String::new(), None, false, cx);
+    }
+
+    pub(crate) fn delete_search_forward(&mut self, cx: &mut Context<Self>) {
+        self.search_marked_range = None;
+        if self.search_selection.is_empty() {
+            let next = next_utf16_boundary(&self.search_query, self.search_cursor);
+            if next == self.search_cursor {
+                return;
+            }
+            self.search_selection = self.search_cursor..next;
+        }
+        self.replace_search_text(None, String::new(), None, false, cx);
+    }
+
+    pub(crate) fn select_all_search_text(&mut self, cx: &mut Context<Self>) {
+        let length = self.search_query.encode_utf16().count();
+        self.search_selection = 0..length;
+        self.search_anchor = 0;
+        self.search_cursor = length;
+        self.search_marked_range = None;
+        cx.notify();
+    }
+
+    pub(crate) fn copy_search_selection(&self, cx: &mut App) {
+        if self.search_selection.is_empty() {
+            return;
+        }
+        let text = substring_utf16(&self.search_query, self.search_selection.clone());
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
+    pub(crate) fn cut_search_selection(&mut self, cx: &mut Context<Self>) {
+        if self.search_selection.is_empty() {
+            return;
+        }
+        self.copy_search_selection(cx);
+        self.replace_search_text(None, String::new(), None, false, cx);
+    }
+
+    pub(crate) fn paste_search_text(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .map(|text| text.replace(['\n', '\r'], " "))
+        else {
+            return;
+        };
+        self.replace_search_text(None, text, None, false, cx);
+    }
+
+    pub(crate) fn toggle_search_regex(&mut self, cx: &mut Context<Self>) {
+        self.search_regex = !self.search_regex;
+        self.run_search(true, cx);
+    }
+
+    /// Moves to the next (or previous) match, wrapping around the ends.
     pub(crate) fn search_next(&mut self, reverse: bool, cx: &mut Context<Self>) {
         let match_count = self.terminal.read(cx).matches.len();
         if match_count == 0 {
             return;
         }
-        let current = self.active_match.unwrap_or(0);
-        let next = if reverse {
-            (current + match_count - 1) % match_count
-        } else {
-            (current + 1) % match_count
+        let next = match self.active_match {
+            Some(current) if reverse => (current + match_count - 1) % match_count,
+            Some(current) => (current + 1) % match_count,
+            None if reverse => match_count - 1,
+            None => 0,
         };
-        self.active_match = Some(next);
+        self.activate_search_match(next, cx);
+    }
+
+    fn activate_search_match(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.active_match = Some(index);
         self.terminal
-            .update(cx, |term, _| term.activate_match(next));
+            .update(cx, |term, _| term.activate_match(index));
         cx.notify();
     }
 
-    fn run_search(&mut self, query: String, cx: &mut Context<Self>) {
-        if query.is_empty() {
+    fn refresh_search_for_output(&mut self, cx: &mut Context<Self>) {
+        if self.search_active && !self.search_query.is_empty() {
+            // New output repositions the matches but must not pull the viewport
+            // around, so the rescan refreshes highlights without re-activating.
+            self.run_search(false, cx);
+        }
+    }
+
+    fn run_search(&mut self, activate: bool, cx: &mut Context<Self>) {
+        // Every search supersedes the previous one: bump the generation and
+        // drop the earlier task so a slow scan cannot overwrite newer results.
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_task = None;
+        let generation = self.search_generation;
+
+        let searcher = if self.search_query.is_empty()
+            || is_bare_regex_dot(&self.search_query, self.search_regex)
+        {
+            self.search_invalid_regex = false;
+            None
+        } else {
+            match search_for_query(&self.search_query, self.search_regex) {
+                Some(searcher) => {
+                    self.search_invalid_regex = false;
+                    Some(searcher)
+                }
+                // The query is not a valid regular expression.
+                None => {
+                    self.search_invalid_regex = true;
+                    self.active_match = None;
+                    self.terminal.update(cx, |term, _| term.matches.clear());
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+
+        let Some(searcher) = searcher else {
             self.active_match = None;
             self.terminal.update(cx, |term, _| term.matches.clear());
-            return;
-        }
-        let Some(searcher) = Search::new(&regex::escape(&query)) else {
+            cx.notify();
             return;
         };
+
         let terminal = self.terminal.clone();
         let task = terminal.update(cx, |term, cx| term.find_matches(searcher, cx));
-        cx.spawn(async move |this, cx| {
+        self.search_task = Some(cx.spawn(async move |this, cx| {
             let matches = task.await;
             this.update(cx, |tab, cx| {
-                tab.active_match = (!matches.is_empty()).then_some(0);
-                tab.terminal.update(cx, |term, _| term.matches = matches);
-                cx.notify();
+                if tab.search_generation != generation {
+                    return;
+                }
+                tab.apply_search_matches(matches, activate, cx);
             })
             .log_err();
-        })
-        .detach();
+        }));
     }
+
+    fn apply_search_matches(
+        &mut self,
+        matches: Vec<MatchRange>,
+        activate: bool,
+        cx: &mut Context<Self>,
+    ) {
+        // Prefer the match nearest where the caret/selection already is, the
+        // way Zed's searchable items pick the active match.
+        let selection_head = self.terminal.read(cx).selection_head;
+        let active_index = active_match_index(selection_head, &matches);
+        self.active_match = active_index;
+        self.terminal.update(cx, |term, _| {
+            term.matches = matches;
+            if activate && let Some(index) = active_index {
+                term.activate_match(index);
+            }
+        });
+        cx.notify();
+    }
+}
+
+/// A bare `.` in regex mode would match every character on screen, so Zed
+/// treats it as "no query" instead of searching; keep that guard.
+fn is_bare_regex_dot(query: &str, regex: bool) -> bool {
+    regex && query == "."
+}
+
+/// Builds the matcher for a search query.
+///
+/// Zed's terminal search only exposes the regex option and matches
+/// case-insensitively, so case-insensitivity is baked into the pattern and a
+/// literal query is escaped before it becomes a regular expression.
+fn search_for_query(query: &str, regex: bool) -> Option<Search> {
+    let pattern = if regex {
+        query.to_string()
+    } else {
+        regex::escape(query)
+    };
+    Search::new(&format!("(?i){pattern}"))
+}
+
+/// Picks the match to activate once a scan finishes, mirroring Zed's
+/// `TerminalView::active_match_index`: keep the match that contains or starts
+/// after the selection head, falling back to the last match (nearest the
+/// cursor) when there is no selection or nothing follows it.
+fn active_match_index(
+    selection_head: Option<terminal_core::Point>,
+    matches: &[MatchRange],
+) -> Option<usize> {
+    if matches.is_empty() {
+        return None;
+    }
+    let Some(selection_head) = selection_head else {
+        return Some(matches.len() - 1);
+    };
+    matches
+        .iter()
+        .position(|search_match| {
+            search_match.contains(selection_head) || search_match.start() > selection_head
+        })
+        .or(Some(matches.len() - 1))
 }
 
 impl EventEmitter<TerminalTabEvent> for TerminalTab {}
@@ -720,5 +1013,273 @@ mod tests {
             assert!(pane.cursor_visible(cx));
             assert!(pane.blink_started_at.elapsed() < Duration::from_millis(500));
         });
+    }
+
+    fn match_range(start: (i32, usize), end: (i32, usize)) -> MatchRange {
+        MatchRange::new(
+            terminal_core::Point::new(start.0, start.1),
+            terminal_core::Point::new(end.0, end.1),
+        )
+    }
+
+    /// Builds a pane whose grid already contains `output`.
+    fn pane_with_output(cx: &mut gpui::TestAppContext, output: &str) -> Entity<TerminalTab> {
+        let pane = cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            test_pane(cx)
+        });
+        let terminal = cx.update(|cx| pane.read(cx).terminal.clone());
+        cx.update(|cx| {
+            terminal.update(cx, |terminal, cx| {
+                terminal.write_output(output.as_bytes(), cx)
+            });
+        });
+        cx.run_until_parked();
+        pane
+    }
+
+    /// Sets the query through the input path and waits for the scan to land.
+    fn run_query(pane: &Entity<TerminalTab>, query: &str, cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            pane.update(cx, |pane, cx| {
+                pane.search_active = true;
+                pane.replace_search_text(None, query.to_string(), None, false, cx);
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    fn match_count(pane: &Entity<TerminalTab>, cx: &mut gpui::TestAppContext) -> usize {
+        cx.update(|cx| pane.read(cx).terminal.read(cx).matches.len())
+    }
+
+    #[test]
+    fn active_match_index_prefers_the_match_at_or_after_the_selection_head() {
+        let matches = vec![
+            match_range((0, 0), (0, 3)),
+            match_range((1, 0), (1, 3)),
+            match_range((2, 0), (2, 3)),
+        ];
+
+        // No selection: the last match is the one nearest the cursor.
+        assert_eq!(active_match_index(None, &matches), Some(2));
+        // A head inside a match keeps that match.
+        assert_eq!(
+            active_match_index(Some(terminal_core::Point::new(0, 1)), &matches),
+            Some(0)
+        );
+        // The head at a match's end still counts as inside it.
+        assert_eq!(
+            active_match_index(Some(terminal_core::Point::new(1, 3)), &matches),
+            Some(1)
+        );
+        // Past the end of a match: the next one.
+        assert_eq!(
+            active_match_index(Some(terminal_core::Point::new(1, 4)), &matches),
+            Some(2)
+        );
+        // Nothing follows: fall back to the last match.
+        assert_eq!(
+            active_match_index(Some(terminal_core::Point::new(3, 0)), &matches),
+            Some(2)
+        );
+        assert_eq!(
+            active_match_index(Some(terminal_core::Point::new(0, 0)), &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn literal_queries_are_escaped_and_regex_queries_are_not() {
+        // A literal query is escaped, so an unbalanced bracket is still valid.
+        assert!(search_for_query("a(b", false).is_some());
+        // The same query in regex mode is an invalid pattern, not a panic.
+        assert!(search_for_query("a(b", true).is_none());
+        assert!(search_for_query("a.b", true).is_some());
+    }
+
+    #[test]
+    fn a_bare_regex_dot_is_treated_as_no_query() {
+        // `.` would otherwise match every cell on screen.
+        assert!(is_bare_regex_dot(".", true));
+        assert!(!is_bare_regex_dot(".", false));
+        assert!(!is_bare_regex_dot("..", true));
+    }
+
+    #[gpui::test]
+    async fn typed_characters_append_to_the_query(cx: &mut gpui::TestAppContext) {
+        // Regression: the old input handler replaced the whole query with each
+        // keystroke, so only single-character queries were reachable.
+        let pane = pane_with_output(cx, "alpha\r\nbeta\r\n");
+        cx.update(|cx| {
+            pane.update(cx, |pane, cx| {
+                pane.search_active = true;
+                for character in ["b", "e", "t", "a"] {
+                    pane.replace_search_text(None, character.to_string(), None, false, cx);
+                }
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let pane = pane.read(cx);
+            assert_eq!(pane.search_query, "beta");
+            assert_eq!(pane.terminal.read(cx).matches.len(), 1);
+            assert_eq!(pane.active_match, Some(0));
+        });
+    }
+
+    #[gpui::test]
+    async fn literal_search_matches_case_insensitively(cx: &mut gpui::TestAppContext) {
+        let pane = pane_with_output(cx, "Alpha\r\nalpha\r\nALPHA\r\n");
+        run_query(&pane, "alpha", cx);
+        assert_eq!(match_count(&pane, cx), 3);
+    }
+
+    #[gpui::test]
+    async fn regex_toggle_changes_how_the_query_is_matched(cx: &mut gpui::TestAppContext) {
+        let pane = pane_with_output(cx, "a.b\r\naxb\r\n");
+        run_query(&pane, "a.b", cx);
+        // A literal query matches only the line that contains the dot.
+        assert_eq!(match_count(&pane, cx), 1);
+
+        cx.update(|cx| {
+            pane.update(cx, |pane, cx| pane.toggle_search_regex(cx));
+        });
+        cx.run_until_parked();
+        cx.update(|cx| assert!(pane.read(cx).search_regex));
+        assert_eq!(match_count(&pane, cx), 2);
+    }
+
+    #[gpui::test]
+    async fn navigating_matches_wraps_around(cx: &mut gpui::TestAppContext) {
+        let pane = pane_with_output(cx, "x1\r\nx2\r\nx3\r\n");
+        run_query(&pane, "x", cx);
+        let count = match_count(&pane, cx);
+        assert_eq!(count, 3);
+
+        // The scan activates the match nearest the cursor, not index 0.
+        let first = cx
+            .update(|cx| pane.read(cx).active_match)
+            .expect("a match is active");
+        let second = cx.update(|cx| {
+            pane.update(cx, |pane, cx| pane.search_next(false, cx));
+            pane.read(cx).active_match
+        });
+        assert_eq!(second, Some((first + 1) % count));
+
+        // Pressing next on the last match wraps to the first one.
+        let wrapped = cx.update(|cx| {
+            pane.update(cx, |pane, cx| {
+                pane.active_match = Some(count - 1);
+                pane.search_next(false, cx);
+            });
+            pane.read(cx).active_match
+        });
+        assert_eq!(wrapped, Some(0));
+
+        // ...and previous from the first wraps to the last.
+        let wrapped_back = cx.update(|cx| {
+            pane.update(cx, |pane, cx| {
+                pane.active_match = Some(0);
+                pane.search_next(true, cx);
+            });
+            pane.read(cx).active_match
+        });
+        assert_eq!(wrapped_back, Some(count - 1));
+    }
+
+    #[gpui::test]
+    async fn editing_keys_move_the_caret_and_edit_the_query(cx: &mut gpui::TestAppContext) {
+        let pane = pane_with_output(cx, "");
+        cx.update(|cx| {
+            pane.update(cx, |pane, cx| {
+                pane.search_active = true;
+                pane.replace_search_text(None, "abc".to_string(), None, false, cx);
+                // Caret moves before 'c', so backspace removes 'b'.
+                pane.move_search_cursor(true, false, cx);
+                pane.delete_search_backward(cx);
+                assert_eq!(pane.search_query, "ac");
+
+                pane.move_search_to_boundary(false, false, cx);
+                pane.replace_search_text(None, "d".to_string(), None, false, cx);
+                assert_eq!(pane.search_query, "acd");
+
+                // Typing over a select-all selection replaces the whole query.
+                pane.select_all_search_text(cx);
+                pane.replace_search_text(None, "z".to_string(), None, false, cx);
+                assert_eq!(pane.search_query, "z");
+
+                pane.delete_search_backward(cx);
+                assert_eq!(pane.search_query, "");
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn closing_the_bar_clears_the_query_and_highlights(cx: &mut gpui::TestAppContext) {
+        let pane = pane_with_output(cx, "alpha\r\n");
+        run_query(&pane, "alpha", cx);
+        assert_eq!(match_count(&pane, cx), 1);
+
+        let window = cx.add_empty_window();
+        window.update(|window, cx| {
+            pane.update(cx, |pane, cx| pane.close_search(window, cx));
+        });
+
+        cx.update(|cx| {
+            let pane = pane.read(cx);
+            assert!(!pane.search_active);
+            assert!(pane.search_query.is_empty());
+            assert!(pane.active_match.is_none());
+            assert!(pane.terminal.read(cx).matches.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    async fn activating_a_match_in_scrollback_scrolls_it_into_view(cx: &mut gpui::TestAppContext) {
+        let mut output = String::new();
+        for line in 0..80 {
+            output.push_str(&format!("line-{line}\r\n"));
+        }
+        let pane = pane_with_output(cx, &output);
+        run_query(&pane, "line-0", cx);
+        assert_eq!(match_count(&pane, cx), 1);
+
+        // `activate_match` only queues selection and scrolling; the terminal
+        // applies them on the next sync, which a frame normally drives.
+        let window = cx.add_empty_window();
+        window.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.terminal
+                    .update(cx, |terminal, cx| terminal.sync(window, cx));
+            });
+        });
+
+        cx.update(|cx| {
+            let terminal = pane.read(cx).terminal.read(cx);
+            assert!(
+                terminal.last_content().display_offset > 0,
+                "the active match should be scrolled out of the tail"
+            );
+            assert!(!terminal.last_content().scrolled_to_bottom);
+        });
+    }
+
+    #[gpui::test]
+    async fn new_output_is_rescanned_while_the_bar_is_open(cx: &mut gpui::TestAppContext) {
+        let pane = pane_with_output(cx, "alpha\r\n");
+        run_query(&pane, "beta", cx);
+        assert_eq!(match_count(&pane, cx), 0);
+
+        let terminal = cx.update(|cx| pane.read(cx).terminal.clone());
+        cx.update(|cx| {
+            terminal.update(cx, |terminal, cx| terminal.write_output(b"beta\r\n", cx));
+        });
+        cx.run_until_parked();
+
+        assert_eq!(match_count(&pane, cx), 1);
     }
 }

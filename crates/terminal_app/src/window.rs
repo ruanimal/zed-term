@@ -521,13 +521,24 @@ impl TerminalWindowView {
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut TerminalTab, &mut Context<TerminalTab>),
     ) {
-        let Some(tab) = self.focused_tab(window, cx) else {
+        let Some(tab) = self.focused_tab_updated(window, cx) else {
             return;
         };
+        tab.update(cx, f);
+    }
+
+    /// Resolves the pane that actually holds window focus and records it as the
+    /// active pane, so later actions target the same pane.
+    fn focused_tab_updated(
+        &mut self,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Option<Entity<TerminalTab>> {
+        let tab = self.focused_tab(window, cx)?;
         if let Some(active) = self.tabs.get_mut(self.active_tab_index) {
             active.active_pane_tab = Some(tab.clone());
         }
-        tab.update(cx, f);
+        Some(tab)
     }
 
     /// Returns the focused pane's terminal of the active tab.
@@ -658,7 +669,12 @@ impl TerminalWindowView {
     }
 
     fn toggle_search(&mut self, _: &SearchTest, window: &mut Window, cx: &mut Context<Self>) {
-        self.with_active_tab(cx, |tab, cx| tab.toggle_search(window, cx));
+        // Search the pane the user is actually in: after a left-click the
+        // tracked active pane can lag behind real focus.
+        let Some(tab) = self.focused_tab_updated(window, cx) else {
+            return;
+        };
+        tab.update(cx, |tab, cx| tab.toggle_search(window, cx));
     }
 
     fn show_character_palette(
@@ -1243,6 +1259,7 @@ impl TerminalWindowView {
                 .action("Paste", Box::new(terminal_core::Paste))
                 .action("Paste Text", Box::new(terminal_core::PasteText))
                 .action("Select All", Box::new(terminal_core::SelectAll))
+                .action("Search", Box::new(SearchTest))
                 .action("Clear", Box::new(terminal_core::Clear))
                 // Single-pane tab (no split): the only close entry is the tab.
                 // In split layout `Close Pane` above is the per-pane close.
@@ -1615,54 +1632,85 @@ fn render_terminal_pane(
     terminal: Entity<Terminal>,
     tab: Entity<TerminalTab>,
     focus: FocusHandle,
+    active: bool,
     window: &mut Window,
     cx: &mut Context<TerminalWindowView>,
 ) -> AnyElement {
     let cursor_visible = tab.read(cx).cursor_visible(cx);
     let scroll_handle = tab.read(cx).scroll_handle.clone();
     let scrollbar_id = tab.entity_id();
+    let pane_id = tab.entity_id();
     let colors = cx.theme().colors();
     let focused = focus.is_focused(window);
-    let content_opacity = if focused {
+    let search_active = tab.read(cx).search_active;
+    // The pane stays visually active while its own search bar holds focus; only
+    // the terminal cursor falls back to its unfocused shape.
+    let search_focused = tab.read(cx).search_focus_handle.is_focused(window);
+    let pane_focused = focused || (search_active && search_focused);
+    let content_opacity = if pane_focused {
         1.0
     } else {
         crate::terminal::INACTIVE_PANE_OPACITY
     };
-    let background_color = if focused {
+    let background_color = if pane_focused {
         colors.terminal_background
     } else {
         colors.terminal_ansi_black
     };
+    // The bar lives at the top of the pane it searches and is only shown for
+    // the pane the user is actually in, so a split never displays a bar bound
+    // to a different terminal.
+    let search_bar = (search_active && active).then(|| TerminalSearchBar::new(tab.clone()));
+
     div()
-        .id(("terminal-pane", tab.entity_id()))
+        .id(("terminal-pane", pane_id))
         .relative()
         .size_full()
+        .flex()
+        .flex_col()
         .bg(background_color)
+        .when_some(search_bar, |this, search_bar| this.child(search_bar))
         .child(
             div()
-                .size_full()
-                .opacity(content_opacity)
-                .child(TerminalElement::new(
-                    terminal,
-                    tab,
-                    focus.clone(),
-                    focused,
-                    cursor_visible,
-                )),
-        )
-        .custom_scrollbars(
-            Scrollbars::for_settings::<TerminalScrollbarSettingsWrapper>()
-                .id(("terminal-scrollbar", scrollbar_id))
-                .show_along(ScrollAxes::Vertical)
-                .tracked_scroll_handle(&scroll_handle),
-            window,
-            cx,
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    div()
+                        .size_full()
+                        .opacity(content_opacity)
+                        .child(TerminalElement::new(
+                            terminal,
+                            tab,
+                            focus,
+                            focused,
+                            cursor_visible,
+                        )),
+                )
+                .custom_scrollbars(
+                    Scrollbars::for_settings::<TerminalScrollbarSettingsWrapper>()
+                        .id(("terminal-scrollbar", scrollbar_id))
+                        .show_along(ScrollAxes::Vertical)
+                        .tracked_scroll_handle(&scroll_handle),
+                    window,
+                    cx,
+                ),
         )
         .into_any_element()
 }
 
 impl Render for TerminalWindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Left-clicking a pane focuses its terminal without going through an
+        // action, so refresh the tab's active pane from real window focus
+        // before anything reads it. Without this, actions (and the search bar)
+        // keep targeting the pane that was active before the click.
+        if let Some(focused) = self.focused_tab(window, cx)
+            && let Some(active) = self.tabs.get_mut(self.active_tab_index)
+        {
+            active.active_pane_tab = Some(focused);
+        }
+
         // Content area: the active tab's split tree, a zoomed pane, or a
         // single terminal when that tab has no splits yet. Zoom does not
         // mutate the tree, so restoring it preserves divider positions.
@@ -1678,17 +1726,14 @@ impl Render for TerminalWindowView {
                     .is_some_and(|root| root.contains_tab(pane))
             })
         });
-        let search_active = active_tab
-            .as_ref()
-            .map(|pane| pane.read(cx).search_active)
-            .unwrap_or(false);
+        let active_pane = active_window_tab.and_then(|tab| tab.active_pane_tab.clone());
         let content = if let Some(tab) = maximized_pane {
             let terminal = tab.read(cx).terminal.clone();
             let focus = tab.read(cx).focus_handle.clone();
             div()
                 .relative()
                 .size_full()
-                .child(render_terminal_pane(terminal, tab, focus, window, cx))
+                .child(render_terminal_pane(terminal, tab, focus, true, window, cx))
                 .child(
                     div().absolute().top_2().right_2().child(
                         IconButton::new("restore-zoomed-pane", IconName::Minimize)
@@ -1725,7 +1770,8 @@ impl Render for TerminalWindowView {
                 .map(|tab| {
                     let terminal = tab.read(cx).terminal.clone();
                     let focus = tab.read(cx).focus_handle.clone();
-                    render_terminal_pane(terminal, tab, focus, window, cx)
+                    let active = active_pane.as_ref() == Some(&tab);
+                    render_terminal_pane(terminal, tab, focus, active, window, cx)
                 })
                 .collect();
             let mut pane_elements = pane_elements.into_iter();
@@ -1746,7 +1792,7 @@ impl Render for TerminalWindowView {
                 .map(|tab| {
                     let terminal = tab.read(cx).terminal.clone();
                     let focus = tab.read(cx).focus_handle.clone();
-                    render_terminal_pane(terminal, tab, focus, window, cx)
+                    render_terminal_pane(terminal, tab, focus, true, window, cx)
                 })
                 .unwrap_or_else(|| {
                     div()
@@ -1774,9 +1820,6 @@ impl Render for TerminalWindowView {
                             .bg(cx.theme().colors().element_background)
                             .child(Label::new(error).size(LabelSize::Small).color(Color::Error)),
                     )
-                })
-                .when_some(active_tab.clone().filter(|_| search_active), |this, tab| {
-                    this.child(TerminalSearchBar::new(tab, cx.weak_entity()).into_any_element())
                 })
                 .child(div().flex_1().min_h_0().child(content))
                 .on_action(cx.listener(Self::copy))
@@ -3133,5 +3176,204 @@ mod tests {
                 );
             });
         }
+    }
+
+    /// The search bar must actually lay out its query field: the text field is
+    /// a custom element that registers GPUI's input handler during paint, so a
+    /// layout regression would silently break typing.
+    #[gpui::test]
+    fn the_search_bar_lays_out_its_query_field(cx: &mut gpui::TestAppContext) {
+        struct SearchBarHost {
+            tab: Entity<TerminalTab>,
+        }
+
+        impl Render for SearchBarHost {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                TerminalSearchBar::new(self.tab.clone())
+            }
+        }
+
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let pane = cx.update(|cx| {
+            let settings = TerminalSettings::get_global(cx).clone();
+            new_test_pane(&settings, 70_000, cx)
+        });
+        cx.update(|cx| {
+            pane.update(cx, |pane, _| {
+                pane.search_active = true;
+                pane.search_query = "needle".to_string();
+            });
+        });
+
+        let (_host, window) = cx.add_window_view(|_, _| SearchBarHost { tab: pane.clone() });
+
+        let bar = window
+            .debug_bounds("terminal-search-bar")
+            .expect("the search bar should render");
+        assert!(bar.size.width > px(0.));
+        let field = window
+            .debug_bounds("terminal-search-query")
+            .expect("the query field should render");
+        assert!(field.size.width > px(0.));
+
+        // An empty, unfocused field draws no caret; the placeholder alone must
+        // not be the only thing the user sees once the field owns focus.
+        assert!(window.debug_bounds("terminal-search-caret").is_none());
+
+        pane.update_in(window, |pane, window, cx| {
+            pane.search_focus_handle.clone().focus(window, cx);
+            cx.notify();
+        });
+        window.run_until_parked();
+
+        let caret = window
+            .debug_bounds("terminal-search-caret")
+            .expect("a focused field shows a caret even when empty");
+        assert_eq!(caret.size.width, px(2.));
+        assert!(caret.size.height > px(0.));
+    }
+
+    /// Builds a window view over a horizontal split of `first` and `second`,
+    /// with `first` recorded as the active pane.
+    fn split_window_view(
+        first: Entity<TerminalTab>,
+        second: Entity<TerminalTab>,
+        cx: &mut gpui::TestAppContext,
+    ) -> (Entity<TerminalWindowView>, &mut gpui::VisualTestContext) {
+        let mut split_root = SplitNode::leaf(first.clone());
+        assert!(split_root.split(&first, second, SplitDirection::Right));
+        let tabs = vec![WindowTab {
+            split_root: Some(split_root),
+            active_pane_tab: Some(first),
+            maximized_pane_tab: None,
+        }];
+
+        cx.add_window_view(move |_, cx| {
+            let live_settings =
+                LiveTerminalSettings::from_settings(TerminalSettings::get_global(cx));
+            let settings_subscription =
+                cx.observe_global::<settings::SettingsStore>(TerminalWindowView::settings_changed);
+            TerminalWindowView {
+                focus_handle: cx.focus_handle(),
+                tabs,
+                active_tab_index: 0,
+                context_menu: None,
+                context_navigation_target: None,
+                titlebar_mouse_down: std::cell::Cell::new(false),
+                tab_bar_scroll_handle: ScrollHandle::new(),
+                tab_bar_has_overflow: false,
+                tab_bar_can_scroll_left: false,
+                tab_bar_can_scroll_right: false,
+                terminal_error: None,
+                live_settings,
+                _subscriptions: vec![settings_subscription],
+            }
+        })
+    }
+
+    fn init_test_theme(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+    }
+
+    /// A split layout must show the search bar inside the pane it searches and
+    /// only for the pane the user is in; a left-click focuses a pane without
+    /// going through an action, which used to leave the bar pointing at the
+    /// previously active pane.
+    #[gpui::test]
+    fn only_the_focused_pane_shows_its_search_bar(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        let (first, second) = cx.update(|cx| {
+            let settings = TerminalSettings::get_global(cx).clone();
+            (
+                new_test_pane(&settings, 90_000, cx),
+                new_test_pane(&settings, 90_001, cx),
+            )
+        });
+        let (_view, window) = split_window_view(first.clone(), second.clone(), cx);
+        window.run_until_parked();
+
+        // Open search in the first pane.
+        first.update_in(window, |pane, window, cx| pane.toggle_search(window, cx));
+        window.run_until_parked();
+        assert!(
+            window.debug_bounds("terminal-search-bar").is_some(),
+            "the pane that opened search should show its bar"
+        );
+
+        // Focusing the other pane takes the bar away with it.
+        second.update_in(window, |pane, window, cx| {
+            pane.focus_handle.clone().focus(window, cx);
+        });
+        window.run_until_parked();
+        assert!(
+            window.debug_bounds("terminal-search-bar").is_none(),
+            "a pane without an open search must not show the other pane's bar"
+        );
+
+        // Returning to the first pane restores its own search bar.
+        first.update_in(window, |pane, window, cx| {
+            pane.focus_handle.clone().focus(window, cx);
+        });
+        window.run_until_parked();
+        assert!(
+            window.debug_bounds("terminal-search-bar").is_some(),
+            "the search bar should follow focus back to its pane"
+        );
+    }
+
+    /// `cmd-f` (and the context menu's Search entry, which dispatches the same
+    /// action) must open search in the pane that actually holds focus, not in
+    /// the pane that was active before a plain left-click moved focus.
+    #[gpui::test]
+    fn search_targets_the_pane_that_holds_focus(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        let (first, second) = cx.update(|cx| {
+            let settings = TerminalSettings::get_global(cx).clone();
+            (
+                new_test_pane(&settings, 91_000, cx),
+                new_test_pane(&settings, 91_001, cx),
+            )
+        });
+        let (view, window) = split_window_view(first.clone(), second.clone(), cx);
+        window.run_until_parked();
+
+        // The split starts with `first` recorded as active; clicking into
+        // `second` only moves window focus.
+        second.update_in(window, |pane, window, cx| {
+            pane.focus_handle.clone().focus(window, cx);
+        });
+        window.run_until_parked();
+
+        view.update_in(window, |view, window, cx| {
+            view.toggle_search(&SearchTest, window, cx);
+        });
+        window.run_until_parked();
+
+        window.update(|_, cx| {
+            assert!(
+                second.read(cx).search_active,
+                "search should open in the focused pane"
+            );
+            assert!(
+                !first.read(cx).search_active,
+                "search must not open in the previously active pane"
+            );
+        });
+        assert!(
+            window.debug_bounds("terminal-search-bar").is_some(),
+            "the focused pane should show the search bar"
+        );
     }
 }
