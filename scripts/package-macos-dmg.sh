@@ -133,8 +133,13 @@ if [[ ! -x "$binary_path" ]]; then
     exit 1
 fi
 source_icon="$workspace_root/crates/terminal_app/resources/app-icon@2x.png"
+quarantine_script_path="$workspace_root/scripts/remove-macos-quarantine.command"
 if [[ ! -f "$source_icon" ]]; then
     echo "Application icon not found at $source_icon" >&2
+    exit 1
+fi
+if [[ ! -f "$quarantine_script_path" ]]; then
+    echo "Quarantine removal script not found at $quarantine_script_path" >&2
     exit 1
 fi
 
@@ -142,11 +147,14 @@ mkdir -p "$(dirname -- "$output_path")"
 temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/zedterm-package.XXXXXX")"
 trap 'rm -rf "$temporary_directory"' EXIT
 
-app_path="$temporary_directory/ZedTerm.app"
+dmg_root="$temporary_directory/dmg-root"
+app_path="$dmg_root/ZedTerm.app"
 contents_path="$app_path/Contents"
 iconset_path="$temporary_directory/ZedTerm.iconset"
+quarantine_command_path="$dmg_root/Remove ZedTerm Quarantine.command"
 rm -f "$output_path"
 mkdir -p "$contents_path/MacOS" "$contents_path/Resources" "$iconset_path"
+ln -s /Applications "$dmg_root/Applications"
 
 cp "$binary_path" "$contents_path/MacOS/terminal-app"
 chmod 755 "$contents_path/MacOS/terminal-app"
@@ -196,9 +204,15 @@ cat > "$contents_path/Info.plist" <<PLIST
 </plist>
 PLIST
 
+cp "$quarantine_script_path" "$quarantine_command_path"
+chmod 755 "$quarantine_command_path"
+
 plutil -lint "$contents_path/Info.plist"
 test -f "$contents_path/Resources/ZedTerm.icns"
-hdiutil create -volname "ZedTerm $version" -srcfolder "$app_path" \
+test -L "$dmg_root/Applications"
+test "$(readlink "$dmg_root/Applications")" = "/Applications"
+test -x "$quarantine_command_path"
+hdiutil create -volname "ZedTerm $version" -srcfolder "$dmg_root" \
     -ov -format UDZO "$output_path"
 hdiutil imageinfo "$output_path" >/dev/null
 
