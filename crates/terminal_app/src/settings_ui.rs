@@ -5559,6 +5559,13 @@ pub(crate) mod tests {
             cx.debug_bounds("keymap-edit-0").is_some(),
             "the first binding row should offer an edit control"
         );
+
+        // A `Send Text` / `Send Keystroke` row must say what it sends: the
+        // action name alone leaves the user unable to tell the bindings apart.
+        assert!(
+            cx.debug_bounds("keymap-payload").is_some(),
+            "some Send row should explain the payload it sends"
+        );
     }
 
     /// Builds a fake HTTP client that answers the extension catalog request.

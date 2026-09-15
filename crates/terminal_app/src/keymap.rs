@@ -47,6 +47,30 @@ pub struct ActionInformation {
     pub humanized_name: SharedString,
     pub arguments: Option<SharedString>,
     pub documentation: Option<&'static str>,
+    pub payload: Option<ActionPayload>,
+}
+
+impl ActionInformation {
+    /// The hover text for a row: the action, what it sends, and its doc comment.
+    /// Returns `None` for plain rows, which would only repeat what the row
+    /// already shows.
+    fn tooltip(&self) -> Option<SharedString> {
+        if self.payload.is_none() && self.documentation.is_none() {
+            return None;
+        }
+        let mut text = String::from(self.name);
+        if let Some(payload) = &self.payload {
+            text.push('\n');
+            text.push_str(&payload.description());
+            text.push_str("\nkeymap.json value: ");
+            text.push_str(&payload.json);
+        }
+        if let Some(documentation) = self.documentation {
+            text.push('\n');
+            text.push_str(documentation);
+        }
+        Some(text.into())
+    }
 }
 
 impl ProcessedBinding {
@@ -350,6 +374,115 @@ fn is_displayable_action(action_name: &str) -> bool {
     )
 }
 
+/// Which of the two parameterized terminal actions a payload belongs to.
+#[derive(Clone, Copy, PartialEq)]
+enum PayloadKind {
+    /// `SendKeystroke`: parsed and translated by the terminal, like a real key.
+    Keystroke,
+    /// `SendText`: written to the PTY byte for byte.
+    Text,
+}
+
+/// The value a parameterized action was bound with, described in words.
+///
+/// `Send Keystroke` / `Send Text` rows name the action but hide its payload, so
+/// without this the list gives the user no way to tell `cmd-backspace` from
+/// `ctrl-backspace` — both just read "Send Keystroke".
+#[derive(Clone)]
+pub struct ActionPayload {
+    /// The payload as JSON, i.e. exactly the value `keymap.json` stores.
+    json: SharedString,
+    /// Platform-style rendering, e.g. `Ctrl-U` or `ESC [3;5~`.
+    display: SharedString,
+    /// What a readline-style shell does with the payload, when known.
+    effect: Option<&'static str>,
+}
+
+impl ActionPayload {
+    fn new(kind: PayloadKind, value: &str, cx: &App) -> Self {
+        let display = match kind {
+            PayloadKind::Keystroke => gpui::Keystroke::parse(value)
+                .map(|keystroke| {
+                    ui::text_for_keystrokes(std::slice::from_ref(&keystroke), cx).into()
+                })
+                .unwrap_or_else(|_| value.to_string().into()),
+            PayloadKind::Text => control_sequence_text(value),
+        };
+        Self {
+            json: serde_json::Value::from(value).to_string().into(),
+            display,
+            effect: shell_effect(kind, value),
+        }
+    }
+
+    /// One line explaining the binding, e.g.
+    /// `Sends Ctrl-U — clear to start of line`.
+    pub fn description(&self) -> SharedString {
+        match self.effect {
+            Some(effect) => format!("Sends {} — {effect}", self.display).into(),
+            None => format!("Sends {}", self.display).into(),
+        }
+    }
+}
+
+/// Renders the bytes of a `SendText` payload the way a terminal names them, so
+/// `\u{1b}[3;5~` reads as `ESC [3;5~` instead of an invisible escape character.
+fn control_sequence_text(text: &str) -> SharedString {
+    let mut rendered = String::with_capacity(text.len() + 8);
+    for character in text.chars() {
+        match character {
+            '\u{1b}' => rendered.push_str("ESC "),
+            '\u{7f}' => rendered.push_str("DEL "),
+            '\r' => rendered.push_str("CR "),
+            '\n' => rendered.push_str("LF "),
+            '\t' => rendered.push_str("TAB "),
+            // Caret notation, as `cat -v`/`stty` would print it.
+            character if (character as u32) < 0x20 => {
+                rendered.push('^');
+                rendered.push((character as u8 ^ 0x40) as char);
+                rendered.push(' ');
+            }
+            character => rendered.push(character),
+        }
+    }
+    rendered.trim_end().into()
+}
+
+/// The shell effect of the readline/xterm sequences the built-in bindings send.
+/// Effects are only asserted for payloads whose meaning is fixed by readline.
+fn shell_effect(kind: PayloadKind, value: &str) -> Option<&'static str> {
+    match kind {
+        PayloadKind::Keystroke => match value.to_ascii_lowercase().as_str() {
+            "ctrl-u" => Some("clear to start of line"),
+            "ctrl-k" => Some("delete to end of line"),
+            "ctrl-a" => Some("move to start of line"),
+            "ctrl-e" => Some("move to end of line"),
+            "ctrl-w" => Some("delete word before cursor"),
+            _ => None,
+        },
+        PayloadKind::Text => match value {
+            "\u{1b}d" | "\u{1b}[3;5~" => Some("delete word after cursor"),
+            "\u{1b}b" => Some("move back one word"),
+            "\u{1b}f" => Some("move forward one word"),
+            _ => None,
+        },
+    }
+}
+
+/// Reads the payload out of a `SendText`/`SendKeystroke` binding. The built-in
+/// bindings are built with `KeyBinding::new`, which stores no `action_input`,
+/// so the value has to come from the action itself.
+fn payload_for_action(action: &dyn gpui::Action, cx: &App) -> Option<ActionPayload> {
+    let any = action.as_any();
+    if let Some(crate::SendKeystroke(keystroke)) = any.downcast_ref::<crate::SendKeystroke>() {
+        return Some(ActionPayload::new(PayloadKind::Keystroke, keystroke, cx));
+    }
+    if let Some(crate::SendText(text)) = any.downcast_ref::<crate::SendText>() {
+        return Some(ActionPayload::new(PayloadKind::Text, text, cx));
+    }
+    None
+}
+
 /// Snapshot of the terminal app's bindings, split into displayable rows.
 pub fn process_bindings(cx: &App) -> Vec<ProcessedBinding> {
     let key_bindings = cx.key_bindings();
@@ -382,7 +515,8 @@ pub fn process_bindings(cx: &App) -> Vec<ProcessedBinding> {
             .predicate()
             .map(|predicate| predicate.to_string().into());
 
-        let action_name = key_binding.action().name();
+        let action = key_binding.action();
+        let action_name = action.name();
         if !is_displayable_action(action_name) {
             continue;
         }
@@ -390,6 +524,8 @@ pub fn process_bindings(cx: &App) -> Vec<ProcessedBinding> {
 
         let keystroke_text: SharedString =
             ui::text_for_keybinding_keystrokes(key_binding.keystrokes(), cx).into();
+
+        let payload = payload_for_action(action, cx);
 
         processed_bindings.push(ProcessedBinding::Mapped(
             Box::new(KeybindInformation {
@@ -403,8 +539,14 @@ pub fn process_bindings(cx: &App) -> Vec<ProcessedBinding> {
             Box::new(ActionInformation {
                 name: action_name,
                 humanized_name: humanize_action_name(action_name),
-                arguments: key_binding.action_input(),
+                // Default bindings carry no `action_input`, so fall back to the
+                // action's own value: without it, rebinding a `Send Keystroke`
+                // row would write the action name with no argument.
+                arguments: key_binding
+                    .action_input()
+                    .or_else(|| payload.as_ref().map(|payload| payload.json.clone())),
                 documentation: action_documentation.get(action_name).copied(),
+                payload,
             }),
         ));
     }
@@ -415,6 +557,7 @@ pub fn process_bindings(cx: &App) -> Vec<ProcessedBinding> {
             humanized_name: humanize_action_name(action_name),
             arguments: None,
             documentation: action_documentation.get(action_name).copied(),
+            payload: None,
         })));
     }
 
@@ -439,6 +582,7 @@ struct KeybindingEditor {
     index: Option<usize>,
     action_name: &'static str,
     action_arguments: Option<SharedString>,
+    payload: Option<ActionPayload>,
     existing_keystrokes: Vec<gpui::KeybindingKeystroke>,
     existing_context: Option<String>,
     existing_source: KeybindSource,
@@ -596,6 +740,7 @@ impl KeymapTab {
         };
         let action_name = binding.action().name;
         let action_arguments = binding.action().arguments.clone();
+        let payload = binding.action().payload.clone();
         let existing_keystrokes = binding.keystrokes().unwrap_or_default().to_vec();
         let existing_context = binding.context_text().map(|context| context.to_string());
         let existing_source = binding.source().unwrap_or(KeybindSource::User);
@@ -614,6 +759,7 @@ impl KeymapTab {
             index: (!binding.is_unbound()).then_some(index),
             action_name,
             action_arguments,
+            payload,
             existing_keystrokes,
             existing_context: existing_context.clone(),
             existing_source,
@@ -805,6 +951,7 @@ impl KeymapTab {
         };
         let action_label = humanize_action_name(editor.action_name);
         let context = editor.context.clone();
+        let payload_description = editor.payload.as_ref().map(ActionPayload::description);
 
         v_flex()
             .id("keymap-editor")
@@ -820,6 +967,13 @@ impl KeymapTab {
                 })
                 .size(LabelSize::Small),
             )
+            .when_some(payload_description, |this, description| {
+                this.child(
+                    Label::new(description)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+            })
             .child(editor.keystrokes.clone())
             .child(
                 Label::new(
@@ -969,6 +1123,16 @@ impl KeymapTab {
                             ),
                     ),
             )
+            .child(
+                h_flex().px_8().py_1().child(
+                    Label::new(
+                        "Send Keystroke replays a keystroke through the terminal, \
+                         Send Text writes its value to the shell byte for byte.",
+                    )
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+                ),
+            )
             .when_some(status, |this, (message, is_success)| {
                 this.child(
                     h_flex()
@@ -1032,6 +1196,9 @@ impl KeymapTab {
             .gap_3()
             .items_center()
             .hover(|style| style.bg(colors.ghost_element_hover))
+            .when_some(action.tooltip(), |row, tooltip| {
+                row.tooltip(move |_, cx| ui::Tooltip::simple(tooltip.clone(), cx))
+            })
             .child(
                 v_flex()
                     .flex_1()
@@ -1041,7 +1208,14 @@ impl KeymapTab {
                         Label::new(action.name)
                             .size(LabelSize::Small)
                             .color(Color::Muted),
-                    ),
+                    )
+                    .when_some(action.payload.as_ref(), |this, payload| {
+                        this.child(
+                            div()
+                                .debug_selector(|| "keymap-payload".to_string())
+                                .child(Label::new(payload.description()).size(LabelSize::Small)),
+                        )
+                    }),
             )
             .child(
                 div().flex_none().min_w_24().child(
@@ -1233,12 +1407,199 @@ mod tests {
     }
 
     #[test]
+    fn send_text_payloads_render_escape_bytes_readably() {
+        assert_eq!(control_sequence_text("\u{1b}d"), "ESC d");
+        assert_eq!(control_sequence_text("\u{1b}[3;5~"), "ESC [3;5~");
+        assert_eq!(control_sequence_text("plain"), "plain");
+        // Control characters use caret notation rather than a raw byte.
+        assert_eq!(control_sequence_text("\u{1}"), "^A");
+    }
+
+    #[test]
+    fn known_payloads_carry_a_shell_effect() {
+        assert_eq!(
+            shell_effect(PayloadKind::Keystroke, "Ctrl-U"),
+            Some("clear to start of line")
+        );
+        assert_eq!(
+            shell_effect(PayloadKind::Keystroke, "ctrl-w"),
+            Some("delete word before cursor")
+        );
+        assert_eq!(
+            shell_effect(PayloadKind::Text, "\u{1b}b"),
+            Some("move back one word")
+        );
+        assert_eq!(shell_effect(PayloadKind::Keystroke, "ctrl-y"), None);
+    }
+
+    /// Every `Send Keystroke` / `Send Text` row has to say what it sends: the
+    /// action name alone leaves the user unable to tell `cmd-backspace` from
+    /// `ctrl-backspace`. The payload also has to survive rebinding, which the
+    /// built-in `KeyBinding::new` bindings would otherwise lose.
+    #[gpui::test]
+    fn send_bindings_describe_their_payload(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            settings::init(cx);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            crate::bind_default_keys(cx);
+        });
+
+        let rows = cx.update(|cx| {
+            process_bindings(cx)
+                .into_iter()
+                .filter_map(|binding| {
+                    let action = binding.action();
+                    matches!(
+                        action.name,
+                        "terminal_app::SendText" | "terminal_app::SendKeystroke"
+                    )
+                    .then(|| {
+                        (
+                            action.name,
+                            action.payload.clone(),
+                            action.arguments.clone(),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+
+        assert!(
+            !rows.is_empty(),
+            "the built-in keymap binds Send Text / Send Keystroke"
+        );
+        for (name, payload, arguments) in &rows {
+            let payload = payload
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} should expose its payload, not just its name"));
+            assert!(
+                payload.description().starts_with("Sends "),
+                "{name} should describe what it sends, got {:?}",
+                payload.description()
+            );
+            assert_eq!(
+                arguments.as_ref(),
+                Some(&payload.json),
+                "{name} should carry its payload into the editor"
+            );
+        }
+
+        // The default shell-line-editing bindings are explained in words, not
+        // just repeated as a raw keystroke.
+        let described = rows
+            .iter()
+            .filter(|(_, payload, _)| {
+                payload
+                    .as_ref()
+                    .and_then(|payload| payload.effect)
+                    .is_some()
+            })
+            .count();
+        assert_eq!(
+            described,
+            rows.len(),
+            "every shipped Send binding should carry an effect"
+        );
+    }
+
+    #[test]
     fn context_predicates_compare_independently_of_operand_order() {
         let parse = |source: &str| gpui::KeyBindingContextPredicate::parse(source).unwrap();
         assert!(normalized_ctx_eq(&parse("a && b"), &parse("b && a")));
         assert!(normalized_ctx_eq(&parse("a || b"), &parse("b || a")));
         assert!(!normalized_ctx_eq(&parse("a && b"), &parse("a || b")));
         assert!(!normalized_ctx_eq(&parse("a"), &parse("b")));
+    }
+
+    /// Regression: rebinding a built-in `Send Keystroke` row must keep the
+    /// string it sends. The value is stored on the action, not in the binding's
+    /// `action_input`, so losing it would write a bare action name that fails
+    /// to load.
+    #[gpui::test]
+    async fn rebinding_a_send_binding_keeps_its_payload(cx: &mut TestAppContext) {
+        use std::path::Path;
+
+        cx.update(|cx| {
+            settings::init(cx);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            crate::bind_default_keys(cx);
+        });
+
+        let (action_arguments, existing_keystrokes) = cx.update(|cx| {
+            process_bindings(cx)
+                .into_iter()
+                .find_map(|binding| {
+                    let action = binding.action();
+                    (action.arguments.as_deref() == Some("\"ctrl-u\"")).then(|| {
+                        (
+                            action
+                                .arguments
+                                .clone()
+                                .expect("a Send Keystroke row exposes its argument"),
+                            binding.keystrokes().expect("the row is bound").to_vec(),
+                        )
+                    })
+                })
+                .expect("the built-in keymap binds ctrl-u through Send Keystroke")
+        });
+
+        let fake_fs = fs::FakeFs::new(cx.background_executor.clone());
+        fake_fs
+            .insert_tree(
+                Path::new("/config"),
+                serde_json::json!({ "keymap.json": "[]\n" }),
+            )
+            .await;
+        let fs: Arc<dyn fs::Fs> = fake_fs;
+
+        let pending = PendingKeybindWrite {
+            action_name: "terminal_app::SendKeystroke",
+            action_arguments: Some(action_arguments.clone()),
+            existing_keystrokes,
+            existing_context: Some("TerminalWindow".to_string()),
+            existing_source: KeybindSource::Default,
+            creating: false,
+            new_keystrokes: vec![gpui::KeybindingKeystroke::from_keystroke(
+                gpui::Keystroke::parse("ctrl-alt-u").unwrap(),
+            )],
+            new_context: Some("TerminalWindow".to_string()),
+        };
+
+        let (keyboard_mapper, deprecated_aliases) = cx.update(|cx| {
+            (
+                cx.keyboard_mapper().clone(),
+                cx.deprecated_actions_to_preferred_actions().clone(),
+            )
+        });
+
+        let updated =
+            write_keybinding_file(pending, &fs, keyboard_mapper.as_ref(), &deprecated_aliases)
+                .await
+                .expect("writing the keybinding should succeed");
+
+        let parsed = settings::parse_json_with_comments::<serde_json::Value>(&updated)
+            .expect("the rewritten keymap must stay valid JSONC");
+        let action = parsed
+            .as_array()
+            .expect("the keymap root is an array")
+            .iter()
+            .filter_map(|section| section.get("bindings"))
+            .filter_map(|bindings| bindings.as_object())
+            .flat_map(|bindings| bindings.values())
+            .find(|value| {
+                value
+                    .as_array()
+                    .and_then(|action| action.first())
+                    .and_then(|name| name.as_str())
+                    == Some("terminal_app::SendKeystroke")
+            })
+            .cloned()
+            .expect("the override should have been written");
+        assert_eq!(
+            action,
+            serde_json::json!(["terminal_app::SendKeystroke", "ctrl-u"]),
+            "the written action must keep the payload it sends"
+        );
     }
 
     /// End-to-end check that a rebind rewrites `keymap.json` with a user
