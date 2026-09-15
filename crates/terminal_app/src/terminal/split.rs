@@ -18,6 +18,28 @@ const DIVIDER_SIZE: Pixels = px(1.);
 /// Smallest allowed flex weight, keeping a leaf visible during a drag.
 const MIN_FLEX: f32 = 0.05;
 
+/// Colors a divider draws with. Copied out of the theme up front because
+/// rendering children needs a mutable `App`.
+#[derive(Clone, Copy)]
+struct DividerColors {
+    line: gpui::Hsla,
+    /// Backdrop of an unfocused pane.
+    pane_backdrop: gpui::Hsla,
+    /// Color a terminal pane paints over that backdrop.
+    pane_content: gpui::Hsla,
+}
+
+impl DividerColors {
+    fn new(cx: &App) -> Self {
+        let colors = cx.theme().colors();
+        Self {
+            line: colors.pane_group_border,
+            pane_backdrop: colors.terminal_ansi_black,
+            pane_content: colors.terminal_ansi_background,
+        }
+    }
+}
+
 /// A split direction, mirroring Zed's `SplitDirection`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitDirection {
@@ -261,7 +283,7 @@ impl SplitNode {
                 flexes,
                 children,
             } => {
-                let divider_color = cx.theme().colors().pane_group_border;
+                let divider_colors = DividerColors::new(cx);
                 let axis_for_id = *axis;
                 let axis_for_drag = *axis;
                 let container = gpui::div().size_full().flex();
@@ -292,7 +314,7 @@ impl SplitNode {
                             axis_path: axis_path.to_vec(),
                             divider_index: index,
                         };
-                        let divider = render_divider(*axis, divider_color)
+                        let divider = render_divider(*axis, divider_colors)
                             .id(gpui::ElementId::NamedInteger(
                                 format!("{axis_for_id:?}:{axis_path:?}").into(),
                                 index as u64,
@@ -471,20 +493,30 @@ fn flex_weight(flexes: &[f32], index: usize) -> f32 {
     flexes.get(index).copied().unwrap_or(1.).max(MIN_FLEX)
 }
 
-fn render_divider(axis: Axis, color: gpui::Hsla) -> gpui::Div {
+fn render_divider(axis: Axis, colors: DividerColors) -> gpui::Div {
+    // The line is centered in the hit box: with a bare `div()` (which lays out
+    // as a block) `justify_center`/`items_center` are ignored, leaving the line
+    // flush against one edge of the hit box and the remaining gutter showing
+    // whatever is painted behind it.
     let divider = match axis {
         Axis::Horizontal => gpui::div()
             .flex_none()
             .w(DIVIDER_HITBOX)
             .h_full()
-            .items_center()
-            .child(gpui::div().w(DIVIDER_SIZE).h_full().bg(color)),
+            .flex()
+            .flex_row()
+            .justify_center()
+            .child(unfocused_pane_backdrop(colors))
+            .child(gpui::div().w(DIVIDER_SIZE).h_full().bg(colors.line)),
         Axis::Vertical => gpui::div()
             .flex_none()
             .w_full()
             .h(DIVIDER_HITBOX)
+            .flex()
+            .flex_col()
             .justify_center()
-            .child(gpui::div().w_full().h(DIVIDER_SIZE).bg(color)),
+            .child(unfocused_pane_backdrop(colors))
+            .child(gpui::div().w_full().h(DIVIDER_SIZE).bg(colors.line)),
     };
 
     let divider = match axis {
@@ -492,6 +524,24 @@ fn render_divider(axis: Axis, color: gpui::Hsla) -> gpui::Div {
         Axis::Vertical => divider.cursor_row_resize(),
     };
     divider.block_mouse_except_scroll()
+}
+
+/// Fills a divider's hit box with the color an unfocused pane shows, so the
+/// hit box's extra width does not expose the window background. The window
+/// background is the focused pane's color, so an unpainted hit box reads as a
+/// gap between the line and the unfocused pane - an artifact whose visibility
+/// depends on how far a theme's dimmed pane strays from its background.
+fn unfocused_pane_backdrop(colors: DividerColors) -> gpui::Div {
+    gpui::div()
+        .absolute()
+        .inset_0()
+        .bg(colors.pane_backdrop)
+        .child(
+            gpui::div()
+                .size_full()
+                .bg(colors.pane_content)
+                .opacity(crate::terminal::INACTIVE_PANE_OPACITY),
+        )
 }
 
 thread_local! {
@@ -526,4 +576,120 @@ pub(crate) fn drag_anchor() -> Option<Pixels> {
 /// Rewrites the anchor to `position` after a resize step.
 pub(crate) fn update_drag_anchor(position: Pixels) {
     DRAG_ANCHOR.with(|cell| cell.set(Some(position)));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use gpui::{
+        Along as _, AnyWindowHandle, AppContext as _, Axis, Bounds, Context, IntoElement,
+        ParentElement as _, Render, Styled as _, TestAppContext, Window, div, px, relative,
+    };
+
+    use super::{DIVIDER_HITBOX, DIVIDER_SIZE, DividerColors, render_divider};
+
+    #[derive(Default)]
+    struct LaidOut {
+        divider: Option<Bounds<gpui::Pixels>>,
+        divider_children: Vec<Bounds<gpui::Pixels>>,
+    }
+
+    struct SplitAxis {
+        axis: Axis,
+        laid_out: Rc<RefCell<LaidOut>>,
+    }
+
+    impl Render for SplitAxis {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let colors = DividerColors {
+                line: gpui::black(),
+                pane_backdrop: gpui::black(),
+                pane_content: gpui::white(),
+            };
+            let divider_laid_out = self.laid_out.clone();
+            let container_laid_out = self.laid_out.clone();
+            let divider =
+                render_divider(self.axis, colors).on_children_prepainted(move |bounds, _, _| {
+                    divider_laid_out.borrow_mut().divider_children = bounds;
+                });
+
+            let container = div()
+                .size_full()
+                .flex()
+                .on_children_prepainted(move |bounds, _, _| {
+                    container_laid_out.borrow_mut().divider = bounds.get(1).copied();
+                })
+                .child(pane())
+                .child(divider)
+                .child(pane());
+            match self.axis {
+                Axis::Horizontal => container.flex_row(),
+                Axis::Vertical => container.flex_col(),
+            }
+        }
+    }
+
+    fn pane() -> gpui::Div {
+        div()
+            .flex_grow(1.)
+            .flex_basis(relative(0.))
+            .min_w_0()
+            .min_h_0()
+            .child(div().size_full().bg(gpui::red()))
+    }
+
+    /// Lays out a two-pane split and returns the divider's bounds together
+    /// with the bounds of its children (`[backdrop, line]`).
+    fn lay_out_divider(
+        axis: Axis,
+        cx: &mut TestAppContext,
+    ) -> (Bounds<gpui::Pixels>, Vec<Bounds<gpui::Pixels>>) {
+        let laid_out = Rc::new(RefCell::new(LaidOut::default()));
+        let window = cx.add_window({
+            let laid_out = laid_out.clone();
+            move |_, _| SplitAxis { axis, laid_out }
+        });
+        cx.update_window(AnyWindowHandle::from(window), |_, window, cx| {
+            window.draw(cx).clear(cx)
+        })
+        .unwrap();
+
+        let laid_out = laid_out.borrow();
+        (
+            laid_out.divider.expect("divider was laid out"),
+            laid_out.divider_children.clone(),
+        )
+    }
+
+    #[gpui::test]
+    fn divider_line_is_centered_in_its_hit_box(cx: &mut TestAppContext) {
+        for axis in [Axis::Horizontal, Axis::Vertical] {
+            let (divider, children) = lay_out_divider(axis, cx);
+            let [backdrop, line] = children[..] else {
+                panic!("divider should lay out a backdrop and a line");
+            };
+
+            // The hit box is wider than the line so the divider stays grabbable.
+            // `justify_center` only works on a flex container, so a divider that
+            // is not flexible leaves the line flush against one edge.
+            let hit_box_length = divider.size.along(axis);
+            let line_length = line.size.along(axis);
+            assert_eq!(hit_box_length, DIVIDER_HITBOX);
+            assert_eq!(line_length, DIVIDER_SIZE);
+            let centered = (hit_box_length - line_length) / 2.;
+            let offset = (line.origin.along(axis) - divider.origin.along(axis)).abs();
+            assert!(
+                (offset - centered).abs() <= px(0.5),
+                "line should sit centered in the hit box on {axis:?}, but was offset by {offset:?}"
+            );
+
+            // Anything the line does not cover has to be painted by the divider
+            // itself, otherwise the window background shows through between the
+            // line and the unfocused pane.
+            assert_eq!(backdrop.origin, divider.origin);
+            assert_eq!(backdrop.size, divider.size);
+        }
+    }
 }

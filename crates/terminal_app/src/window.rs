@@ -1623,7 +1623,11 @@ fn render_terminal_pane(
     let scrollbar_id = tab.entity_id();
     let colors = cx.theme().colors();
     let focused = focus.is_focused(window);
-    let content_opacity = if focused { 1.0 } else { 0.72 };
+    let content_opacity = if focused {
+        1.0
+    } else {
+        crate::terminal::INACTIVE_PANE_OPACITY
+    };
     let background_color = if focused {
         colors.terminal_background
     } else {
