@@ -109,6 +109,15 @@
 
 验证：`cargo test -p terminal_app --lib` 78 passed / 0 failed（新增 8 个 keymap 测试：humanize、上下文谓词等价、内置绑定自冲突、action 覆盖完整性、用户覆盖判定、搜索过滤、写回往返、无绑定走 Add 路径；另有 4 个回归测试覆盖上述 4 个缺陷）；`cargo check -p terminal_app --all-targets` 通过；`cargo clippy -p terminal_app --all-targets -- --deny warnings` 与 `cargo fmt --all -- --check` 通过（`window_chrome.rs` 两条既有 lint 与本次改动无关，已 stash 验证为改动前同样失败）。真机视觉与交互验收待做。
 
+补充：解绑/恢复与 keymap.json 查重（2026-09-16）：
+
+- 解绑/恢复：行内垃圾桶把该行写进 `keymap.json`（默认绑定走 `unbind` 抑制，用户绑定则删除用户条目），被抑制的绑定行仍然列出并保留原按键（变暗 + tooltip「This shortcut is unbound」），行尾的 Restore 按钮删除对应 `unbind` 记录即可恢复。完全没有绑定的 action 显示 `Unbound`，context 列留空（不再显示 `<global>`，避免误以为有一条全局绑定）。
+- 每一行都保留铅笔：禁用行可直接改键（走 `Replace`，旧键保持解绑、新键生效），不必先恢复再改。
+- 用户覆盖的解绑：如果删除用户条目会让低优先级绑定接管同一个按键（同按键 + 同 action + 同 context），则改写为 `unbind` 记录，否则点垃圾桶后快捷键仍会生效。
+- `KeymapFile::update_keybinding` 查重：`Add` 与抑制用的 `unbind` 在追加前都先检查文件里是否已有等价条目，重复编辑不再产生内容相同的重复 section（`test_keymap_remove_duplicate_binding` 注释里记录的"编辑器改出重复绑定"就是这个原因，该测试只覆盖了删除重复项，未覆盖产生重复项）。查重对绑定条目还要求 `use_key_equivalents` 一致。
+
+验证：`cargo test -p settings --lib` 32 passed / 0 failed、`cargo test -p terminal_app --lib` 145 passed / 0 failed（新增 7 个测试：禁用行的按键/铅笔/恢复/无垃圾桶渲染与一次改键、用户覆盖解绑写 `unbind`、解绑判定抽成 `unbind_needs_suppression` 并覆盖重复按键与独占按键、`<global>` 判定、重复 `unbind` 与重复绑定均不追加、改绑禁用行后 `unbind` 恰好一条）；`cargo clippy -p settings -p terminal_app --all-targets` 与 `cargo fmt --all -- --check` 通过。真机视觉与交互验收待做。
+
 ## Pane 方向性跳转
 
 当前已有按叶子视觉序循环的 ActivateNextPane/ActivatePreviousPane。可增加 ActivatePaneInDirection，根据 pane 几何位置选择上、下、左、右方向的最近邻。

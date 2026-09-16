@@ -1074,54 +1074,89 @@ impl KeymapFile {
             from,
         } = operation
         {
-            let mut value = serde_json::Map::with_capacity(4);
-            if let Some(context) = keybinding.context {
-                value.insert("context".to_string(), context.into());
-            }
             let use_key_equivalents = from.and_then(|from| {
                 let action_value = from.action_value().context("Failed to serialize action value. `use_key_equivalents` on new keybinding may be incorrect.").log_err()?;
                 let binding_location =
                     find_binding(&keymap, &from, &action_value, keyboard_mapper, deprecated_aliases)?;
                 Some(keymap.0[binding_location.index].use_key_equivalents)
             }).unwrap_or(false);
-            if use_key_equivalents {
-                value.insert("use_key_equivalents".to_string(), true.into());
-            }
 
-            value.insert("bindings".to_string(), {
-                let mut bindings = serde_json::Map::new();
-                let action = keybinding.action_value()?;
-                bindings.insert(keybinding.keystrokes_unparsed(), action);
-                bindings.into()
+            let action = keybinding.action_value()?;
+
+            // An entry equivalent to this one may already be in the file, and
+            // appending it anyway would leave two identical bindings behind,
+            // which the keymap list then reports as a binding conflicting with
+            // itself. Earlier steps may have rewritten the text, so the check has
+            // to run against the current contents rather than the first parse.
+            let current = Self::parse(&keymap_contents).context("Failed to parse keymap")?;
+            let already_present = find_binding(
+                &current,
+                &keybinding,
+                &action,
+                keyboard_mapper,
+                deprecated_aliases,
+            )
+            .is_some_and(|location| {
+                matches!(location.kind, BindingKind::Binding)
+                    && current.0[location.index].use_key_equivalents == use_key_equivalents
             });
 
-            let (replace_range, replace_value) = append_top_level_array_value_in_json_text(
-                &keymap_contents,
-                &value.into(),
-                tab_size,
-            );
-            keymap_contents.replace_range(replace_range, &replace_value);
+            if !already_present {
+                let mut value = serde_json::Map::with_capacity(4);
+                if let Some(context) = keybinding.context {
+                    value.insert("context".to_string(), context.into());
+                }
+                if use_key_equivalents {
+                    value.insert("use_key_equivalents".to_string(), true.into());
+                }
+
+                value.insert("bindings".to_string(), {
+                    let mut bindings = serde_json::Map::new();
+                    bindings.insert(keybinding.keystrokes_unparsed(), action);
+                    bindings.into()
+                });
+
+                let (replace_range, replace_value) = append_top_level_array_value_in_json_text(
+                    &keymap_contents,
+                    &value.into(),
+                    tab_size,
+                );
+                keymap_contents.replace_range(replace_range, &replace_value);
+            }
         }
 
         if let Some(suppression_unbind) = suppression_unbind {
-            let mut value = serde_json::Map::with_capacity(2);
-            if let Some(context) = suppression_unbind.context {
-                value.insert("context".to_string(), context.into());
-            }
-            value.insert("unbind".to_string(), {
-                let mut unbind = serde_json::Map::new();
-                unbind.insert(
-                    suppression_unbind.keystrokes_unparsed(),
-                    suppression_unbind.action_value()?,
+            let action = suppression_unbind.action_value()?;
+
+            // Re-suppressing a keystroke that already carries this exact `unbind`
+            // record would append a second, identical section. `keymap` is still
+            // an accurate view of them: no step above removes an `unbind` entry.
+            let already_unbound = find_binding(
+                &keymap,
+                &suppression_unbind,
+                &action,
+                keyboard_mapper,
+                deprecated_aliases,
+            )
+            .is_some_and(|location| matches!(location.kind, BindingKind::Unbind));
+
+            if !already_unbound {
+                let mut value = serde_json::Map::with_capacity(2);
+                if let Some(context) = suppression_unbind.context {
+                    value.insert("context".to_string(), context.into());
+                }
+                value.insert("unbind".to_string(), {
+                    let mut unbind = serde_json::Map::new();
+                    unbind.insert(suppression_unbind.keystrokes_unparsed(), action);
+                    unbind.into()
+                });
+                let (replace_range, replace_value) = append_top_level_array_value_in_json_text(
+                    &keymap_contents,
+                    &value.into(),
+                    tab_size,
                 );
-                unbind.into()
-            });
-            let (replace_range, replace_value) = append_top_level_array_value_in_json_text(
-                &keymap_contents,
-                &value.into(),
-                tab_size,
-            );
-            keymap_contents.replace_range(replace_range, &replace_value);
+                keymap_contents.replace_range(replace_range, &replace_value);
+            }
         }
 
         return Ok(keymap_contents);
@@ -2672,6 +2707,92 @@ mod tests {
               }
             ]
             "#
+            .unindent(),
+        );
+    }
+
+    /// Rebinding a disabled keybinding re-suppresses the keystroke it was
+    /// disabled with. That `unbind` record is already in the file, so the rewrite
+    /// must not append a second, identical section.
+    #[test]
+    fn test_keymap_remove_does_not_duplicate_an_existing_unbind() {
+        zlog::init_test();
+
+        let keymap = r#"[
+            {
+                "context": "SomeContext",
+                "unbind": {
+                    "a": "foo::baz"
+                }
+            }
+        ]"#
+        .unindent();
+
+        check_keymap_update(
+            keymap.clone(),
+            KeybindUpdateOperation::Remove {
+                target: KeybindUpdateTarget {
+                    context: Some("SomeContext"),
+                    keystrokes: &parse_keystrokes("a"),
+                    action_name: "foo::baz",
+                    action_arguments: None,
+                },
+                target_keybind_source: KeybindSource::Default,
+            },
+            keymap,
+        );
+    }
+
+    /// Adding a keybinding the file already carries would duplicate it, which the
+    /// keymap list reads back as a binding conflicting with itself. The same
+    /// keystroke in another context is still a new entry.
+    #[test]
+    fn test_keymap_add_does_not_duplicate_an_existing_binding() {
+        zlog::init_test();
+
+        let keymap = r#"[
+            {
+                "context": "SomeContext",
+                "bindings": {
+                    "a": "foo::baz"
+                }
+            }
+        ]"#
+        .unindent();
+
+        check_keymap_update(
+            keymap.clone(),
+            KeybindUpdateOperation::add(KeybindUpdateTarget {
+                context: Some("SomeContext"),
+                keystrokes: &parse_keystrokes("a"),
+                action_name: "foo::baz",
+                action_arguments: None,
+            }),
+            keymap.clone(),
+        );
+
+        check_keymap_update(
+            keymap,
+            KeybindUpdateOperation::add(KeybindUpdateTarget {
+                context: Some("SomeOtherContext"),
+                keystrokes: &parse_keystrokes("a"),
+                action_name: "foo::baz",
+                action_arguments: None,
+            }),
+            r#"[
+                {
+                    "context": "SomeContext",
+                    "bindings": {
+                        "a": "foo::baz"
+                    }
+                },
+                {
+                    "context": "SomeOtherContext",
+                    "bindings": {
+                        "a": "foo::baz"
+                    }
+                }
+            ]"#
             .unindent(),
         );
     }

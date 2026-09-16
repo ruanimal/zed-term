@@ -74,8 +74,25 @@ impl ActionInformation {
 }
 
 impl ProcessedBinding {
+    /// Whether the row has no binding at all. A binding that an `unbind` entry
+    /// suppressed is still *mapped*: it keeps its keystrokes, context and
+    /// source, and can be restored, so it must not be treated as unbound.
     pub fn is_unbound(&self) -> bool {
         matches!(self, Self::Unmapped(_))
+    }
+
+    pub fn is_unbound_by_unbind(&self) -> bool {
+        matches!(
+            self,
+            Self::Mapped(keybind, _) if keybind.is_unbound_by_unbind
+        )
+    }
+
+    /// Whether the row has a keystroke that can be taken away: an action with no
+    /// binding has nothing to unbind, and one an `unbind` entry already
+    /// suppressed has nothing left to unbind either.
+    pub fn can_unbind(&self) -> bool {
+        !self.is_unbound() && !self.is_unbound_by_unbind()
     }
 
     pub fn keystrokes(&self) -> Option<&[gpui::KeybindingKeystroke]> {
@@ -101,6 +118,17 @@ impl ProcessedBinding {
         match self {
             Self::Mapped(keybind, _) => keybind.context.as_ref(),
             Self::Unmapped(_) => None,
+        }
+    }
+
+    /// The context to show for the row. A binding without a predicate really is
+    /// global, but an action with no binding has no context at all: labelling it
+    /// `<global>` would read as if it had one.
+    pub fn display_context(&self) -> String {
+        match self.context_text() {
+            Some(context) => context.to_string(),
+            None if self.is_unbound() => String::new(),
+            None => "<global>".to_string(),
         }
     }
 
@@ -209,6 +237,9 @@ impl ConflictState {
             let ProcessedBinding::Mapped(keybind, _) = binding else {
                 continue;
             };
+            if keybind.is_unbound_by_unbind {
+                continue;
+            }
             let predicate = keybind
                 .context
                 .as_deref()
@@ -776,6 +807,88 @@ impl KeymapTab {
         cx.notify();
     }
 
+    /// Whether deleting this row's `keymap.json` entry would hand its keystroke
+    /// back to a lower-precedence binding that uses the exact same keystroke,
+    /// action and context — in which case "unbind" must write an `unbind` record
+    /// rather than only delete the entry.
+    fn unbind_needs_suppression(&self, index: usize) -> bool {
+        let Some(ProcessedBinding::Mapped(keybind, action)) = self.bindings.get(index) else {
+            return false;
+        };
+        keybind.source == KeybindSource::User
+            && self.bindings.iter().any(|other| {
+                other
+                    .source()
+                    .is_some_and(|source| source != KeybindSource::User)
+                    && other.action().name == action.name
+                    && other.keystrokes().is_some_and(|other_keystrokes| {
+                        keystrokes_match_exactly(other_keystrokes, &keybind.keystrokes)
+                    })
+                    && contexts_equivalent(other.context_text(), keybind.context.as_ref())
+            })
+    }
+
+    pub fn unbind(&mut self, index: usize, cx: &mut Context<super::settings_ui::SettingsPage>) {
+        if self.write_in_progress {
+            return;
+        }
+
+        let Some(ProcessedBinding::Mapped(keybind, action)) = self.bindings.get(index) else {
+            return;
+        };
+        if keybind.is_unbound_by_unbind {
+            return;
+        }
+
+        let pending = PendingKeybindUnbind {
+            action_name: action.name,
+            action_arguments: action.arguments.clone(),
+            existing_keystrokes: keybind.keystrokes.to_vec(),
+            existing_context: keybind.context.as_deref().map(str::to_string),
+            existing_source: keybind.source,
+            write_suppression_unbind: self.unbind_needs_suppression(index),
+        };
+        self.write_unbinding(
+            pending,
+            "Unbinding keybinding…",
+            "Keybinding unbound.",
+            "Could not unbind keybinding",
+            cx,
+        );
+    }
+
+    pub fn restore(&mut self, index: usize, cx: &mut Context<super::settings_ui::SettingsPage>) {
+        if self.write_in_progress {
+            return;
+        }
+
+        let Some(ProcessedBinding::Mapped(keybind, action)) = self.bindings.get(index) else {
+            return;
+        };
+        if !keybind.is_unbound_by_unbind {
+            return;
+        }
+
+        let pending = PendingKeybindUnbind {
+            action_name: action.name,
+            action_arguments: action.arguments.clone(),
+            existing_keystrokes: keybind.keystrokes.to_vec(),
+            existing_context: keybind.context.as_deref().map(str::to_string),
+            // The row's own source is the default we want to bring back; the
+            // entry to delete is the user's `unbind` record, and `User` is what
+            // makes `Remove` rewrite keymap.json instead of adding a new unbind.
+            existing_source: KeybindSource::User,
+            write_suppression_unbind: false,
+        };
+        self.write_unbinding(
+            pending,
+            "Restoring keybinding…",
+            "Default keybinding restored.",
+            "Could not restore keybinding",
+            cx,
+        );
+    }
+
     /// Validates the in-progress edit, warns about conflicts, and writes `keymap.json`.
     pub fn commit_edit(&mut self, cx: &mut Context<super::settings_ui::SettingsPage>) {
         let Some(editor) = self.editing.as_ref() else {
@@ -866,6 +979,44 @@ impl KeymapTab {
                     Err(error) => {
                         page.fail_keymap_write(format!("Could not save keybinding: {error}"), cx)
                     }
+                }
+            })
+            .log_err();
+        });
+        completion.detach();
+    }
+
+    fn write_unbinding(
+        &mut self,
+        pending: PendingKeybindUnbind,
+        progress_message: &'static str,
+        success_message: &'static str,
+        error_prefix: &'static str,
+        cx: &mut Context<super::settings_ui::SettingsPage>,
+    ) {
+        if self.write_in_progress {
+            return;
+        }
+        self.write_in_progress = true;
+        self.status = Some((progress_message.into(), true));
+        cx.notify();
+
+        let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
+        let keyboard_mapper = cx.keyboard_mapper().clone();
+        let deprecated_aliases = cx.deprecated_actions_to_preferred_actions().clone();
+
+        let completion = cx.spawn(async move |page, cx| {
+            let result =
+                write_unbinding_file(pending, &fs, keyboard_mapper.as_ref(), &deprecated_aliases)
+                    .await;
+            page.update(cx, |page, cx| {
+                page.keymap_tab.write_in_progress = false;
+                match result {
+                    Ok(contents) => {
+                        page.apply_user_keymap(&contents, cx);
+                        page.keymap_tab.clear_write_status(success_message);
+                    }
+                    Err(error) => page.fail_keymap_write(format!("{error_prefix}: {error}"), cx),
                 }
             })
             .log_err();
@@ -1163,10 +1314,15 @@ impl KeymapTab {
         let colors = cx.theme().colors();
         let conflict = self.conflict_state.conflict_for_idx(index);
         let action = binding.action();
+        // A binding that an `unbind` entry suppressed keeps its keystrokes, and
+        // showing them dimmed is the only way to tell which key stopped working.
+        // "Unbound" stays reserved for actions that have no keystrokes at all.
+        let is_disabled_by_unbind = binding.is_unbound_by_unbind();
 
         let keystroke_control: AnyElement = match binding.keystrokes() {
             Some(keystrokes) => {
                 ui::KeyBinding::from_keystrokes(Rc::from(keystrokes.to_vec()), false)
+                    .disabled(is_disabled_by_unbind)
                     .into_any_element()
             }
             None => Label::new("Unbound")
@@ -1175,9 +1331,7 @@ impl KeymapTab {
                 .into_any_element(),
         };
 
-        let context_label = binding
-            .context_text()
-            .map_or_else(|| "<global>".to_string(), |context| context.to_string());
+        let context_label = binding.display_context();
 
         let source_label = match binding.source() {
             Some(KeybindSource::User) => "user",
@@ -1185,6 +1339,16 @@ impl KeymapTab {
             Some(KeybindSource::Vim) => "vim",
             Some(KeybindSource::Default) => "default",
             Some(KeybindSource::Unknown) | None => "",
+        };
+
+        let can_unbind = binding.can_unbind();
+
+        // Dimming alone does not tell the user the key is dead, so the row says
+        // it, alongside whatever the action itself has to say.
+        let row_tooltip: Option<SharedString> = match (is_disabled_by_unbind, action.tooltip()) {
+            (true, Some(tooltip)) => Some(format!("This shortcut is unbound\n{tooltip}").into()),
+            (true, None) => Some("This shortcut is unbound".into()),
+            (false, tooltip) => tooltip,
         };
 
         let mut row = h_flex()
@@ -1196,7 +1360,7 @@ impl KeymapTab {
             .gap_3()
             .items_center()
             .hover(|style| style.bg(colors.ghost_element_hover))
-            .when_some(action.tooltip(), |row, tooltip| {
+            .when_some(row_tooltip, |row, tooltip| {
                 row.tooltip(move |_, cx| ui::Tooltip::simple(tooltip.clone(), cx))
             })
             .child(
@@ -1241,6 +1405,34 @@ impl KeymapTab {
         }
 
         row.child(div().flex_none().min_w_32().child(keystroke_control))
+            .when(is_disabled_by_unbind, |row| {
+                row.child(
+                    div()
+                        .debug_selector(move || format!("keymap-restore-{index}"))
+                        .child(
+                            IconButton::new(format!("keymap-restore-{index}"), IconName::RotateCcw)
+                                .tooltip(Tooltip::text("Restore default keybinding"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.keymap_tab.restore(index, cx);
+                                })),
+                        ),
+                )
+            })
+            .when(can_unbind, |row| {
+                row.child(
+                    div()
+                        .debug_selector(move || format!("keymap-unbind-{index}"))
+                        .child(
+                            IconButton::new(format!("keymap-unbind-{index}"), IconName::Trash)
+                                .tooltip(Tooltip::text("Unbind keybinding"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.keymap_tab.unbind(index, cx);
+                                })),
+                        ),
+                )
+            })
+            // Every row keeps the pencil: a disabled binding is changed by
+            // rebinding it, exactly like any other row, without restoring first.
             .child(
                 div()
                     .debug_selector(move || format!("keymap-edit-{index}"))
@@ -1260,6 +1452,17 @@ impl KeymapTab {
     }
 }
 
+struct PendingKeybindUnbind {
+    action_name: &'static str,
+    action_arguments: Option<SharedString>,
+    existing_keystrokes: Vec<gpui::KeybindingKeystroke>,
+    existing_context: Option<String>,
+    existing_source: KeybindSource,
+    /// Write an `unbind` record for the keystroke as well, so a
+    /// lower-precedence binding cannot take it over.
+    write_suppression_unbind: bool,
+}
+
 /// Owned form of a pending keymap write, so it can cross into the async task.
 struct PendingKeybindWrite {
     action_name: &'static str,
@@ -1270,6 +1473,57 @@ struct PendingKeybindWrite {
     creating: bool,
     new_keystrokes: Vec<gpui::KeybindingKeystroke>,
     new_context: Option<String>,
+}
+
+async fn write_unbinding_file(
+    pending: PendingKeybindUnbind,
+    fs: &Arc<dyn fs::Fs>,
+    keyboard_mapper: &dyn PlatformKeyboardMapper,
+    deprecated_aliases: &HashMap<&'static str, &'static str>,
+) -> anyhow::Result<String> {
+    let keymap_contents = KeymapFile::load_keymap_file(fs)
+        .await
+        .map_err(|error| error.context("Failed to load keymap file"))?;
+    let tab_size = settings::infer_json_indent_size(&keymap_contents);
+    let target = settings::KeybindUpdateTarget {
+        context: pending.existing_context.as_deref(),
+        keystrokes: &pending.existing_keystrokes,
+        action_name: pending.action_name,
+        action_arguments: pending.action_arguments.as_deref(),
+    };
+
+    let updated = KeymapFile::update_keybinding(
+        settings::KeybindUpdateOperation::Remove {
+            target: target.clone(),
+            target_keybind_source: pending.existing_source,
+        },
+        keymap_contents,
+        tab_size,
+        keyboard_mapper,
+        deprecated_aliases,
+    )
+    .map_err(|error| error.context("Could not update keymap"))?;
+
+    let updated = if pending.write_suppression_unbind {
+        KeymapFile::update_keybinding(
+            settings::KeybindUpdateOperation::Remove {
+                target,
+                target_keybind_source: KeybindSource::Default,
+            },
+            updated,
+            tab_size,
+            keyboard_mapper,
+            deprecated_aliases,
+        )
+        .map_err(|error| error.context("Could not suppress the default keybinding"))?
+    } else {
+        updated
+    };
+
+    fs.write(paths::keymap_file().as_path(), updated.as_bytes())
+        .await
+        .map_err(|error| error.context("Failed to write keymap file"))?;
+    Ok(updated)
 }
 
 async fn write_keybinding_file(
@@ -1357,6 +1611,19 @@ fn conflict_description(conflict: &ConflictOrigin) -> String {
             conflict.override_source.name().to_lowercase()
         ),
         None => "This binding takes precedence".to_string(),
+    }
+}
+
+/// Whether two bindings' contexts address the same predicates, ignoring the
+/// order operands were written in.
+fn contexts_equivalent(left: Option<&SharedString>, right: Option<&SharedString>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => gpui::KeyBindingContextPredicate::parse(left)
+            .ok()
+            .zip(gpui::KeyBindingContextPredicate::parse(right).ok())
+            .is_some_and(|(left, right)| normalized_ctx_eq(&left, &right)),
+        _ => false,
     }
 }
 
@@ -1602,6 +1869,257 @@ mod tests {
         );
     }
 
+    /// A default binding is disabled through a user `unbind` entry, and restoring it
+    /// removes that entry instead of trying to remove the built-in binding.
+    #[gpui::test]
+    async fn unbinding_and_restoring_a_default_binding_updates_keymap_json(
+        cx: &mut TestAppContext,
+    ) {
+        use std::path::Path;
+
+        cx.update(|cx| {
+            settings::init(cx);
+            crate::bind_default_keys(cx);
+        });
+
+        let fake_fs = fs::FakeFs::new(cx.background_executor.clone());
+        fake_fs
+            .insert_tree(
+                Path::new("/config"),
+                serde_json::json!({ "keymap.json": "[]\n" }),
+            )
+            .await;
+        let fs: Arc<dyn fs::Fs> = fake_fs;
+
+        let (keyboard_mapper, deprecated_aliases) = cx.update(|cx| {
+            (
+                cx.keyboard_mapper().clone(),
+                cx.deprecated_actions_to_preferred_actions().clone(),
+            )
+        });
+
+        let pending = PendingKeybindUnbind {
+            action_name: "terminal_app::SendKeystroke",
+            action_arguments: Some("\"ctrl-k\"".into()),
+            existing_keystrokes: vec![gpui::KeybindingKeystroke::from_keystroke(
+                gpui::Keystroke::parse("cmd-delete").unwrap(),
+            )],
+            existing_context: Some("TerminalWindow".to_string()),
+            existing_source: KeybindSource::Default,
+            write_suppression_unbind: false,
+        };
+        let updated =
+            write_unbinding_file(pending, &fs, keyboard_mapper.as_ref(), &deprecated_aliases)
+                .await
+                .expect("disabling the default binding should succeed");
+        let parsed = settings::parse_json_with_comments::<serde_json::Value>(&updated)
+            .expect("the unbind keymap must stay valid JSONC");
+        let unbind = parsed
+            .as_array()
+            .and_then(|sections| {
+                sections.iter().find_map(|section| {
+                    section
+                        .get("unbind")
+                        .and_then(|unbind| unbind.get("cmd-delete"))
+                })
+            })
+            .cloned()
+            .expect("the unbind entry should have been written");
+        assert_eq!(
+            unbind,
+            serde_json::json!(["terminal_app::SendKeystroke", "ctrl-k"])
+        );
+
+        let pending = PendingKeybindUnbind {
+            action_name: "terminal_app::SendKeystroke",
+            action_arguments: Some("\"ctrl-k\"".into()),
+            existing_keystrokes: vec![gpui::KeybindingKeystroke::from_keystroke(
+                gpui::Keystroke::parse("cmd-delete").unwrap(),
+            )],
+            existing_context: Some("TerminalWindow".to_string()),
+            existing_source: KeybindSource::User,
+            write_suppression_unbind: false,
+        };
+        let restored =
+            write_unbinding_file(pending, &fs, keyboard_mapper.as_ref(), &deprecated_aliases)
+                .await
+                .expect("restoring the default binding should succeed");
+        let restored = settings::parse_json_with_comments::<serde_json::Value>(&restored)
+            .expect("the restored keymap must stay valid JSONC");
+        assert!(
+            restored.as_array().is_some_and(|sections| {
+                sections.iter().all(|section| {
+                    section
+                        .get("unbind")
+                        .and_then(|unbind| unbind.get("cmd-delete"))
+                        .is_none()
+                })
+            }),
+            "restoring should remove the matching unbind entry: {restored}"
+        );
+    }
+
+    /// Removing a user override hands its keystroke to the default binding that
+    /// uses it, so the write has to leave an `unbind` record behind; otherwise
+    /// the shortcut would keep working and the trash button would look broken.
+    #[gpui::test]
+    async fn unbinding_a_user_override_suppresses_the_default_it_uncovered(
+        cx: &mut TestAppContext,
+    ) {
+        use std::path::Path;
+
+        cx.update(|cx| {
+            settings::init(cx);
+            crate::bind_default_keys(cx);
+        });
+
+        let fake_fs = fs::FakeFs::new(cx.background_executor.clone());
+        // Seed the path the keymap really resolves to: seeding anywhere else
+        // would leave the loader falling back to the initial template.
+        let config_dir = paths::keymap_file()
+            .parent()
+            .expect("keymap.json lives in a directory")
+            .to_path_buf();
+        fake_fs
+            .insert_tree(
+                Path::new(&config_dir),
+                serde_json::json!({
+                    "keymap.json": r#"[{ "context": "TerminalWindow", "bindings": { "cmd-t": "terminal_app::NewTab" } }]"#,
+                }),
+            )
+            .await;
+        let fs: Arc<dyn fs::Fs> = fake_fs;
+
+        let (keyboard_mapper, deprecated_aliases) = cx.update(|cx| {
+            (
+                cx.keyboard_mapper().clone(),
+                cx.deprecated_actions_to_preferred_actions().clone(),
+            )
+        });
+
+        let pending = PendingKeybindUnbind {
+            action_name: "terminal_app::NewTab",
+            action_arguments: None,
+            existing_keystrokes: vec![gpui::KeybindingKeystroke::from_keystroke(
+                gpui::Keystroke::parse("cmd-t").unwrap(),
+            )],
+            existing_context: Some("TerminalWindow".to_string()),
+            existing_source: KeybindSource::User,
+            write_suppression_unbind: true,
+        };
+        let updated =
+            write_unbinding_file(pending, &fs, keyboard_mapper.as_ref(), &deprecated_aliases)
+                .await
+                .expect("unbinding a user override should succeed");
+        let parsed = settings::parse_json_with_comments::<serde_json::Value>(&updated)
+            .expect("the keymap must stay valid JSONC");
+        let sections = parsed.as_array().expect("the keymap is a list of sections");
+        assert!(
+            sections.iter().all(|section| {
+                section
+                    .get("bindings")
+                    .and_then(|bindings| bindings.get("cmd-t"))
+                    .is_none()
+            }),
+            "the user override should have been removed: {updated}"
+        );
+        assert!(
+            sections.iter().any(|section| {
+                section
+                    .get("unbind")
+                    .and_then(|unbind| unbind.get("cmd-t"))
+                    .is_some()
+            }),
+            "the default binding must not take the keystroke back: {updated}"
+        );
+    }
+
+    /// The keystroke a user override repeats from a default binding is the only
+    /// case where deleting the entry alone would silently re-enable the default.
+    #[gpui::test]
+    fn a_user_override_of_a_default_keystroke_needs_an_unbind_record(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            settings::init(cx);
+            crate::bind_default_keys(cx);
+        });
+        cx.update(|cx| {
+            let mut repeated = KeyBinding::new("cmd-t", crate::NewTab, Some("TerminalWindow"));
+            repeated.set_meta(KeybindSource::User.meta());
+            let mut unique = KeyBinding::new("ctrl-alt-t", crate::NewTab, Some("TerminalWindow"));
+            unique.set_meta(KeybindSource::User.meta());
+            cx.bind_keys([repeated, unique]);
+
+            let mut tab = KeymapTab::empty();
+            tab.reload_bindings(cx);
+
+            let user_row = |keystroke: &str| {
+                tab.bindings()
+                    .iter()
+                    .position(|binding| {
+                        binding.source() == Some(KeybindSource::User)
+                            && binding.keystrokes().is_some_and(|keystrokes| {
+                                keystrokes
+                                    .iter()
+                                    .any(|binding| binding.unparse() == keystroke)
+                            })
+                    })
+                    .expect("the user binding should be listed")
+            };
+
+            assert!(
+                tab.unbind_needs_suppression(user_row("cmd-t")),
+                "the default under a repeated keystroke would come back"
+            );
+            assert!(
+                !tab.unbind_needs_suppression(user_row("ctrl-alt-t")),
+                "a keystroke no default binding uses is simply freed"
+            );
+        });
+    }
+
+    /// The context column must not claim that an action with no binding is
+    /// global.
+    #[test]
+    fn only_mapped_rows_report_a_context() {
+        fn mapped_row(context: Option<&str>) -> ProcessedBinding {
+            ProcessedBinding::Mapped(
+                Box::new(KeybindInformation {
+                    keystrokes: Rc::from(Vec::new()),
+                    keystroke_text: "".into(),
+                    source: KeybindSource::Default,
+                    context: context.map(Into::into),
+                    is_no_action: false,
+                    is_unbound_by_unbind: false,
+                }),
+                Box::new(ActionInformation {
+                    name: "terminal_app::NewTab",
+                    humanized_name: "New Tab".into(),
+                    arguments: None,
+                    documentation: None,
+                    payload: None,
+                }),
+            )
+        }
+
+        assert_eq!(
+            mapped_row(Some("TerminalWindow")).display_context(),
+            "TerminalWindow"
+        );
+        assert_eq!(mapped_row(None).display_context(), "<global>");
+        assert_eq!(
+            ProcessedBinding::Unmapped(Box::new(ActionInformation {
+                name: "terminal_app::NewTab",
+                humanized_name: "New Tab".into(),
+                arguments: None,
+                documentation: None,
+                payload: None,
+            }))
+            .display_context(),
+            "",
+            "an action with no binding has no context to show"
+        );
+    }
+
     /// End-to-end check that a rebind rewrites `keymap.json` with a user
     /// override that reloads as a `User`-sourced binding.
     #[gpui::test]
@@ -1679,6 +2197,87 @@ mod tests {
                 "the new binding should use the recorded keystroke"
             );
         });
+    }
+
+    /// Rebinding a disabled binding re-suppresses the keystroke it was disabled
+    /// with; the file must keep a single `unbind` record for it, not a second
+    /// copy per rewrite.
+    #[gpui::test]
+    async fn rebinding_a_disabled_binding_keeps_a_single_unbind_record(cx: &mut TestAppContext) {
+        use std::path::Path;
+
+        cx.update(|cx| {
+            settings::init(cx);
+            crate::bind_default_keys(cx);
+        });
+
+        let fake_fs = fs::FakeFs::new(cx.background_executor.clone());
+        let config_dir = paths::keymap_file()
+            .parent()
+            .expect("keymap.json lives in a directory")
+            .to_path_buf();
+        fake_fs
+            .insert_tree(
+                Path::new(&config_dir),
+                serde_json::json!({
+                    "keymap.json": r#"[{ "context": "TerminalWindow", "unbind": { "cmd-t": "terminal_app::NewTab" } }]"#,
+                }),
+            )
+            .await;
+        let fs: Arc<dyn fs::Fs> = fake_fs;
+
+        let pending = PendingKeybindWrite {
+            action_name: "terminal_app::NewTab",
+            action_arguments: None,
+            existing_keystrokes: vec![gpui::KeybindingKeystroke::from_keystroke(
+                gpui::Keystroke::parse("cmd-t").unwrap(),
+            )],
+            existing_context: Some("TerminalWindow".to_string()),
+            existing_source: KeybindSource::Default,
+            creating: false,
+            new_keystrokes: vec![gpui::KeybindingKeystroke::from_keystroke(
+                gpui::Keystroke::parse("cmd-shift-t").unwrap(),
+            )],
+            new_context: Some("TerminalWindow".to_string()),
+        };
+
+        let (keyboard_mapper, deprecated_aliases) = cx.update(|cx| {
+            (
+                cx.keyboard_mapper().clone(),
+                cx.deprecated_actions_to_preferred_actions().clone(),
+            )
+        });
+
+        let updated =
+            write_keybinding_file(pending, &fs, keyboard_mapper.as_ref(), &deprecated_aliases)
+                .await
+                .expect("rebinding a disabled binding should succeed");
+
+        let parsed = settings::parse_json_with_comments::<serde_json::Value>(&updated)
+            .expect("the keymap must stay valid JSONC");
+        let sections = parsed.as_array().expect("the keymap is a list of sections");
+        assert!(
+            sections.iter().any(|section| {
+                section
+                    .get("bindings")
+                    .and_then(|bindings| bindings.get("cmd-shift-t"))
+                    .is_some()
+            }),
+            "the new keystroke should have been bound: {updated}"
+        );
+        assert_eq!(
+            sections
+                .iter()
+                .filter(|section| {
+                    section
+                        .get("unbind")
+                        .and_then(|unbind| unbind.get("cmd-t"))
+                        .is_some()
+                })
+                .count(),
+            1,
+            "the disabled keystroke should stay suppressed exactly once: {updated}"
+        );
     }
 
     /// An action without any binding must take the add path: `Replace` would

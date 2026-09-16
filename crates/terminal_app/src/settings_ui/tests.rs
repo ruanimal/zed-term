@@ -2382,6 +2382,114 @@ fn keymap_tab_renders_bindings_and_controls(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// A binding that an `"unbind"` entry disabled must keep showing its keystrokes,
+/// dimmed: the keystroke is the only thing telling the user which key stopped
+/// working, and it is what "restore" brings back.
+#[gpui::test]
+fn keymap_tab_shows_a_disabled_binding_with_its_keystrokes(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        let settings = SettingsStore::test(cx);
+        cx.set_global(settings);
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        crate::bind_default_keys(cx);
+    });
+    let (settings_page, cx) = cx.add_window_view(|_, cx| {
+        test_settings_page(
+            ShellForm {
+                mode: ShellMode::System,
+                program: String::new(),
+                arguments: Vec::new(),
+                title_override: String::new(),
+            },
+            cx,
+        )
+    });
+    cx.simulate_resize(size(px(900.), px(3_000.)));
+    cx.run_until_parked();
+
+    settings_page.update(cx, |page, cx| {
+        page.switch_tab(SettingsTab::Keymap, cx);
+    });
+    cx.run_until_parked();
+
+    // The state a hand-written `keymap.json` unbind entry loads into.
+    settings_page.update(cx, |page, cx| {
+        page.apply_user_keymap(
+            r#"[{ "context": "TerminalWindow", "unbind": { "cmd-t": "terminal_app::NewTab" } }]"#,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    let (disabled_index, has_keystrokes, is_mapped, is_suppressed, can_unbind) = settings_page
+        .read_with(cx, |page, _| {
+            let (index, binding) = page
+                .keymap_tab
+                .bindings()
+                .iter()
+                .enumerate()
+                .find(|(_, binding)| {
+                    binding.action().name == "terminal_app::NewTab"
+                        && binding.is_unbound_by_unbind()
+                })
+                .expect("the disabled binding should stay listed so it can be restored");
+            (
+                index,
+                binding
+                    .keystrokes()
+                    .is_some_and(|keystrokes| !keystrokes.is_empty()),
+                !binding.is_unbound(),
+                binding.is_unbound_by_unbind(),
+                binding.can_unbind(),
+            )
+        });
+
+    assert!(
+        has_keystrokes && is_mapped && is_suppressed,
+        "a disabled binding is still a mapped binding that keeps its keystrokes"
+    );
+    assert!(
+        !can_unbind,
+        "a disabled binding cannot be unbound a second time"
+    );
+    assert!(
+        cx.debug_bounds("KEY_BINDING-t").is_some(),
+        "the disabled row should render the keystroke it disabled, not a state word"
+    );
+
+    // A disabled binding keeps the pencil every other row has, so it can be
+    // rebound in one step instead of restoring first; it trades the trash for
+    // the restore control.
+    // `debug_bounds` is `&'static str`-only, so the row selectors are leaked.
+    let row_selector = |control: &str| -> &'static str {
+        String::leak(format!("keymap-{control}-{disabled_index}"))
+    };
+    assert!(
+        cx.debug_bounds(row_selector("edit")).is_some(),
+        "a disabled binding should offer the same pencil as any other row"
+    );
+    assert!(
+        cx.debug_bounds(row_selector("restore")).is_some(),
+        "a disabled binding should offer restore"
+    );
+    assert!(
+        cx.debug_bounds(row_selector("unbind")).is_none(),
+        "a disabled binding cannot be unbound a second time"
+    );
+
+    // The pencil opens a replacement, not an addition: the old keystroke is
+    // already accounted for by the unbind entry.
+    settings_page.update_in(cx, |page, window, cx| {
+        page.keymap_tab.begin_edit(disabled_index, window, cx);
+        assert_eq!(
+            page.keymap_tab.editing_index(),
+            Some(disabled_index),
+            "rebinding a disabled binding should replace it, not add a second one"
+        );
+        page.keymap_tab.cancel_edit(cx);
+    });
+}
+
 /// Builds a fake HTTP client that answers the extension catalog request.
 fn fake_extension_api(entries: &[(&str, &str, &str)]) -> Arc<dyn http_client::HttpClient> {
     let data: Vec<String> = entries
