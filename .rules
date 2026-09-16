@@ -1,3 +1,14 @@
+# ZedTerm is a fork of Zed
+
+The two have diverged and there is no upstream to stay compatible with: do not
+keep a behavior only because Zed has it, and do not avoid a fix because it moves
+further away from Zed. Code ported from Zed is ours to change.
+
+Change shared crates (`gpui`, `ui`, `settings`) with restraint anyway. Every
+screen goes through them, so a small behavior change there has a wide blast
+radius: prefer `terminal_app` / `terminal_core` when the behavior is
+app-specific, and touch a shared crate only when the change belongs there.
+
 # Rust coding guidelines
 
 * Prioritize code correctness and clarity. Speed and efficiency are secondary priorities unless otherwise specified.
