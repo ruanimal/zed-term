@@ -1,0 +1,14 @@
+ZedTerm for macOS
+==================
+
+Installation
+------------
+
+1. Drag ZedTerm.app to the Applications folder.
+2. If macOS prevents ZedTerm from opening, open Terminal and run:
+
+   sudo /usr/bin/xattr -rd com.apple.quarantine /Applications/ZedTerm.app
+
+3. Open ZedTerm from the Applications folder.
+
+Only run this command for a ZedTerm application from a trusted source.
