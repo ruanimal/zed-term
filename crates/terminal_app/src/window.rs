@@ -328,7 +328,25 @@ impl TerminalWindowView {
 
     /// Starts a PTY-backed shell as a brand-new tab (each tab owns its own
     /// split-pane group; cmd-d later splits within it).
+    fn initial_directory_for_new_tab(&self, cx: &App) -> Option<PathBuf> {
+        if !matches!(
+            &TerminalSettings::get_global(cx).working_directory,
+            settings::WorkingDirectory::PreviousTab
+        ) {
+            return None;
+        }
+
+        self.active_tab().and_then(|tab| {
+            tab.read(cx)
+                .terminal
+                .read(cx)
+                .working_directory_for_new_terminal()
+        })
+    }
+
     fn spawn_new_tab(&mut self, cx: &mut Context<Self>, initial_directory: Option<PathBuf>) {
+        let initial_directory =
+            initial_directory.or_else(|| self.initial_directory_for_new_tab(cx));
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             let builder = match build_terminal(cx, initial_directory).await {
                 Ok(builder) => builder,
@@ -2165,7 +2183,8 @@ fn standalone_working_directory(working_directory: &settings::WorkingDirectory) 
         settings::WorkingDirectory::AlwaysHome
         | settings::WorkingDirectory::CurrentFileDirectory
         | settings::WorkingDirectory::CurrentProjectDirectory
-        | settings::WorkingDirectory::FirstProjectDirectory => Some(paths::home_dir().clone()),
+        | settings::WorkingDirectory::FirstProjectDirectory
+        | settings::WorkingDirectory::PreviousTab => Some(paths::home_dir().clone()),
     }
 }
 

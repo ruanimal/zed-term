@@ -105,6 +105,7 @@ struct EnvironmentVariable {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkingDirectoryMode {
     Home,
+    PreviousTab,
     Fixed,
 }
 
@@ -327,6 +328,11 @@ fn settings_page_draft_from_settings(
         },
         settings::WorkingDirectory::AlwaysHome => WorkingDirectoryForm {
             mode: WorkingDirectoryMode::Home,
+            directory: String::new(),
+            fell_back_from_workspace_setting: false,
+        },
+        settings::WorkingDirectory::PreviousTab => WorkingDirectoryForm {
+            mode: WorkingDirectoryMode::PreviousTab,
             directory: String::new(),
             fell_back_from_workspace_setting: false,
         },
@@ -1584,6 +1590,7 @@ fn validate_working_directory_form(
 ) -> Result<settings::WorkingDirectory, String> {
     match form.mode {
         WorkingDirectoryMode::Home => Ok(settings::WorkingDirectory::AlwaysHome),
+        WorkingDirectoryMode::PreviousTab => Ok(settings::WorkingDirectory::PreviousTab),
         WorkingDirectoryMode::Fixed => {
             let path = normalize_fixed_directory_input(&form.directory, home_directory)?;
             let path = validate_existing_directory(&path, directory_access)?;

@@ -651,6 +651,7 @@ impl SettingsPage {
     fn working_directory_options(&self, cx: &mut Context<Self>) -> DropdownOptions {
         [
             ("home", WorkingDirectoryMode::Home),
+            ("previous tab", WorkingDirectoryMode::PreviousTab),
             ("fixed directory", WorkingDirectoryMode::Fixed),
         ]
         .into_iter()
@@ -679,10 +680,13 @@ impl SettingsPage {
     ) -> gpui::AnyElement {
         let mode = match self.working_directory.mode {
             WorkingDirectoryMode::Home => "home",
+            WorkingDirectoryMode::PreviousTab => "previous tab",
             WorkingDirectoryMode::Fixed => "fixed directory",
         };
         let description = if self.working_directory.fell_back_from_workspace_setting {
             "Newly created terminals and panes use Home when an inherited workspace directory is configured."
+        } else if self.working_directory.mode == WorkingDirectoryMode::PreviousTab {
+            "New tabs inherit the active tab's working directory when available; otherwise they use Home."
         } else {
             "Only newly created terminals and panes use the selected Home or verified fixed directory."
         };

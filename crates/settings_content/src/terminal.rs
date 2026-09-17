@@ -250,6 +250,8 @@ pub enum WorkingDirectory {
     /// Use the first project in this workspace's directory. Fallback to using
     /// this platform's home directory.
     FirstProjectDirectory,
+    /// Use the working directory of the active tab when creating a new tab.
+    PreviousTab,
     /// Always use this platform's home directory (if it can be found).
     AlwaysHome,
     /// Always use a specific directory. This value will be shell expanded.
