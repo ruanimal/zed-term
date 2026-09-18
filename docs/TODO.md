@@ -174,7 +174,8 @@
 验证：`cargo test -p terminal_app --lib` 138 passed / 0 failed（在原有 11 个 tab 搜索测试 + 1 个 `text_edit` 测试之上，新增/扩展 window 渲染与多 pane 测试：搜索条与查询字段真实布局、空查询聚焦后出现 2px caret、split 中只有活动 pane 显示自己的 bar 且焦点切走即隐藏、焦点切回即恢复、`SearchTest` 作用在真正持有焦点的 pane 上；`SearchTest` 用例在旧实现下会失败——旧 `active_tab()` 仍指向点击前的 pane）；`cargo test -p terminal_core --lib` 100 passed / 0 failed；`cargo clippy -p terminal_app --all-targets -- --deny warnings`、`cargo fmt --all -- --check`、`git diff --check` 与 `cargo check --workspace --all-targets` 通过。真机视觉与 IME 验收待做。
 
 ## 传输文件支持
-需要考虑是否设计通用的扩展接口
+设计稿见 `docs/TRANSFER_EXTENSION.md`（传输扩展接口与规范：`transfer_core` trait、
+`TapPty` raw PTY 拦截层、host/UI/安全边界、Phase 0–4 路线）。实现时按该文档推进。
 - rz/sz 支持
 - trzsz 支持 https://github.com/ruanimal/trzsz-rs
 
