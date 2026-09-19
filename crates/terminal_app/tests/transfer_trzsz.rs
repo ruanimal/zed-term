@@ -29,7 +29,7 @@ use transfer_core::{
 fn encode_bytes(bytes: &[u8]) -> String {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     let _ = encoder.write_all(bytes);
-    BASE64.encode(&encoder.finish().unwrap_or_default())
+    BASE64.encode(encoder.finish().unwrap_or_default())
 }
 
 fn decode_value(value: &str) -> Vec<u8> {
@@ -146,7 +146,7 @@ impl DownloadServer {
                             self.sent = end;
                         } else {
                             let digest: [u8; 16] = self.hasher.clone().finalize().into();
-                            self.out.push_back(string_line("MD5", &digest));
+                            self.out.push_back(string_line("MD5", digest));
                             self.stage = DownloadStage::DigestSent;
                         }
                     }
@@ -227,7 +227,7 @@ impl UploadReceiver {
                     digest,
                     "uploaded data does not match the checksum"
                 );
-                self.out.push_back(string_line("SUCC", &digest));
+                self.out.push_back(string_line("SUCC", digest));
             }
             "EXIT" => {}
             other => panic!("upload receiver got unexpected {other} line"),
@@ -257,8 +257,8 @@ fn pump(
     let mut actions: VecDeque<SessionAction> = session.start().into();
 
     loop {
-        if done.is_some() {
-            return done.unwrap();
+        if let Some(paths) = done {
+            return paths;
         }
 
         if let Some(action) = actions.pop_front() {
@@ -499,7 +499,7 @@ fn oversized_download_chunk_fails_the_session() {
         string_line("NAME", b"corrupt.bin"),
         integer_line("SIZE", 4),
         // Valid encoding, but 16 bytes against a declared size of 4.
-        string_line("DATA", &[0u8; 16]),
+        string_line("DATA", [0u8; 16]),
     ]);
 
     loop {
@@ -686,6 +686,7 @@ fn detector_matches_real_tsz_handshake() {
         }
     }
     let _ = child.kill();
+    let _ = child.wait();
     let _ = std::fs::remove_dir_all(&workdir);
 }
 
