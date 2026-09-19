@@ -83,21 +83,36 @@ git push origin vX.Y.Z     # this push is what starts the release workflow
 mirror and does not build or publish anything — never push the tag there
 expecting a release.
 
-### 5. Watch and verify
+### 5. Confirm the run started, then hand off
+
+Do not wait for the build. The Linux job has a 45-minute timeout and each
+macOS job 60, and a full run routinely takes tens of minutes — blocking on it
+wastes the session. Confirm the tag push started a run, report the run URL,
+and stop:
 
 ```bash
-gh run list --workflow release.yml --limit 3
-gh run watch                # follow the run started by the tag push
-gh release view vX.Y.Z      # after publish succeeds
+gh run list --workflow release.yml --limit 3   # the new run should be in_progress
+gh run view <run-id>                           # after a few seconds: check the prepare job
 ```
 
-The run has four jobs: `prepare` (validates tag == Cargo version), `linux`,
-`macos` (x86_64 + arm64 matrix), `publish`. The `publish` job downloads
-`zedterm-*` artifacts and hard-fails unless it finds exactly 3 files, then
-creates the GitHub release with generated notes and `draft: false`.
+`prepare` finishes in seconds even though the build jobs run for much longer,
+so this one early check is worth doing — it catches a tag/version mismatch
+immediately instead of after an hour of building. The remaining jobs are
+`linux`, `macos` (x86_64 + arm64 matrix), and `publish`, which downloads the
+`zedterm-*` artifacts, hard-fails unless it finds exactly 3 files, and creates
+the GitHub release with generated notes and `draft: false`.
 
-Success is a published release with all three assets attached. Report the
-release URL and asset names.
+Verification is a separate, later step — run it when the user asks or the run
+is known to be finished, not in a wait loop:
+
+```bash
+gh run list --workflow release.yml --limit 1
+gh release view vX.Y.Z
+```
+
+Success is a published release with all three assets attached. A run that is
+merely still going is not a failure: report that it is in progress and the
+release URL, and only report failure once a job actually fails.
 
 ## Traps
 
