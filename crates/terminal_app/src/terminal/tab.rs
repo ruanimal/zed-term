@@ -26,6 +26,7 @@ use super::TerminalScrollHandle;
 use crate::text_edit::{
     next_utf16_boundary, previous_utf16_boundary, replace_utf16_range, substring_utf16,
 };
+use crate::transfer_ui::TransferUiState;
 
 fn cursor_is_visible(
     mode: settings::TerminalBlink,
@@ -91,6 +92,8 @@ pub struct TerminalTab {
     has_bell: bool,
     terminal_blinking_enabled: bool,
     blink_started_at: Instant,
+    /// Transfer overlay state + dialog driving (§6 of docs/TRANSFER_EXTENSION.md).
+    pub(crate) transfer_ui: TransferUiState,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -120,6 +123,7 @@ impl TerminalTab {
             has_bell: false,
             terminal_blinking_enabled: false,
             blink_started_at: Instant::now(),
+            transfer_ui: TransferUiState::default(),
             _subscriptions: Vec::new(),
         };
 
@@ -162,6 +166,10 @@ impl TerminalTab {
                     // window to tear this pane down rather than leaving a dead
                     // shell accepting no input.
                     Event::CloseTerminal => cx.emit(TerminalTabEvent::CloseTerminal),
+                    Event::Transfer(event) => {
+                        this.transfer_ui.handle(event.clone(), &terminal, cx);
+                        cx.notify();
+                    }
                     _ => {}
                 }),
             );
@@ -187,6 +195,10 @@ impl TerminalTab {
 
     pub(crate) fn has_bell(&self) -> bool {
         self.has_bell
+    }
+
+    pub(crate) fn transfer_ui_state(&self) -> &TransferUiState {
+        &self.transfer_ui
     }
 
     /// Resolves the link under a pane-local position, so the context menu acts
@@ -394,6 +406,15 @@ impl TerminalTab {
         self.search_generation = self.search_generation.wrapping_add(1);
         self.search_task = None;
         self.terminal.update(cx, |term, _| term.matches.clear());
+        self.focus_handle.clone().focus(window, cx);
+        cx.notify();
+    }
+
+    /// Dismisses a finished-transfer message (or a transient hint) and
+    /// returns focus to the terminal. A running transfer is cancelled with
+    /// the same button, not dismissed.
+    pub(crate) fn dismiss_transfer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.transfer_ui.dismiss();
         self.focus_handle.clone().focus(window, cx);
         cx.notify();
     }

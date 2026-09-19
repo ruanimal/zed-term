@@ -7574,6 +7574,7 @@ dependencies = [
  "assets",
  "async-compression",
  "async-tar",
+ "base64 0.22.1",
  "collections",
  "embed-resource",
  "flate2",
@@ -7584,6 +7585,7 @@ dependencies = [
  "http_client",
  "itertools 0.14.0",
  "log",
+ "md-5",
  "parking_lot",
  "paths",
  "proptest",
@@ -7601,6 +7603,7 @@ dependencies = [
  "theme",
  "theme_settings",
  "toml 0.8.23",
+ "transfer_core",
  "ui",
  "url",
  "util",
@@ -7622,15 +7625,18 @@ dependencies = [
  "log",
  "parking_lot",
  "percent-encoding",
+ "polling",
  "rand 0.9.4",
  "regex",
  "schemars",
  "serde",
+ "serde_json",
  "settings",
  "sysinfo 0.37.2",
  "theme",
  "theme_settings",
  "thiserror 2.0.17",
+ "transfer_core",
  "url",
  "urlencoding",
  "util",
@@ -8133,6 +8139,17 @@ checksum = "2fb391ac70462b3097a755618fbf9c8f95ecc1eb379a414f7b46f202ed10db1f"
 dependencies = [
  "cc",
  "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "transfer_core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

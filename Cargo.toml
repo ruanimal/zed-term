@@ -46,6 +46,7 @@ members = [
     "crates/telemetry_events",
     "crates/terminal_core",
     "crates/terminal_app",
+    "crates/transfer_core",
     "crates/text",
     "crates/theme",
     "crates/theme_settings",
@@ -115,6 +116,7 @@ syntax_theme = { path = "crates/syntax_theme" }
 telemetry = { path = "crates/telemetry" }
 telemetry_events = { path = "crates/telemetry_events" }
 text = { path = "crates/text" }
+transfer_core = { path = "crates/transfer_core" }
 theme = { path = "crates/theme" }
 theme_settings = { path = "crates/theme_settings" }
 ui = { path = "crates/ui" }
@@ -175,6 +177,7 @@ aws-smithy-runtime-api = { version = "1.9.2", features = ["http-1x", "client"] }
 aws-smithy-types = { version = "1.3.4", features = ["http-body-1-x"] }
 backtrace = "0.3"
 base64 = "0.22"
+md-5 = "0.10"
 bitflags = "2.6.0"
 block = "0.1"
 block2 = "0.6"

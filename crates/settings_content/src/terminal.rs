@@ -193,6 +193,55 @@ pub struct TerminalSettingsContent {
     ///
     /// Default: "system"
     pub bell: Option<TerminalBell>,
+    /// File transfer (trzsz/zmodem provider) settings.
+    ///
+    /// See `docs/TRANSFER_EXTENSION.md` §8.
+    pub transfer: Option<TransferSettingsContent>,
+}
+
+/// Host-level file transfer settings (§8.1). Provider-specific configuration
+/// lives in `providers`, keyed by provider id; the host passes those
+/// subsections through to the providers uninterpreted.
+#[with_fallible_options]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct TransferSettingsContent {
+    /// Where downloads land by default. `None` asks every time (the user
+    /// still confirms the location; downloads are never silent).
+    ///
+    /// Default: null
+    pub download_dir: Option<String>,
+    /// Maximum size of a single transferred file, in megabytes.
+    ///
+    /// Default: 2048
+    pub max_file_size_mb: Option<u64>,
+    /// Maximum total bytes transferred in one session, in megabytes.
+    ///
+    /// Default: 4096
+    pub max_session_mb: Option<u64>,
+    /// Whether to confirm the download location before a download lands.
+    ///
+    /// Default: true
+    pub confirm_before_download: Option<bool>,
+    /// How long to wait for a file/location picker answer, in seconds.
+    ///
+    /// Default: 60
+    pub picker_timeout_secs: Option<u64>,
+    /// How long a transfer may stay silent (no bytes either way) before it
+    /// is aborted, in seconds.
+    ///
+    /// Default: 30
+    pub idle_timeout_secs: Option<u64>,
+    /// Provider ids in adjudication order when several detectors match the
+    /// same bytes. Unknown ids are ignored.
+    ///
+    /// Default: ["trzsz"]
+    pub priority: Option<Vec<String>>,
+    /// Per-provider configuration, keyed by provider id. `enabled` is
+    /// understood by the host; every other key is passed to the provider
+    /// uninterpreted (§8.2).
+    ///
+    /// Default: {}
+    pub providers: Option<HashMap<String, serde_json::Value>>,
 }
 
 /// Shell configuration to open the terminal with.

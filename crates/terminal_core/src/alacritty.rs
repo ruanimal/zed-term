@@ -7,8 +7,8 @@ use std::{borrow::Cow, io, ops::RangeInclusive, path::PathBuf, sync::Arc};
 mod hyperlinks;
 
 use alacritty_terminal::{
-    event::{Event as AlacTermEvent, EventListener, Notify, WindowSize},
-    event_loop::{EventLoop, Msg, Notifier},
+    event::{self, Event as AlacTermEvent, EventListener, WindowSize},
+    event_loop::{EventLoop, EventLoopSender, Msg},
     grid::{Dimensions, Grid, GridIterator, Row, Scroll as AlacScroll},
     index::{Boundary, Column, Direction as AlacDirection, Line, Point as AlacPoint},
     selection::{
@@ -80,19 +80,26 @@ impl From<&AlacrittyPty> for ProcessIdGetter {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct PtySender {
-    notifier: Notifier,
+    sender: EventLoopSender,
 }
 
 impl PtySender {
     pub(super) fn notify(&self, input: impl Into<Cow<'static, [u8]>>) {
-        self.notifier.notify(input);
+        let input = input.into();
+        // Terminal hangs if we send 0 bytes through.
+        if input.is_empty() {
+            return;
+        }
+        if let Err(error) = self.sender.send(Msg::Input(input)) {
+            log::error!("failed to write to alacritty pty: {error}");
+        }
     }
 
     pub(super) fn resize(&self, bounds: TerminalBounds) {
         if let Err(error) = self
-            .notifier
-            .0
+            .sender
             .send(Msg::Resize(window_size_from_terminal_bounds(bounds)))
         {
             log::error!("failed to resize alacritty pty: {error}");
@@ -100,7 +107,7 @@ impl PtySender {
     }
 
     pub(super) fn shutdown(&self) {
-        if let Err(error) = self.notifier.0.send(Msg::Shutdown) {
+        if let Err(error) = self.sender.send(Msg::Shutdown) {
             log::debug!("failed to shut down alacritty pty loop: {error}");
         }
     }
@@ -200,20 +207,21 @@ pub(super) fn new_term(
     Arc::new(FairMutex::new(term))
 }
 
-pub(super) fn spawn_event_loop(
+pub(super) fn spawn_event_loop<P>(
     term: Arc<AlacrittyTermLock>,
     events_tx: UnboundedSender<PtyEvent>,
-    pty: AlacrittyPty,
+    pty: P,
     drain_on_exit: bool,
-) -> Result<PtySender> {
+) -> Result<PtySender>
+where
+    P: tty::EventedPty + event::OnResize + Send + 'static,
+{
     let event_loop = EventLoop::new(term, ZedListener(events_tx), pty, drain_on_exit, false)
         .context("failed to create event loop")?;
     let pty_tx = event_loop.channel();
     let _io_thread = event_loop.spawn();
 
-    Ok(PtySender {
-        notifier: Notifier(pty_tx),
-    })
+    Ok(PtySender { sender: pty_tx })
 }
 
 pub(super) fn resize(term: &mut AlacrittyTerm, bounds: TerminalBounds) {

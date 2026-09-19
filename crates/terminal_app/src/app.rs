@@ -24,10 +24,13 @@ use util::ResultExt;
 pub mod extension_store;
 pub mod keymap;
 pub mod persistence;
+pub mod providers_trzsz;
 pub mod settings_ui;
 pub mod terminal;
 pub(crate) mod text_edit;
 pub mod themes_tab;
+pub mod transfer_io;
+pub mod transfer_ui;
 pub mod window;
 pub(crate) mod window_chrome;
 

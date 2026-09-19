@@ -1,7 +1,10 @@
+use std::path::PathBuf;
+
 use collections::HashMap;
 use gpui::{FontFallbacks, FontFeatures, FontWeight, Pixels};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use settings::settings_content::TransferSettingsContent;
 
 pub use settings::AlternateScroll;
 
@@ -46,6 +49,52 @@ pub struct TerminalSettings {
     pub path_hyperlink_regexes: Vec<String>,
     pub path_hyperlink_timeout_ms: u64,
     pub bell: TerminalBell,
+    pub transfer: Option<TransferSettings>,
+}
+
+/// Host-level file transfer settings, resolved from
+/// `settings_content::terminal::TransferSettingsContent` (§8.1 of
+/// docs/TRANSFER_EXTENSION.md).
+///
+/// `Default` must agree with [`TransferSettingsContent`]'s `None` fallbacks.
+/// A derived `Default` would zero every field, and an unconfigured
+/// `[terminal.transfer]` section is resolved through
+/// `Option::unwrap_or_default`, so the zero value would silently install
+/// `picker_timeout = 0` / `max_file_size = 0` watchdogs and kill every
+/// transfer the moment it starts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TransferSettings {
+    pub download_dir: Option<PathBuf>,
+    pub max_file_size_mb: u64,
+    pub max_session_mb: u64,
+    pub confirm_before_download: bool,
+    pub picker_timeout_secs: u64,
+    pub idle_timeout_secs: u64,
+    pub priority: Vec<String>,
+    pub providers: HashMap<String, serde_json::Value>,
+}
+
+impl Default for TransferSettings {
+    fn default() -> Self {
+        TransferSettingsContent::default().into()
+    }
+}
+
+impl From<TransferSettingsContent> for TransferSettings {
+    fn from(content: TransferSettingsContent) -> Self {
+        TransferSettings {
+            download_dir: content.download_dir.map(PathBuf::from),
+            max_file_size_mb: content.max_file_size_mb.unwrap_or(2048),
+            max_session_mb: content.max_session_mb.unwrap_or(4096),
+            confirm_before_download: content.confirm_before_download.unwrap_or(true),
+            picker_timeout_secs: content.picker_timeout_secs.unwrap_or(60),
+            idle_timeout_secs: content.idle_timeout_secs.unwrap_or(30),
+            priority: content
+                .priority
+                .unwrap_or_else(|| vec!["trzsz".to_string()]),
+            providers: content.providers.unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -122,6 +171,7 @@ impl settings::Settings for TerminalSettings {
                 .collect(),
             path_hyperlink_timeout_ms: project_content.path_hyperlink_timeout_ms.unwrap(),
             bell: user_content.bell.unwrap(),
+            transfer: user_content.transfer.map(TransferSettings::from),
         }
     }
 }

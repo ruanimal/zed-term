@@ -22,6 +22,8 @@ async-tar.workspace = true
 assets.workspace = true
 fs.workspace = true
 flate2 = "1"
+base64.workspace = true
+md-5.workspace = true
 gpui = { workspace = true, features = ["font-kit", "wayland", "x11"] }
 gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
 itertools.workspace = true
@@ -42,6 +44,7 @@ tar = "0.4"
 toml.workspace = true
 settings.workspace = true
 terminal_core = { path = "../terminal_core" }
+transfer_core.workspace = true
 theme.workspace = true
 theme_settings.workspace = true
 ui.workspace = true

@@ -1,7 +1,25 @@
 # 文件传输扩展：接口与规范设计
 
-> 状态：设计稿（未实现）。目标是让 rz/sz（ZMODEM）、trzsz 以**可插拔提供者**的形式接入，
-> 共用同一套 raw PTY 拦截层、同一套 UI/安全边界。新增协议（或第三方协议）不需要改终端渲染链路。
+> 状态：Phase 0 + Phase 1 已实现（2026-02）。tap 分流层、`transfer_core` trait、
+> mux/会话驱动、trzsz provider（协议 v1 base64，上传/下载）、staging/安全落盘、
+> 进度 UI 与取消均已落地并有测试；trzsz-rs 的 `trz`/`tsz` 真机互操作测试通过
+> （`terminal_app/tests/transfer_trzsz.rs`，用 `ZEDTERM_TSZ_BIN`/`ZEDTERM_TRZ_BIN`
+> 指向真实 binary 启用）。Phase 2–4 尚未实现。
+>
+> 与原设计的实现偏差（其余照旧）：
+> - `SessionAction` 增加了带路径的文件动作（`OpenRead`/`OpenWrite`/`CloseFile`/
+>   `CommitFile`），`HostEvent` 相应携带 `OpenedFile{size, local_name}`：会话
+>   本身不持有 fs 状态，由 host 解析"当前文件"，避免隐式的文件游标。
+> - 下载目录在会话一开始（发 ACT 之前）询问：数据流直到用户确认后才开始，
+>   因此 §3.5 的"对话框期间照常灌数据进 staging"只部分适用（staging 机制在，
+>   但 picker 等待期远端按其自身超时可能先行放弃）。
+> - `SessionAction` 增加 `Cancelled`：用户取消（picker 返回空）时由会话显式终结，
+>   UI 不再把取消显示成"完成"，也不会覆盖对话框错误信息。
+> - `TransferSession` 增加 `start()`；`TransferHost::request_*` 为通知语义
+>   （对话框由 UI 事件 `AwaitingUploadPaths`/`AwaitingDownloadDir` 驱动，
+>   答案经 mux 控制通道回填），因为阻塞式询问会卡死会话线程、使看门狗失效。
+> - Windows：tap 依赖 fd 复制的 `TapSource`，暂只在 Unix 启用；Windows 上
+>   transfer 不挂载。
 
 ## 0. 结论先行
 
@@ -157,10 +175,12 @@ terminal_app   (provider 实现 trzsz/zmodem + UI + 文件 IO)
 `SessionActive` 后远端不会等本端 UI：下载触发命中时远端已经在发数据，而用户可能在
 picker 里停留到 60s（§8.1）。这段窗口的缓冲必须有界：
 
-- 下载：host 在 `Matched` 时立刻确定 staging 路径（staging 根目录下按会话建临时目录），
-  session 的 `WriteFile` 一律写进 staging，**不等用户确认**；用户确认后 rename 到最终位置
-  （§7.3），取消/超时只清 staging。spool 受 `max_file_size` 约束，超限走 §7.4 abort。
-  staging 是临时区，不算 §7.1 的"落盘"（那指最终位置），确认框照常在 `Detected` 后立即弹出。
+- 下载：host 在用户确认下载目录后立刻确定 staging 路径——**用户选定的目录内的隐藏临时名**
+  （`.<name>.<pid>.<seq>.part`），session 的 `WriteFile` 一律写进 staging；全部收完后 rename 到最终位置
+  （§7.3），取消/超时只删临时文件。同目录 rename ⇒ 同设备、原子，落盘不依赖 staging 与目标同区。
+  目录尚未确定时（调用方先 open 后选目录）才回退到 temp staging 根目录。spool 受 `max_file_size`
+  约束，超限走 §7.4 abort。staging 是临时区，不算 §7.1 的"落盘"（那指最终位置），
+  确认框照常在 `Detected` 后立即弹出。
 - 上传：本地是发送方，节奏由 session 控制，picker 等待不产生远端洪峰。
 - 已 divert 但尚未被 session 消化的 wire 字节：session 内部缓冲上限 4 MiB，超过即按
   §3.3 看门狗语义 abort + `Failed`，不允许无界增长。
@@ -475,11 +495,14 @@ pub enum TransferUiEvent {
 1. **下载永远先确认**：自动检测到下载触发也必须弹保存位置（或确认已配置目录），
    禁止静默落盘。上传选文件同理（本地用户动作）。
 2. **文件名 jail**：剥离目录成分，拒绝绝对路径/`..`/NUL/控制字符；
-   建议名仅建议，最终路径 = 下载目录 join(sanitized basename)；
+   下载框只选**目录**，文件名由远端 `#NAME` sanitize 得到（不向用户索要文件名，
+   也不让对话框的默认名变成文件名）：最终路径 = 下载目录 join(sanitized basename)；
    目标已存在 → 覆盖前确认（或自动 `name (2)`，Phase 1 选"确认"，简单可预测）。
-3. **staging + 原子改名**：下载先写 `staging/`（主题扩展已验证此模式），完成后再 rename；
-   picker 等待期间照常 spool 进 staging（§3.5），确认后 rename 到最终位置；
-   取消/失败/超时只清 staging，不碰已有文件。
+3. **staging + 原子改名**：下载先在**用户选定的下载目录内**用隐藏临时名
+   （`.<name>.<pid>.<seq>.part`）写，完成后 rename 到最终名字（§3.5）；
+   临时名与最终名同目录 ⇒ rename 同设备、原子，不需要跨设备拷贝；
+   未确定目录时才回退到 temp staging 根目录，此时 commit 跨设备回退为
+   "拷到目标目录的隐藏兄弟文件再改名"。取消/失败/超时只删临时文件，不碰已有文件。
 4. **上限**：单文件与单会话字节上限（默认如 2 GiB/4 GiB，可配），超限 abort；
    detector 保持窗口与 session 缓冲都有界。
 5. **权限**：落盘文件不带可执行位（0600/0644 按 umask，不 `chmod +x`）；
@@ -502,7 +525,7 @@ manifest 声明驱动，settings 里以 provider id 为 key 的开放表承载�
 {
   "terminal": {
     "transfer": {
-      "download_dir": null,          // null = 每次都问；设了则仍要确认框（§7.1）
+      "download_dir": null,          // null = 每次都问；设了则作为默认/回退目录（目录框不支持预置初值，UI 仍会弹目录选择框，§7.1）
       "max_file_size_mb": 2048,      // §7.4
       "max_session_mb": 4096,        // §5.5.3（含 helper 会话）
       "confirm_before_download": true,

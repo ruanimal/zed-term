@@ -3,6 +3,9 @@ mod mappings;
 mod alacritty;
 mod pty_info;
 pub mod terminal_settings;
+pub mod transfer_mux;
+
+pub use transfer_mux::{Capabilities, Direction, TransferRegistry, TransferSetup, TransferUiEvent};
 
 #[cfg(not(windows))]
 use anyhow::Context as _;
@@ -629,6 +632,8 @@ pub enum Event {
     SelectionsChanged,
     NewNavigationTarget(Option<MaybeNavigationTarget>),
     Open(MaybeNavigationTarget),
+    /// File transfer state changed (§6 of docs/TRANSFER_EXTENSION.md).
+    Transfer(TransferUiEvent),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -924,7 +929,9 @@ impl TerminalBuilder {
                 path_hyperlink_regexes: Vec::default(),
                 path_hyperlink_timeout: Duration::ZERO,
                 window_id,
+                transfer: None,
             },
+            transfer: None,
             child_exited: None,
             keyboard_input_sent: false,
             event_loop_task: Task::ready(Ok(())),
@@ -960,6 +967,7 @@ impl TerminalBuilder {
         is_remote_terminal: bool,
         window_id: u64,
         completion_tx: Option<Sender<Option<ExitStatus>>>,
+        transfer: Option<TransferSetup>,
         cx: &App,
         activation_script: Vec<String>,
         path_style: PathStyle,
@@ -1065,6 +1073,10 @@ impl TerminalBuilder {
                 alternate_scroll,
             );
 
+            #[cfg(any(test, feature = "test-support"))]
+            let pty_write_log = Arc::new(parking_lot::Mutex::new(Vec::new()));
+            let transfer_runtime: Option<transfer_mux::TransferRuntime>;
+
             let terminal_type = {
                 let alacritty_shell = shell_params.as_ref().map(|params| {
                     (
@@ -1102,9 +1114,61 @@ impl TerminalBuilder {
 
                 let pty_info = PtyProcessInfo::new(ProcessIdGetter::from(&pty), shell.program());
 
-                //And connect them together
-                let pty_tx =
-                    spawn_event_loop(term.clone(), events_tx, pty, pty_options.drain_on_exit)?;
+                // Clones shared with the transfer wire writer; the tap path
+                // uses these, the plain path uses the originals.
+                let tap_events_tx = events_tx.clone();
+                #[cfg(any(test, feature = "test-support"))]
+                let wire_write_log = pty_write_log.clone();
+
+                // Connect the pty to the terminal, through the transfer tap
+                // when transfers are enabled (§3 of docs/TRANSFER_EXTENSION.md).
+                let (pty_tx, runtime) = match transfer.as_ref() {
+                    Some(transfer_setup) => {
+                        let runtime = transfer_mux::TransferRuntime::new(
+                            transfer_setup.registry.clone(),
+                            transfer_setup.host.clone(),
+                            transfer_setup.policy.clone(),
+                        );
+                        let tapped =
+                            transfer_mux::TapPty::new(pty, runtime.shared()).map_err(|error| {
+                                TerminalError {
+                                    directory: working_directory.clone(),
+                                    program: shell_params
+                                        .as_ref()
+                                        .map(|params| params.program.clone()),
+                                    args: shell_params
+                                        .as_ref()
+                                        .and_then(|params| params.args.clone()),
+                                    title_override: terminal_title_override.clone(),
+                                    source: error,
+                                }
+                            })?;
+                        let pty_tx = spawn_event_loop(
+                            term.clone(),
+                            tap_events_tx,
+                            tapped,
+                            pty_options.drain_on_exit,
+                        )?;
+                        let wire_pty_tx = pty_tx.clone();
+                        runtime.shared().set_wire_writer(Arc::new(move |bytes| {
+                            log::debug!("Writing {} transfer bytes to PTY", bytes.len());
+                            #[cfg(any(test, feature = "test-support"))]
+                            wire_write_log.lock().push(bytes.to_vec());
+                            wire_pty_tx.notify(bytes.to_vec());
+                        }));
+                        (pty_tx, Some(runtime))
+                    }
+                    None => {
+                        let pty_tx = spawn_event_loop(
+                            term.clone(),
+                            events_tx,
+                            pty,
+                            pty_options.drain_on_exit,
+                        )?;
+                        (pty_tx, None)
+                    }
+                };
+                transfer_runtime = runtime;
 
                 TerminalType::Pty {
                     pty_tx,
@@ -1151,12 +1215,14 @@ impl TerminalBuilder {
                     path_hyperlink_regexes,
                     path_hyperlink_timeout,
                     window_id,
+                    transfer,
                 },
                 child_exited: None,
                 keyboard_input_sent: false,
                 event_loop_task: Task::ready(Ok(())),
                 background_executor,
                 path_style,
+                transfer: transfer_runtime,
                 cwd_history: if is_remote_terminal {
                     Vec::new()
                 } else {
@@ -1176,7 +1242,7 @@ impl TerminalBuilder {
                 #[cfg(test)]
                 suppress_hyperlink_throttle_once: false,
                 #[cfg(any(test, feature = "test-support"))]
-                pty_write_log: Default::default(),
+                pty_write_log,
                 #[cfg(any(test, feature = "test-support"))]
                 live_settings_application_counts: (0, 0),
             };
@@ -1211,6 +1277,25 @@ impl TerminalBuilder {
     }
 
     pub fn subscribe(mut self, cx: &Context<Terminal>) -> Terminal {
+        //Relay transfer UI events (session driver thread) into this
+        //terminal's event stream (§6 of docs/TRANSFER_EXTENSION.md).
+        if let Some(transfer) = self.terminal.transfer.as_ref() {
+            let ui_rx = transfer.ui_events();
+            cx.spawn(async move |terminal, cx| {
+                while let Ok(event) = ui_rx.recv().await {
+                    if terminal
+                        .update(cx, |_, cx| {
+                            cx.emit(Event::Transfer(event.clone()));
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+
         //Event loop
         self.terminal.event_loop_task = cx.spawn(async move |terminal, cx| {
             while let Some(event) = self.events_rx.next().await {
@@ -1341,6 +1426,7 @@ pub struct Terminal {
     event_loop_task: Task<Result<(), anyhow::Error>>,
     background_executor: BackgroundExecutor,
     path_style: PathStyle,
+    transfer: Option<transfer_mux::TransferRuntime>,
     cwd_history: Vec<CwdHistoryEntry>,
     pending_cwd_boundary: Option<i32>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1348,7 +1434,7 @@ pub struct Terminal {
     #[cfg(test)]
     suppress_hyperlink_throttle_once: bool,
     #[cfg(any(test, feature = "test-support"))]
-    pty_write_log: std::cell::RefCell<Vec<Vec<u8>>>,
+    pty_write_log: Arc<parking_lot::Mutex<Vec<Vec<u8>>>>,
     #[cfg(any(test, feature = "test-support"))]
     live_settings_application_counts: (usize, usize),
 }
@@ -1360,6 +1446,7 @@ struct CwdHistoryEntry {
     working_directory: PathBuf,
 }
 
+#[derive(Clone)]
 struct CopyTemplate {
     shell: Shell,
     env: HashMap<String, String>,
@@ -1369,6 +1456,7 @@ struct CopyTemplate {
     path_hyperlink_regexes: Vec<String>,
     path_hyperlink_timeout: Duration,
     window_id: u64,
+    transfer: Option<TransferSetup>,
 }
 
 const FIND_HYPERLINK_THROTTLE_PX: Pixels = px(5.0);
@@ -1905,7 +1993,7 @@ impl Terminal {
     fn write_to_pty(&self, input: impl Into<Cow<'static, [u8]>>) {
         let input = input.into();
         #[cfg(any(test, feature = "test-support"))]
-        self.pty_write_log.borrow_mut().push(input.to_vec());
+        self.pty_write_log.lock().push(input.to_vec());
         if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
             if log::log_enabled!(log::Level::Debug) {
                 if let Ok(str) = str::from_utf8(&input) {
@@ -1918,7 +2006,48 @@ impl Terminal {
         }
     }
 
+    /// Whether a file transfer session currently owns this terminal's byte
+    /// stream.
+    pub fn transfer_is_active(&self) -> bool {
+        self.transfer
+            .as_ref()
+            .is_some_and(|transfer| transfer.is_active())
+    }
+
+    /// Cancel the active transfer session (§3.3). No-op without a session.
+    pub fn transfer_cancel(&self) {
+        if let Some(transfer) = &self.transfer {
+            transfer.shared().cancel();
+        }
+    }
+
+    /// Answer a pending "pick files to upload" dialog.
+    pub fn transfer_answer_upload_paths(&self, paths: Option<Vec<PathBuf>>) {
+        if let Some(transfer) = &self.transfer {
+            transfer.shared().answer_upload_paths(paths);
+        }
+    }
+
+    /// Answer a pending "choose download directory" dialog.
+    pub fn transfer_answer_download_dir(&self, dir: Option<PathBuf>) {
+        if let Some(transfer) = &self.transfer {
+            transfer.shared().answer_download_dir(dir);
+        }
+    }
+
     pub fn input(&mut self, input: impl Into<Cow<'static, [u8]>>) {
+        // Input arbitration during an active transfer (§3.3): keyboard,
+        // paste and mouse input must not interleave with protocol bytes.
+        // Esc cancels the session instead of reaching the remote.
+        if self.transfer_is_active() {
+            let input = input.into();
+            if &*input == b"\x1b" {
+                self.transfer_cancel();
+            } else if let Some(transfer) = &self.transfer {
+                transfer.shared().notify_input_refused();
+            }
+            return;
+        }
         self.keyboard_input_sent = true;
         self.write_input(input);
     }
@@ -1952,7 +2081,7 @@ impl Terminal {
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn take_pty_write_log(&mut self) -> Vec<Vec<u8>> {
-        std::mem::take(self.pty_write_log.get_mut())
+        std::mem::take(&mut *self.pty_write_log.lock())
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -2735,6 +2864,7 @@ impl Terminal {
             self.is_remote_terminal,
             self.template.window_id,
             None,
+            self.template.transfer.clone(),
             cx,
             self.activation_script.clone(),
             self.path_style,
@@ -3062,6 +3192,7 @@ mod tests {
                     false,
                     0,
                     Some(completion_tx),
+                    None,
                     cx,
                     vec![],
                     PathStyle::local(),
@@ -3430,6 +3561,7 @@ mod tests {
                     false,
                     0,
                     Some(completion_tx),
+                    None,
                     cx,
                     Vec::new(),
                     PathStyle::local(),
@@ -3497,6 +3629,7 @@ mod tests {
                     false,
                     0,
                     None,
+                    None,
                     cx,
                     Vec::new(),
                     PathStyle::local(),
@@ -3562,6 +3695,7 @@ mod tests {
                     false,
                     0,
                     Some(completion_tx),
+                    None,
                     cx,
                     Vec::new(),
                     PathStyle::local(),

@@ -20,6 +20,7 @@ use gpui::{
 use settings::Settings as _;
 use settings::settings_content::TerminalBell;
 use terminal_core::terminal_settings::TerminalSettings;
+use terminal_core::transfer_mux::TransferSetup;
 use terminal_core::{
     Clear as TerminalClear, Copy as TerminalCopyAction, MaybeNavigationTarget,
     Paste as TerminalPasteAction, PasteText as TerminalPasteTextAction, ScrollLineDown,
@@ -43,6 +44,7 @@ use crate::terminal::tab::{
     ScrollAction, TerminalTabEvent, navigation_target_text, open_navigation_target,
 };
 use crate::terminal::{TerminalElement, TerminalSearchBar, TerminalTab};
+use crate::transfer_ui::{TransferBar, transfer_setup};
 use crate::window_chrome;
 use crate::{
     ActivateNextPane, ActivatePreviousPane, CloseAll, CloseLeft, CloseOtherTabs, ClosePane,
@@ -1679,6 +1681,11 @@ fn render_terminal_pane(
     // the pane the user is actually in, so a split never displays a bar bound
     // to a different terminal.
     let search_bar = (search_active && active).then(|| TerminalSearchBar::new(tab.clone()));
+    // Transfers are per-pane too, but unlike the search bar they are shown
+    // even when the pane is not focused: an ongoing transfer must stay
+    // visible (§6).
+    let transfer_bar =
+        (!tab.read(cx).transfer_ui_state().is_empty()).then(|| TransferBar::new(tab.clone()));
 
     div()
         .id(("terminal-pane", pane_id))
@@ -1688,6 +1695,7 @@ fn render_terminal_pane(
         .flex_col()
         .bg(background_color)
         .when_some(search_bar, |this, search_bar| this.child(search_bar))
+        .when_some(transfer_bar, |this, transfer_bar| this.child(transfer_bar))
         .child(
             div()
                 .relative()
@@ -2056,6 +2064,7 @@ async fn build_terminal(
                 false,
                 0,
                 None,
+                launch.transfer,
                 cx,
                 Vec::new(),
                 PathStyle::local(),
@@ -2066,6 +2075,7 @@ async fn build_terminal(
 }
 
 struct TerminalLaunchArguments {
+    transfer: Option<TransferSetup>,
     working_directory: Option<PathBuf>,
     shell: util::shell::Shell,
     environment: collections::HashMap<String, String>,
@@ -2083,6 +2093,10 @@ fn launch_terminal_with<T>(
     launcher: impl FnOnce(TerminalLaunchArguments, &App) -> T,
 ) -> T {
     let launch = TerminalLaunchArguments {
+        // Transfers default to on (trzsz enabled, §8.3): an unconfigured
+        // `transfer` section must still arm the tap, otherwise detection can
+        // never fire.
+        transfer: transfer_setup(&settings.transfer.clone().unwrap_or_default()),
         working_directory: initial_directory
             .map(Path::to_path_buf)
             .or_else(|| standalone_working_directory(&settings.working_directory)),
