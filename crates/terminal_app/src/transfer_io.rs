@@ -23,7 +23,6 @@ struct HostInner {
     write_file: Option<(File, PathBuf)>,
     destination: Option<PathBuf>,
     staged: Vec<StagedRecord>,
-    committed: Vec<PathBuf>,
     /// Temp directory created for a session that opened a file before a
     /// destination was chosen. Tracked explicitly so cleanup only ever
     /// removes a directory this host created, never one the user picked.
@@ -46,17 +45,15 @@ impl AppTransferHost {
                 write_file: None,
                 destination: None,
                 staged: Vec::new(),
-                committed: Vec::new(),
                 fallback_session_dir: None,
             }),
         }
     }
-
-    /// Local paths that completed a transfer (for display and logging).
-    pub fn committed_paths(&self) -> Vec<PathBuf> {
-        self.inner.lock().committed.clone()
-    }
 }
+
+/// Linux `NAME_MAX` is 255 bytes and the hidden staging name adds a prefix and
+/// suffix, so a remote name is capped well below it.
+const MAX_LOCAL_NAME_BYTES: usize = 200;
 
 /// Strip everything dangerous from a remote-supplied file name (§7.2):
 /// directory components, `..`, NUL and control characters. The result is a
@@ -77,7 +74,35 @@ pub fn sanitize_remote_name(remote_name: &str) -> io::Result<String> {
             "unusable remote file name {remote_name:?}"
         )));
     }
-    Ok(base)
+    Ok(cap_name_length(&base))
+}
+
+/// Truncate a remote name to something the filesystem will accept, keeping the
+/// extension so the file still opens with the right program.
+fn cap_name_length(name: &str) -> String {
+    if name.len() <= MAX_LOCAL_NAME_BYTES {
+        return name.to_string();
+    }
+    let extension = Path::new(name).extension().and_then(|value| value.to_str());
+    let Some(extension) = extension.filter(|extension| extension.len() + 1 < MAX_LOCAL_NAME_BYTES)
+    else {
+        return truncate_at_char_boundary(name, MAX_LOCAL_NAME_BYTES).to_string();
+    };
+    let budget = MAX_LOCAL_NAME_BYTES - extension.len() - 1;
+    format!("{}.{}", truncate_at_char_boundary(name, budget), extension)
+}
+
+/// Longest prefix of `value` of at most `budget` bytes that ends on a UTF-8
+/// boundary.
+fn truncate_at_char_boundary(value: &str, budget: usize) -> &str {
+    if value.len() <= budget {
+        return value;
+    }
+    let mut end = budget;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 fn staging_root() -> PathBuf {
@@ -251,7 +276,7 @@ impl TransferHost for AppTransferHost {
         None
     }
 
-    fn request_download_dir(&self, _suggested_name: Option<&str>) -> Option<PathBuf> {
+    fn request_download_dir(&self) -> Option<PathBuf> {
         None
     }
 
@@ -290,7 +315,6 @@ impl TransferHost for AppTransferHost {
         {
             remove_dir_if_empty_logged(&directory);
         }
-        inner.committed.push(target.clone());
         Ok(target)
     }
 
@@ -305,6 +329,13 @@ impl TransferHost for AppTransferHost {
         if let Some(directory) = inner.fallback_session_dir.take() {
             remove_dir_if_empty_logged(&directory);
         }
+    }
+
+    fn reset(&self) {
+        // A restarted terminal reuses this host: neither the previous
+        // destination nor its staged files may leak into the next session.
+        self.discard_staged();
+        self.inner.lock().destination = None;
     }
 }
 
@@ -411,6 +442,30 @@ mod tests {
         assert!(sanitize_remote_name("a\u{7}b").is_err());
     }
 
+    /// A remote name longer than the filesystem's `NAME_MAX` (minus the hidden
+    /// staging prefix) must not make the staging file uncreatable.
+    #[test]
+    fn sanitize_caps_long_names() {
+        let long = format!("{}.bin", "x".repeat(400));
+        let capped = sanitize_remote_name(&long).unwrap();
+        assert!(
+            capped.len() <= MAX_LOCAL_NAME_BYTES,
+            "{} bytes",
+            capped.len()
+        );
+        assert!(capped.ends_with(".bin"));
+
+        let unicode = format!("{}.txt", "文".repeat(200));
+        let capped = sanitize_remote_name(&unicode).unwrap();
+        assert!(
+            capped.len() <= MAX_LOCAL_NAME_BYTES,
+            "{} bytes",
+            capped.len()
+        );
+        assert!(capped.is_char_boundary(capped.len()));
+        assert!(capped.ends_with(".txt"));
+    }
+
     #[test]
     fn staging_commit_round_trip() {
         let host = AppTransferHost::new(None, 1024);
@@ -446,8 +501,6 @@ mod tests {
         assert_eq!(fs::read(&final_path).unwrap(), b"column,column2\n1,2\n");
         assert!(!staged.exists());
 
-        let committed = host.committed_paths();
-        assert_eq!(committed, vec![final_path.clone()]);
         let _ = fs::remove_dir_all(destination);
     }
 
@@ -540,6 +593,34 @@ mod tests {
         assert!(staged.iter().all(|path| path.exists()));
         host.discard_staged();
         assert!(staged.iter().all(|path| !path.exists()));
+    }
+
+    /// A restarted terminal reuses its host, so a new session must not inherit
+    /// the previous destination or its staged files.
+    #[test]
+    fn reset_drops_stale_session_state() {
+        let host = AppTransferHost::new(None, 1024);
+        let destination = std::env::temp_dir().join("zedterm-transfer-test-reset");
+        let _ = fs::remove_dir_all(&destination);
+        fs::create_dir_all(&destination).unwrap();
+        host.set_destination(&destination);
+        host.open_write("stale.bin", None).unwrap();
+        let staged = host.close_write().unwrap();
+        assert!(staged.exists());
+
+        host.reset();
+        assert!(!staged.exists(), "staged files must be discarded");
+
+        // The previous destination is gone as well: a commit without a new one
+        // must fail instead of writing into the old directory.
+        host.open_write("next.bin", None).unwrap();
+        host.close_write().unwrap();
+        assert!(
+            host.commit().is_err(),
+            "a stale destination must not be reused"
+        );
+        host.discard_staged();
+        let _ = fs::remove_dir_all(&destination);
     }
 
     /// The copy fallback used when staging is on another filesystem (a

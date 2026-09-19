@@ -1114,16 +1114,17 @@ impl TerminalBuilder {
 
                 let pty_info = PtyProcessInfo::new(ProcessIdGetter::from(&pty), shell.program());
 
-                // Clones shared with the transfer wire writer; the tap path
-                // uses these, the plain path uses the originals.
-                let tap_events_tx = events_tx.clone();
-                #[cfg(any(test, feature = "test-support"))]
-                let wire_write_log = pty_write_log.clone();
-
                 // Connect the pty to the terminal, through the transfer tap
                 // when transfers are enabled (§3 of docs/TRANSFER_EXTENSION.md).
+                // The tap reads through a duplicate of the PTY master fd, which
+                // exists on unix only; on other platforms transfers stay
+                // unmounted, so the plain path is the only one.
                 let (pty_tx, runtime) = match transfer.as_ref() {
+                    #[cfg(unix)]
                     Some(transfer_setup) => {
+                        #[cfg(any(test, feature = "test-support"))]
+                        let wire_write_log = pty_write_log.clone();
+
                         let runtime = transfer_mux::TransferRuntime::new(
                             transfer_setup.registry.clone(),
                             transfer_setup.host.clone(),
@@ -1145,7 +1146,7 @@ impl TerminalBuilder {
                             })?;
                         let pty_tx = spawn_event_loop(
                             term.clone(),
-                            tap_events_tx,
+                            events_tx,
                             tapped,
                             pty_options.drain_on_exit,
                         )?;
@@ -1158,7 +1159,7 @@ impl TerminalBuilder {
                         }));
                         (pty_tx, Some(runtime))
                     }
-                    None => {
+                    _ => {
                         let pty_tx = spawn_event_loop(
                             term.clone(),
                             events_tx,
@@ -2035,21 +2036,41 @@ impl Terminal {
         }
     }
 
+    /// Whether user-originated bytes must be refused because a transfer owns
+    /// the PTY stream (§3.3). `Esc` cancels the session instead of reaching
+    /// the remote.
+    fn refuse_input_during_transfer(&self, input: &[u8]) -> bool {
+        if !self.transfer_is_active() {
+            return false;
+        }
+        if input == b"\x1b" {
+            self.transfer_cancel();
+        } else if let Some(transfer) = &self.transfer {
+            transfer.shared().notify_input_refused();
+        }
+        true
+    }
+
     pub fn input(&mut self, input: impl Into<Cow<'static, [u8]>>) {
-        // Input arbitration during an active transfer (§3.3): keyboard,
-        // paste and mouse input must not interleave with protocol bytes.
-        // Esc cancels the session instead of reaching the remote.
-        if self.transfer_is_active() {
-            let input = input.into();
-            if &*input == b"\x1b" {
-                self.transfer_cancel();
-            } else if let Some(transfer) = &self.transfer {
-                transfer.shared().notify_input_refused();
-            }
+        // Input arbitration during an active transfer (§3.3): keyboard and
+        // paste must not interleave with protocol bytes.
+        let input = input.into();
+        if self.refuse_input_during_transfer(&input) {
             return;
         }
         self.keyboard_input_sent = true;
         self.write_input(input);
+    }
+
+    /// Write a user-originated report that is not keyboard input (mouse,
+    /// focus, wheel) unless a transfer owns the stream. Unlike `write_input`
+    /// this must not scroll the terminal or clear the selection.
+    fn write_user_report(&self, input: impl Into<Cow<'static, [u8]>>) {
+        let input = input.into();
+        if self.refuse_input_during_transfer(&input) {
+            return;
+        }
+        self.write_to_pty(input);
     }
 
     pub fn is_pty(&self) -> bool {
@@ -2214,13 +2235,13 @@ impl Terminal {
 
     pub fn focus_in(&self) {
         if self.last_content.mode.contains(Modes::FOCUS_IN_OUT) {
-            self.write_to_pty("\x1b[I".as_bytes());
+            self.write_user_report("\x1b[I".as_bytes());
         }
     }
 
     pub fn focus_out(&mut self) {
         if self.last_content.mode.contains(Modes::FOCUS_IN_OUT) {
-            self.write_to_pty("\x1b[O".as_bytes());
+            self.write_user_report("\x1b[O".as_bytes());
         }
     }
 
@@ -2293,7 +2314,7 @@ impl Terminal {
                     );
 
                     if let Some(bytes) = bytes {
-                        self.write_to_pty(bytes);
+                        self.write_user_report(bytes);
                     }
                 }
             }
@@ -2458,7 +2479,7 @@ impl Terminal {
                 mouse_button_report(point, e.button, e.modifiers, true, self.last_content.mode);
 
             if let Some(bytes) = bytes {
-                self.write_to_pty(bytes);
+                self.write_user_report(bytes);
             }
         } else {
             match e.button {
@@ -2556,7 +2577,7 @@ impl Terminal {
                 mouse_button_report(point, e.button, e.modifiers, false, self.last_content.mode);
 
             if let Some(bytes) = bytes {
-                self.write_to_pty(bytes);
+                self.write_user_report(bytes);
             }
         } else {
             if e.button == MouseButton::Left && setting.copy_on_select {
@@ -2604,7 +2625,7 @@ impl Terminal {
                 if let Some(scrolls) = scroll_report(point, scroll_lines, e, self.last_content.mode)
                 {
                     for scroll in scrolls {
-                        self.write_to_pty(scroll);
+                        self.write_user_report(scroll);
                     }
                 };
             } else if self
@@ -5193,5 +5214,115 @@ mod tests {
 
         assert!(terminal.cwd_history.is_empty());
         assert_eq!(terminal.pending_cwd_boundary, None);
+    }
+
+    /// Host that accepts nothing; the input-gating test never reaches file IO.
+    struct NoopTransferHost;
+
+    impl transfer_core::TransferHost for NoopTransferHost {
+        fn open_read(&self, _path: &std::path::Path) -> std::io::Result<u64> {
+            Err(std::io::Error::other("noop"))
+        }
+        fn read_chunk(&self, _offset: u64, _max_len: usize) -> std::io::Result<Vec<u8>> {
+            Err(std::io::Error::other("noop"))
+        }
+        fn open_write(&self, _remote_name: &str, _size: Option<u64>) -> std::io::Result<String> {
+            Err(std::io::Error::other("noop"))
+        }
+        fn write_chunk(&self, _offset: u64, _data: &[u8]) -> std::io::Result<()> {
+            Err(std::io::Error::other("noop"))
+        }
+        fn close_write(&self) -> std::io::Result<PathBuf> {
+            Err(std::io::Error::other("noop"))
+        }
+        fn commit(&self) -> std::io::Result<PathBuf> {
+            Err(std::io::Error::other("noop"))
+        }
+        fn set_destination(&self, _destination: &std::path::Path) {}
+        fn request_upload_paths(&self) -> Option<Vec<PathBuf>> {
+            None
+        }
+        fn request_download_dir(&self) -> Option<PathBuf> {
+            None
+        }
+        fn discard_staged(&self) {}
+    }
+
+    /// Regression: the transfer input gate lived in `Terminal::input`, so
+    /// mouse/focus/wheel reports written straight to the PTY could interleave
+    /// with protocol bytes.
+    #[gpui::test]
+    async fn user_reports_are_refused_while_a_transfer_is_active(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+
+        let setup = transfer_mux::TransferSetup {
+            registry: Arc::new(transfer_mux::TransferRegistry::new(
+                vec![Arc::new(transfer_mux::LoopbackProvider)],
+                Vec::new(),
+            )),
+            host: Arc::new(NoopTransferHost),
+            policy: transfer_mux::TransferPolicy::default(),
+        };
+        let (program, args) =
+            ShellBuilder::new(&Shell::System, false).build(Some("cat".to_owned()), &[]);
+        let builder = cx
+            .update(|cx| {
+                TerminalBuilder::new(
+                    None,
+                    Shell::WithArguments {
+                        program,
+                        args,
+                        title_override: None,
+                    },
+                    HashMap::default(),
+                    SettingsCursorShape::default(),
+                    AlternateScroll::On,
+                    None,
+                    Vec::new(),
+                    Duration::ZERO,
+                    false,
+                    0,
+                    None,
+                    Some(setup),
+                    cx,
+                    Vec::new(),
+                    PathStyle::local(),
+                )
+            })
+            .await
+            .unwrap();
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+        cx.run_until_parked();
+
+        // `cat` echoes the trigger back, so the tap matches it and the session
+        // takes over the stream exactly as it would after a remote `trz`/`tsz`.
+        terminal.update(cx, |terminal, _| {
+            terminal.input(b"ZTLOOP:START\n".to_vec());
+            terminal.take_pty_write_log();
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !terminal.read_with(cx, |terminal, _| terminal.transfer_is_active()) {
+            assert!(Instant::now() < deadline, "the session never became active");
+            cx.background_executor
+                .timer(Duration::from_millis(10))
+                .await;
+        }
+
+        terminal.update(cx, |terminal, _| {
+            terminal.take_pty_write_log();
+            terminal.write_user_report(b"\x1b[Mmouse-move".to_vec());
+            // Keyboard input is refused too, but Esc is the cancel path.
+            terminal.input(b"x".to_vec());
+        });
+        let writes = terminal.update(cx, |terminal, _| terminal.take_pty_write_log());
+        assert!(
+            !writes.contains(&b"\x1b[Mmouse-move".to_vec()),
+            "mouse reports must be refused during a transfer: {writes:?}"
+        );
+        assert!(
+            !writes.contains(&b"x".to_vec()),
+            "keyboard input must be refused during a transfer: {writes:?}"
+        );
     }
 }

@@ -6,7 +6,8 @@ use std::sync::Arc;
 use gpui::{
     App, Context, Entity, IntoElement, ParentElement, RenderOnce, Styled, Window, div, relative,
 };
-use terminal_core::terminal_settings::TransferSettings;
+use settings::Settings as _;
+use terminal_core::terminal_settings::{TerminalSettings, TransferSettings};
 use terminal_core::transfer_mux::{TransferPolicy, TransferRegistry, TransferSetup};
 use terminal_core::{Direction, Terminal, TransferUiEvent};
 use theme::ActiveTheme as _;
@@ -143,7 +144,7 @@ impl TransferUiState {
     pub fn handle(
         &mut self,
         event: TransferUiEvent,
-        _terminal: &Entity<Terminal>,
+        terminal: &Entity<Terminal>,
         cx: &mut Context<crate::terminal::TerminalTab>,
     ) {
         match event {
@@ -171,8 +172,8 @@ impl TransferUiState {
             TransferUiEvent::AwaitingUploadPaths { .. } => {
                 self.prompt_upload_paths(cx);
             }
-            TransferUiEvent::AwaitingDownloadDir { suggested_name, .. } => {
-                self.prompt_download_dir(suggested_name, cx);
+            TransferUiEvent::AwaitingDownloadDir { .. } => {
+                self.prompt_download_dir(terminal, cx);
             }
             TransferUiEvent::Progress {
                 file_index,
@@ -280,9 +281,21 @@ impl TransferUiState {
     /// picked look like it had been replaced by a file.
     fn prompt_download_dir(
         &self,
-        _suggested_name: Option<String>,
+        terminal: &Entity<Terminal>,
         cx: &mut Context<crate::terminal::TerminalTab>,
     ) {
+        // A configured download directory with confirmation turned off is
+        // used as-is; otherwise the location is always confirmed (§7.1).
+        if let Some(transfer) = TerminalSettings::get_global(cx).transfer.as_ref()
+            && !transfer.confirm_before_download
+            && let Some(directory) = transfer.download_dir.clone()
+        {
+            terminal.update(cx, |terminal, _| {
+                terminal.transfer_answer_download_dir(Some(directory));
+            });
+            return;
+        }
+
         let receiver = cx.prompt_for_paths(download_dir_prompt_options());
         cx.spawn(async move |this, cx| {
             let answer = match receiver.await {
@@ -346,7 +359,7 @@ impl RenderOnce for TransferBar {
         let state = self.tab.read(cx).transfer_ui_state();
         let colors = cx.theme().colors();
 
-        let (text, ok, fraction) = if let Some(active) = &state.active {
+        let (text, ok, fraction, hint) = if let Some(active) = &state.active {
             let direction = match active.direction {
                 Some(Direction::Upload) => "Uploading",
                 Some(Direction::Download) => "Downloading",
@@ -371,12 +384,21 @@ impl RenderOnce for TransferBar {
                 active
                     .bytes_total
                     .filter(|total| *total > 0)
-                    .map(|total| active.bytes_done as f32 / total as f32),
+                    .map(|total| (active.bytes_done as f32 / total as f32).clamp(0.0, 1.0)),
+                // A hint raised while a transfer runs (refused input, a
+                // rejected second trigger) used to be shadowed by the
+                // progress text.
+                state.hint.clone(),
             )
         } else if let Some(finished) = &state.finished {
-            (finished.message.clone(), finished.ok, None)
+            (
+                finished.message.clone(),
+                finished.ok,
+                None,
+                state.hint.clone(),
+            )
         } else if let Some(hint) = &state.hint {
-            (hint.clone(), true, None)
+            (hint.clone(), true, None, None)
         } else {
             return div();
         };
@@ -436,6 +458,9 @@ impl RenderOnce for TransferBar {
                             }),
                     ),
             )
+            .when_some(hint, |bar, hint| {
+                bar.child(Label::new(hint).size(LabelSize::Small).color(Color::Muted))
+            })
             .when_some(progress, |bar, progress| bar.child(progress))
     }
 }
@@ -485,16 +510,29 @@ mod tests {
         assert_eq!(setup.policy.max_session_bytes, 4096 * 1024 * 1024);
     }
 
+    fn active_transfer() -> ActiveTransfer {
+        ActiveTransfer {
+            provider: "trzsz".into(),
+            direction: Some(Direction::Download),
+            file_index: 0,
+            file_count: 1,
+            bytes_done: 0,
+            bytes_total: Some(10),
+        }
+    }
+
     /// Regression: a finished bar had a disabled Close button whose only
     /// action was `transfer_cancel`, so "Saved <path>" stayed on screen
     /// forever after a download.
     #[test]
     fn dismiss_clears_the_finished_bar() {
-        let mut state = TransferUiState::default();
-        state.finished = Some(FinishedTransfer {
-            message: "Saved /tmp/report.csv".into(),
-            ok: true,
-        });
+        let mut state = TransferUiState {
+            finished: Some(FinishedTransfer {
+                message: "Saved /tmp/report.csv".into(),
+                ok: true,
+            }),
+            ..TransferUiState::default()
+        };
         assert!(!state.is_empty());
 
         state.dismiss();
@@ -503,16 +541,11 @@ mod tests {
 
     #[test]
     fn dismiss_clears_a_hint_and_leaves_an_active_transfer_alone() {
-        let mut state = TransferUiState::default();
-        state.hint = Some("Already transferring".into());
-        state.active = Some(ActiveTransfer {
-            provider: "trzsz".into(),
-            direction: Some(Direction::Download),
-            file_index: 0,
-            file_count: 1,
-            bytes_done: 0,
-            bytes_total: Some(10),
-        });
+        let mut state = TransferUiState {
+            hint: Some("Already transferring".into()),
+            active: Some(active_transfer()),
+            ..TransferUiState::default()
+        };
 
         state.dismiss();
         assert!(state.hint.is_none());
@@ -524,15 +557,10 @@ mod tests {
 
     #[test]
     fn cancel_without_an_error_reports_cancelled() {
-        let mut state = TransferUiState::default();
-        state.active = Some(ActiveTransfer {
-            provider: "trzsz".into(),
-            direction: Some(Direction::Download),
-            file_index: 0,
-            file_count: 1,
-            bytes_done: 0,
-            bytes_total: None,
-        });
+        let mut state = TransferUiState {
+            active: Some(active_transfer()),
+            ..TransferUiState::default()
+        };
 
         state.on_cancelled();
         assert!(state.active.is_none());

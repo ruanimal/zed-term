@@ -255,7 +255,8 @@ pub enum SessionAction {
     /// UI 事件的 request_id 由 mux 铸造（helper 会话透传 helper 的 id，§5.3）；
     /// 同一 pane 同时最多一个未决 picker，回填 HostEvent 时无需携带 id。
     NeedUploadPaths,
-    NeedDownloadDir { suggested_name: Option<String> },
+    /// 只选目录；文件名由远端 `#NAME` sanitize 得到（§7.2），所以没有建议名参数。
+    NeedDownloadDir,
     Progress { file_index: usize, file_count: usize, bytes_done: u64, bytes_total: Option<u64> },
     Done { paths: Vec<std::path::PathBuf> },
     Failed(String),
@@ -469,7 +470,7 @@ pub enum TransferUiEvent {
     // 方向由随后出现的对话框类型揭示（选文件=上传 / 选目录=下载）
     Detected { provider_id: Arc<str>, direction: Option<Direction>, remote_names: Vec<String> },
     AwaitingUploadPaths { request_id: u64 },       // Tab 弹文件选择框
-    AwaitingDownloadDir { request_id: u64, suggested_name: Option<String> },
+    AwaitingDownloadDir { request_id: u64 },
     Progress { provider_id: Arc<str>, file_index: usize, file_count: usize,
                bytes_done: u64, bytes_total: Option<u64> },
     Completed { paths: Vec<PathBuf> },
@@ -492,9 +493,11 @@ pub enum TransferUiEvent {
 
 远端字节视为**攻击者可控**（被攻陷的服务器、恶意 `curl | sh` 输出）：
 
-1. **下载永远先确认**：自动检测到下载触发也必须弹保存位置（或确认已配置目录），
-   禁止静默落盘。上传选文件同理（本地用户动作）。
-2. **文件名 jail**：剥离目录成分，拒绝绝对路径/`..`/NUL/控制字符；
+1. **下载永远先确认**：自动检测到下载触发也必须弹目录选择框（或使用配置好的
+   `download_dir` + `confirm_before_download=false`），禁止静默落盘到未确认的位置。
+   上传选文件同理（本地用户动作）。
+2. **文件名 jail**：剥离目录成分，拒绝绝对路径/`..`/NUL/控制字符，并截断到
+   200 字节（保留扩展名、按 UTF-8 边界切；`NAME_MAX` 255 减去隐藏临时名前后缀）；
    下载框只选**目录**，文件名由远端 `#NAME` sanitize 得到（不向用户索要文件名，
    也不让对话框的默认名变成文件名）：最终路径 = 下载目录 join(sanitized basename)；
    目标已存在 → 覆盖前确认（或自动 `name (2)`，Phase 1 选"确认"，简单可预测）。
@@ -525,7 +528,7 @@ manifest 声明驱动，settings 里以 provider id 为 key 的开放表承载�
 {
   "terminal": {
     "transfer": {
-      "download_dir": null,          // null = 每次都问；设了则作为默认/回退目录（目录框不支持预置初值，UI 仍会弹目录选择框，§7.1）
+      "download_dir": null,          // 与 confirm_before_download=false 搭配时作为免询问的落盘目录；否则仍弹目录选择框（§7.1）
       "max_file_size_mb": 2048,      // §7.4
       "max_session_mb": 4096,        // §5.5.3（含 helper 会话）
       "confirm_before_download": true,

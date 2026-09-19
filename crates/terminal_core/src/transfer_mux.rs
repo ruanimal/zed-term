@@ -3,7 +3,6 @@
 //! §2–§5.
 
 use parking_lot::Mutex;
-use std::cmp::Reverse;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -52,7 +51,6 @@ pub enum TransferUiEvent {
     },
     AwaitingDownloadDir {
         request_id: u64,
-        suggested_name: Option<String>,
     },
     Progress {
         provider_id: Arc<str>,
@@ -151,7 +149,9 @@ impl TransferShared {
         self.emit_ui(TransferUiEvent::InputRefused);
     }
 
-    fn send_driver(&self, msg: DriverMsg) {
+    /// Queue a message for the session driver. Crate-visible so the app can
+    /// drive a session directly (tests, manual uploads).
+    pub(crate) fn send_driver(&self, msg: DriverMsg) {
         // A send failure means the driver is gone (transfer finished or the
         // terminal closed); leftover triggers/answers are meaningless then.
         if let Err(error) = self.driver_tx.lock().send(msg) {
@@ -187,20 +187,46 @@ struct DetectorEntry {
     detector: Box<dyn TransferDetector>,
 }
 
+/// What the IO thread should do with a processed read chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Delivery {
+    /// The first `n` bytes of the chunk are parser input, still in place in
+    /// the caller's read buffer. `n == 0` means the chunk was swallowed up to
+    /// a match at its first byte.
+    Parser(usize),
+    /// The chunk was consumed by the tap; nothing in the read buffer belongs
+    /// to the parser. Parser-bound bytes may still be queued in `pending`.
+    Consumed,
+}
+
 /// Byte-flow state, owned by the IO thread (through the `core` lock).
+///
+/// Invariants:
+/// * `hold` is always the tail of the bytes fed to the detectors, and
+///   `fed_offset` is how many bytes were fed since the detectors were last
+///   reset. Detector trigger ranges are absolute in that coordinate space, so
+///   `combined_start = fed_offset_at_chunk_start - hold.len()`.
+/// * Parser-bound bytes are never emitted out of order: anything held for a
+///   candidate that just resolved is moved to `pending` *before* the chunk
+///   that resolved it, and `pending` is always drained before new PTY bytes.
+/// * A trigger can never straddle a flush: flushing resets the detectors, so
+///   the range they report can never point past the flushed bytes.
 struct TapCore {
     registry: Arc<TransferRegistry>,
     detectors: Vec<DetectorEntry>,
     /// Bytes withheld from the parser while a candidate is undecided.
     hold: Vec<u8>,
+    /// When the most recent byte was added to `hold`; the release timeout
+    /// means "no new byte for `HOLD_RELEASE_TIMEOUT`".
     hold_since: Option<Instant>,
-    /// Bytes fed to the detectors since their last reset; detector trigger
-    /// ranges are absolute in this coordinate space. The `hold` bytes are the
-    /// tail of this range.
+    /// Bytes fed to the detectors since their last reset.
     fed_offset: u64,
-    /// Parser-bound bytes that could not be returned in place (they include
-    /// previously held bytes); served by the next `read` call.
+    /// Parser-bound bytes that could not be returned in place; always served
+    /// before reading more PTY data.
     pending: Vec<u8>,
+    /// Whether a session owned the stream on the previous chunk, so the
+    /// detectors can be reset once it ends.
+    session_owned: bool,
 }
 
 impl TapCore {
@@ -211,32 +237,49 @@ impl TapCore {
         count
     }
 
-    /// Release held bytes to the parser and reset the detectors, so a trigger
-    /// can never straddle a flush (§3.2 invariant).
-    fn release_hold(&mut self) {
-        if !self.hold.is_empty() {
-            self.pending.extend_from_slice(&self.hold);
-            self.hold.clear();
-        }
-        self.hold_since = None;
+    fn is_holding(&self) -> bool {
+        !self.hold.is_empty()
+    }
+
+    /// Reset the detectors and their coordinate space. Detector state and
+    /// `fed_offset` must only ever be reset together.
+    fn reset_detectors(&mut self) {
         for entry in &mut self.detectors {
             entry.detector.reset();
         }
         self.fed_offset = 0;
     }
 
-    /// Process one read chunk. Returns how many leading bytes of the chunk
-    /// are parser bytes still in the read buffer (in-place passthrough);
-    /// `None` when nothing can be handed to the parser from this call (bytes
-    /// were held, diverted, or are pending and served on the next call).
-    fn process(&mut self, chunk: &[u8], shared: &TransferShared) -> Option<usize> {
-        if self.detectors.is_empty() {
-            return Some(chunk.len());
+    /// Release held bytes to the parser and reset detection, so a trigger can
+    /// never straddle a flush (§3.2 invariant).
+    fn release_hold(&mut self) {
+        if !self.hold.is_empty() {
+            self.pending.extend_from_slice(&self.hold);
+            self.hold.clear();
         }
+        self.hold_since = None;
+        self.reset_detectors();
+    }
 
+    /// Process one read chunk.
+    fn process(&mut self, chunk: &[u8], shared: &TransferShared) -> Delivery {
+        // An active session owns the stream whether or not this terminal has
+        // detectors (a manual upload can run without any).
         if shared.is_active() {
+            self.session_owned = true;
             shared.divert(chunk);
-            return None;
+            return Delivery::Consumed;
+        }
+        if self.session_owned {
+            // The session ended: its match left the detectors mid-candidate
+            // and `fed_offset` at zero, so start detection fresh.
+            self.session_owned = false;
+            self.hold.clear();
+            self.hold_since = None;
+            self.reset_detectors();
+        }
+        if self.detectors.is_empty() {
+            return Delivery::Parser(chunk.len());
         }
 
         let fed_before = self.fed_offset;
@@ -257,14 +300,11 @@ impl TapCore {
                 _ => None,
             })
             .min_by_key(|(index, offer, _)| {
-                (
-                    Reverse(self.registry.priority_rank(&offer.provider_id)),
-                    *index,
-                )
+                (self.registry.priority_rank(&offer.provider_id), *index)
             });
 
         if let Some((_, offer, trigger)) = matched {
-            return Some(self.begin_session(offer, trigger, fed_before, chunk, shared));
+            return self.begin_session(offer, trigger, fed_before, chunk, shared);
         }
 
         if verdicts
@@ -273,21 +313,28 @@ impl TapCore {
         {
             self.fed_offset += chunk.len() as u64;
             self.hold.extend_from_slice(chunk);
-            self.hold_since.get_or_insert_with(Instant::now);
+            self.hold_since = Some(Instant::now());
             if self.hold.len() > HOLD_WINDOW_BYTES {
-                // Window full without a match: release what was held so far
-                // and re-detect this chunk from scratch (§3.2).
+                // The window is full with no decision, so no trigger starting
+                // inside it can still be completed. Release everything held,
+                // in order, and detect again after it. Never re-feed the same
+                // bytes: that would recurse without bound (§3.2).
                 self.release_hold();
-                return self.process(chunk, shared);
             }
-            return None;
+            return Delivery::Consumed;
         }
 
-        for entry in &mut self.detectors {
-            entry.detector.reset();
+        // NoMatch: a candidate that just failed must reach the parser before
+        // this chunk, so the two are queued together and in order.
+        self.reset_detectors();
+        if self.hold.is_empty() {
+            return Delivery::Parser(chunk.len());
         }
-        self.fed_offset = 0;
-        Some(chunk.len())
+        self.pending.extend_from_slice(&self.hold);
+        self.hold.clear();
+        self.hold_since = None;
+        self.pending.extend_from_slice(chunk);
+        Delivery::Consumed
     }
 
     fn begin_session(
@@ -297,7 +344,7 @@ impl TapCore {
         fed_before: u64,
         chunk: &[u8],
         shared: &TransferShared,
-    ) -> usize {
+    ) -> Delivery {
         let combined: Vec<u8> = {
             let mut combined = std::mem::take(&mut self.hold);
             combined.extend_from_slice(chunk);
@@ -308,9 +355,9 @@ impl TapCore {
 
         // Detector coordinates are absolute since the last reset; `combined`
         // starts at `fed_before - held.len()` in that space.
-        let combined_start = fed_before - (combined.len() - chunk.len()) as u64;
+        let combined_start = fed_before.saturating_sub((combined.len() - chunk.len()) as u64);
         let start = trigger.start.saturating_sub(combined_start) as usize;
-        let end = (trigger.end.saturating_sub(combined_start)) as usize;
+        let end = trigger.end.saturating_sub(combined_start) as usize;
 
         let session_bytes = combined[end.min(combined.len())..].to_vec();
 
@@ -329,11 +376,11 @@ impl TapCore {
         // are entirely inside this chunk (the common, zero-copy case);
         // otherwise they include previously held bytes and go via `pending`.
         if combined.len() == chunk.len() && start <= chunk.len() {
-            return start;
+            return Delivery::Parser(start);
         }
         self.pending
             .extend_from_slice(&combined[..start.min(combined.len())]);
-        0
+        Delivery::Consumed
     }
 }
 
@@ -342,12 +389,24 @@ impl TapCore {
 /// readiness and the tap's reads see the same stream.
 pub trait TapSource: EventedPty {
     fn tap_reader(&self) -> io::Result<Self::Reader>;
+
+    /// Descriptor the tap can wait on while a trigger candidate is
+    /// undecided. `None` when the reader is not a real PTY (tests), in which
+    /// case the caller drives further reads itself.
+    fn tap_fd(&self) -> Option<i32> {
+        None
+    }
 }
 
 #[cfg(unix)]
 impl TapSource for alacritty_terminal::tty::Pty {
     fn tap_reader(&self) -> io::Result<std::fs::File> {
         self.file().try_clone()
+    }
+
+    fn tap_fd(&self) -> Option<i32> {
+        use std::os::fd::AsRawFd as _;
+        Some(self.file().as_raw_fd())
     }
 }
 
@@ -357,20 +416,63 @@ impl TapSource for alacritty_terminal::tty::Pty {
 /// path as user input.
 pub struct TapPty<P: TapSource> {
     inner: P,
-    #[cfg(unix)]
     reader: TapReader<P::Reader>,
 }
 
 pub struct TapReader<R> {
     inner: R,
     shared: Arc<TransferShared>,
+    /// Duplicate master fd used to wait (bounded) for the rest of a possible
+    /// trigger. `None` in tests, which drive the reads themselves.
+    fd: Option<i32>,
+}
+
+fn would_block() -> io::Error {
+    io::Error::from(io::ErrorKind::WouldBlock)
+}
+
+impl<R> TapReader<R> {
+    pub fn new(inner: R, shared: Arc<TransferShared>, fd: Option<i32>) -> Self {
+        TapReader { inner, shared, fd }
+    }
+
+    /// Wait up to `timeout` for more PTY bytes while a candidate is held.
+    /// `false` means the timeout elapsed with nothing to read.
+    #[cfg(unix)]
+    fn wait_readable(&self, timeout: Duration) -> io::Result<bool> {
+        let Some(fd) = self.fd else {
+            return Ok(false);
+        };
+        let mut poll_fd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
+        loop {
+            let result = unsafe { libc::poll(&mut poll_fd, 1, millis) };
+            if result < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            return Ok(result > 0);
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn wait_readable(&self, _timeout: Duration) -> io::Result<bool> {
+        Ok(false)
+    }
 }
 
 impl<R: io::Read> io::Read for TapReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // 1. Parser bytes queued by an earlier match or flush.
-        // 2. Timed-out hold: release it to the parser now that the PTY has
-        //    nothing to say (§3.2 time bound; no dedicated timer needed).
+        // 2. A hold whose time bound already elapsed (the path tests exercise;
+        //    production flushes from the wait below instead).
         {
             let mut core = self.shared.core.lock();
             let count = core.take_pending(buf);
@@ -389,21 +491,75 @@ impl<R: io::Read> io::Read for TapReader<R> {
             }
         }
 
-        let count = self.inner.read(buf)?;
-        if count == 0 {
-            return Ok(0);
-        }
+        loop {
+            match self.inner.read(buf) {
+                // End of stream: never drop a candidate that was being held,
+                // it can no longer be completed.
+                Ok(0) => {
+                    let mut core = self.shared.core.lock();
+                    if core.is_holding() {
+                        core.release_hold();
+                        let queued = core.take_pending(buf);
+                        if queued > 0 {
+                            return Ok(queued);
+                        }
+                    }
+                    return Ok(0);
+                }
+                Ok(count) => {
+                    let delivery = self.shared.core.lock().process(&buf[..count], &self.shared);
+                    match delivery {
+                        // Passthrough: the bytes are already where the event
+                        // loop expects them.
+                        Delivery::Parser(parser_bytes) if parser_bytes > 0 => {
+                            return Ok(parser_bytes);
+                        }
+                        // Fully swallowed (a match at the chunk start): this
+                        // must surface as WouldBlock, never as `Ok(0)` (EOF).
+                        Delivery::Parser(_) => return Err(would_block()),
+                        Delivery::Consumed => {
+                            let mut core = self.shared.core.lock();
+                            let queued = core.take_pending(buf);
+                            if queued > 0 {
+                                return Ok(queued);
+                            }
+                            if !core.is_holding() {
+                                // Diverted to a session, or a match whose
+                                // prefix came from this chunk only.
+                                return Err(would_block());
+                            }
+                        }
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if !self.shared.core.lock().is_holding() {
+                        return Err(error);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
 
-        let decision = self.shared.core.lock().process(&buf[..count], &self.shared);
-        match decision {
-            // Passthrough: the bytes are already where the event loop
-            // expects them. A zero length means the chunk was fully
-            // swallowed (match at the chunk start); it must surface as
-            // WouldBlock, never as `Ok(0)` (EOF).
-            Some(parser_bytes) if parser_bytes > 0 => Ok(parser_bytes),
-            // The chunk was held, diverted, or queued as pending; the event
-            // loop must not treat the (consumed) bytes as parser input.
-            _ => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+            // A candidate is held and the stream has nothing to give right
+            // now. The event loop only reads when the PTY signals readiness,
+            // so waiting here is what makes the §3.2 time bound real: without
+            // it a prefix held just before the remote goes quiet would never
+            // be released.
+            if self.fd.is_none() {
+                // Not a waitable stream: leave the hold for the caller's next
+                // read (the expiry check above releases it).
+                return Err(would_block());
+            }
+            if self.wait_readable(HOLD_RELEASE_TIMEOUT)? {
+                continue;
+            }
+            let mut core = self.shared.core.lock();
+            core.release_hold();
+            let queued = core.take_pending(buf);
+            return if queued > 0 {
+                Ok(queued)
+            } else {
+                Err(would_block())
+            };
         }
     }
 }
@@ -412,19 +568,14 @@ impl<P: TapSource> TapPty<P> {
     /// Wrap `pty` with the transfer tap. `shared` comes from
     /// [`TransferRuntime::shared`].
     pub fn new(pty: P, shared: Arc<TransferShared>) -> io::Result<Self> {
-        let reader = TapReader {
-            inner: pty.tap_reader()?,
-            shared,
-        };
+        let fd = pty.tap_fd();
+        let reader = TapReader::new(pty.tap_reader()?, shared, fd);
         Ok(TapPty { inner: pty, reader })
     }
 }
 
 impl<P: TapSource> EventedReadWrite for TapPty<P> {
-    #[cfg(unix)]
     type Reader = TapReader<P::Reader>;
-    #[cfg(not(unix))]
-    type Reader = P::Reader;
     type Writer = P::Writer;
 
     unsafe fn register(
@@ -451,14 +602,8 @@ impl<P: TapSource> EventedReadWrite for TapPty<P> {
         self.inner.deregister(poll)
     }
 
-    #[cfg(unix)]
     fn reader(&mut self) -> &mut Self::Reader {
         &mut self.reader
-    }
-
-    #[cfg(not(unix))]
-    fn reader(&mut self) -> &mut Self::Reader {
-        self.inner.reader()
     }
 
     fn writer(&mut self) -> &mut Self::Writer {
@@ -575,6 +720,7 @@ impl TransferRuntime {
                 hold_since: None,
                 fed_offset: 0,
                 pending: Vec::new(),
+                session_owned: false,
                 registry: registry.clone(),
             }),
             state: AtomicU8::new(0),
@@ -584,6 +730,11 @@ impl TransferRuntime {
             wire_writer: Mutex::new(None),
             wire_in_flight: AtomicUsize::new(0),
         });
+
+        // A host can outlive one session runtime (a restarted terminal reuses
+        // its `TransferSetup`), so start from a clean slate rather than the
+        // previous session's destination or staged files.
+        host.reset();
 
         let driver_shared = shared.clone();
         // The driver thread ends on Shutdown (runtime drop), on session
@@ -815,6 +966,14 @@ fn run_actions(
                     size,
                     local_name: None,
                 });
+                // Enforce the per-file cap before the size is announced to the
+                // remote, rather than failing halfway through the upload.
+                if let Ok(opened) = &result
+                    && opened.size > policy.max_file_size
+                {
+                    fail_session(slot, shared, host, "file size limit exceeded".into());
+                    return;
+                }
                 let actions = driver.session.submit(HostEvent::FileOpened(result));
                 run_actions(actions, slot, shared, host, policy);
             }
@@ -844,6 +1003,14 @@ fn run_actions(
                 run_actions(actions, slot, shared, host, policy);
             }
             SessionAction::WriteFile { offset, data } => {
+                // The provider may not know the final size when it opens a
+                // staging file (trzsz sends SIZE only after NAME), so the cap
+                // is enforced here against the file position the session
+                // reports.
+                if offset.saturating_add(data.len() as u64) > policy.max_file_size {
+                    fail_session(slot, shared, host, "file size limit exceeded".into());
+                    return;
+                }
                 let result = host.write_chunk(offset, &data);
                 let actions = driver
                     .session
@@ -868,14 +1035,13 @@ fn run_actions(
                 });
                 host.request_upload_paths();
             }
-            SessionAction::NeedDownloadDir { suggested_name } => {
+            SessionAction::NeedDownloadDir => {
                 driver.next_request_id += 1;
                 driver.picker_deadline = Some(Instant::now() + policy.picker_timeout);
                 shared.emit_ui(TransferUiEvent::AwaitingDownloadDir {
                     request_id: driver.next_request_id,
-                    suggested_name: suggested_name.clone(),
                 });
-                host.request_download_dir(suggested_name.as_deref());
+                host.request_download_dir();
             }
             SessionAction::Progress {
                 file_index,
@@ -974,23 +1140,36 @@ const LOOPBACK_END: &[u8] = b"ZTLOOP:END\n";
 /// reads arbitrarily.
 pub struct LineTriggerDetector {
     prefix: Vec<u8>,
+    provider_id: Arc<str>,
     /// Longest suffix of the consumed stream that is a proper prefix of
     /// `prefix`; these bytes must not reach the parser yet.
     tail: Vec<u8>,
     candidate_start: Option<u64>,
     line_len: usize,
+    /// Bytes fed since the last `reset`. Trigger ranges are reported in this
+    /// coordinate space, so only `reset()` may touch it.
     position: u64,
 }
 
 impl LineTriggerDetector {
-    pub fn new(prefix: &[u8]) -> Self {
+    pub fn new(prefix: &[u8], provider_id: Arc<str>) -> Self {
         LineTriggerDetector {
             prefix: prefix.to_vec(),
+            provider_id,
             tail: Vec::new(),
             candidate_start: None,
             line_len: 0,
             position: 0,
         }
+    }
+
+    /// Drop an open candidate without touching `position`: the caller (the
+    /// mux) still measures trigger ranges from the last `reset`, so a false
+    /// alarm in the middle of a batch must not rebase them.
+    fn clear_candidate(&mut self) {
+        self.tail.clear();
+        self.candidate_start = None;
+        self.line_len = 0;
     }
 }
 
@@ -1007,7 +1186,7 @@ impl TransferDetector for LineTriggerDetector {
                 self.line_len = 0;
                 return DetectorVerdict::Matched {
                     offer: TransferOffer {
-                        provider_id: "loopback".into(),
+                        provider_id: self.provider_id.clone(),
                         direction: None,
                         remote_names: Vec::new(),
                     },
@@ -1015,7 +1194,7 @@ impl TransferDetector for LineTriggerDetector {
                 };
             }
             if self.line_len > HOLD_WINDOW_BYTES {
-                self.reset();
+                self.clear_candidate();
                 return DetectorVerdict::NoMatch;
             }
             return DetectorVerdict::NeedMore;
@@ -1047,9 +1226,7 @@ impl TransferDetector for LineTriggerDetector {
     }
 
     fn reset(&mut self) {
-        self.tail.clear();
-        self.candidate_start = None;
-        self.line_len = 0;
+        self.clear_candidate();
         self.position = 0;
     }
 }
@@ -1112,7 +1289,7 @@ impl TransferProvider for LoopbackProvider {
     }
 
     fn new_detector(&self) -> Box<dyn TransferDetector> {
-        Box::new(LineTriggerDetector::new(LOOPBACK_PREFIX))
+        Box::new(LineTriggerDetector::new(LOOPBACK_PREFIX, self.id()))
     }
 
     fn start_session(&self, _offer: &TransferOffer) -> Box<dyn TransferSession> {
@@ -1157,8 +1334,15 @@ mod tests {
     fn test_shared(
         providers: Vec<Arc<dyn TransferProvider>>,
     ) -> (TransferRuntime, Arc<TransferShared>) {
+        test_shared_with_priority(providers, Vec::new())
+    }
+
+    fn test_shared_with_priority(
+        providers: Vec<Arc<dyn TransferProvider>>,
+        priority: Vec<Arc<str>>,
+    ) -> (TransferRuntime, Arc<TransferShared>) {
         let runtime = TransferRuntime::new(
-            Arc::new(TransferRegistry::new(providers, vec![])),
+            Arc::new(TransferRegistry::new(providers, priority)),
             Arc::new(NoopHost),
             TransferPolicy::default(),
         );
@@ -1191,7 +1375,7 @@ mod tests {
         fn request_upload_paths(&self) -> Option<Vec<PathBuf>> {
             None
         }
-        fn request_download_dir(&self, _suggested_name: Option<&str>) -> Option<PathBuf> {
+        fn request_download_dir(&self) -> Option<PathBuf> {
             None
         }
         fn discard_staged(&self) {}
@@ -1218,10 +1402,7 @@ mod tests {
             rest = remainder;
         }
 
-        let mut tap = TapReader {
-            inner: reader,
-            shared,
-        };
+        let mut tap = TapReader::new(reader, shared, None);
         let mut output = Vec::new();
         let mut buf = [0u8; 8192];
         loop {
@@ -1245,10 +1426,7 @@ mod tests {
                 b"ART\nDATA".to_vec(),
             ]),
         };
-        let mut tap = TapReader {
-            inner: reader,
-            shared: shared.clone(),
-        };
+        let mut tap = TapReader::new(reader, shared.clone(), None);
         let mut buf = [0u8; 4096];
 
         assert_eq!(tap.read(&mut buf).unwrap(), 6);
@@ -1281,10 +1459,7 @@ mod tests {
         let reader = ChunkReader {
             chunks: VecDeque::from(vec![b"ZTLOOP:ST".to_vec()]),
         };
-        let mut tap = TapReader {
-            inner: reader,
-            shared: shared.clone(),
-        };
+        let mut tap = TapReader::new(reader, shared.clone(), None);
         let mut buf = [0u8; 4096];
         assert_would_block(&mut tap, &mut buf);
 
@@ -1294,6 +1469,163 @@ mod tests {
             core.hold_since = Some(Instant::now() - HOLD_RELEASE_TIMEOUT - Duration::from_secs(1));
         }
         // Next read (PTY quiet) must flush the held bytes to the parser.
+        let count = tap.read(&mut buf).unwrap();
+        assert_eq!(&buf[..count], b"ZTLOOP:ST");
+        assert!(!shared.is_active());
+    }
+
+    /// Regression: a candidate that is refuted by the next read used to leave
+    /// the held prefix behind while the new chunk was parsed first, so the
+    /// terminal showed the bytes out of order (and a later match could compute
+    /// a bogus trigger range from the stale hold).
+    #[test]
+    fn refuted_candidate_reaches_the_parser_in_order() {
+        let (_runtime, shared) = test_shared(vec![Arc::new(LoopbackProvider)]);
+        let reader = ChunkReader {
+            chunks: VecDeque::from(vec![b"hello ZTLOOP:ST".to_vec(), b"OP!".to_vec()]),
+        };
+        let mut tap = TapReader::new(reader, shared.clone(), None);
+        let mut buf = [0u8; 4096];
+
+        // The partial prefix is held, so nothing reaches the parser yet.
+        assert_would_block(&mut tap, &mut buf);
+
+        // The candidate is refuted: both chunks must arrive, in order.
+        let count = tap.read(&mut buf).unwrap();
+        assert_eq!(&buf[..count], b"hello ZTLOOP:STOP!");
+        assert!(!shared.is_active());
+    }
+
+    /// Regression: a read chunk that filled the hold window used to re-feed
+    /// itself through `process` and recurse until the stack overflowed. Any
+    /// `> HOLD_WINDOW_BYTES` burst ending in a partial trigger could kill the
+    /// process.
+    #[test]
+    fn oversized_hold_window_flushes_without_recursing() {
+        let (_runtime, shared) = test_shared(vec![Arc::new(LoopbackProvider)]);
+        let mut chunk = vec![b'a'; HOLD_WINDOW_BYTES + 16];
+        let tail = b"ZTLOOP:ST";
+        let start = chunk.len() - tail.len();
+        chunk[start..].copy_from_slice(tail);
+
+        let reader = ChunkReader {
+            chunks: VecDeque::from(vec![chunk.clone()]),
+        };
+        let mut tap = TapReader::new(reader, shared.clone(), None);
+        let mut buf = [0u8; 8192];
+        let mut output = Vec::new();
+        loop {
+            match tap.read(&mut buf) {
+                Ok(0) => break,
+                Ok(count) => output.extend_from_slice(&buf[..count]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("{error}"),
+            }
+        }
+        assert_eq!(output, chunk, "the held window must not be dropped");
+        assert!(!shared.is_active());
+    }
+
+    /// A provider under a chosen id, so two providers can match the same bytes
+    /// and priority adjudication is observable through `Detected`.
+    struct AliasedLoopback(Arc<str>);
+
+    impl TransferProvider for AliasedLoopback {
+        fn id(&self) -> Arc<str> {
+            self.0.clone()
+        }
+
+        fn display_name(&self) -> Arc<str> {
+            self.0.clone()
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                auto_detect: true,
+                ..Capabilities::default()
+            }
+        }
+
+        fn manifest(&self) -> ProviderManifest {
+            ProviderManifest {
+                id: self.id(),
+                display_name: self.display_name(),
+                capabilities: self.capabilities(),
+                default_config: serde_json::json!({ "enabled": true }),
+                config_schema: serde_json::json!({}),
+            }
+        }
+
+        fn configure(&mut self, _config: &serde_json::Value) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn new_detector(&self) -> Box<dyn TransferDetector> {
+            Box::new(LineTriggerDetector::new(LOOPBACK_PREFIX, self.id()))
+        }
+
+        fn start_session(&self, _offer: &TransferOffer) -> Box<dyn TransferSession> {
+            Box::new(LoopbackSession { buffer: Vec::new() })
+        }
+
+        fn start_manual_upload(&self) -> Option<Box<dyn TransferSession>> {
+            None
+        }
+    }
+
+    /// Regression: the adjudication used `min_by_key(Reverse(rank))`, which
+    /// selects the *worst* rank. With one provider this was invisible; the
+    /// configured order must actually win.
+    #[test]
+    fn priority_order_picks_the_first_configured_provider() {
+        let cases: [(Vec<&str>, &str); 2] = [
+            (vec!["beta", "alpha"], "beta"),
+            (vec!["alpha", "beta"], "alpha"),
+        ];
+        for (priority, expected) in cases {
+            let (_runtime, shared) = test_shared_with_priority(
+                vec![
+                    Arc::new(AliasedLoopback("alpha".into())),
+                    Arc::new(AliasedLoopback("beta".into())),
+                ],
+                priority.iter().map(|id| Arc::from(*id)).collect(),
+            );
+            let reader = ChunkReader {
+                chunks: VecDeque::from(vec![b"ZTLOOP:START\n".to_vec()]),
+            };
+            let mut tap = TapReader::new(reader, shared.clone(), None);
+            let mut buf = [0u8; 4096];
+            let _ = tap.read(&mut buf);
+
+            let ui_rx = shared.ui_events();
+            match wait_event(&ui_rx, Duration::from_secs(5)) {
+                Some(TransferUiEvent::Detected { provider_id, .. }) => {
+                    assert_eq!(&*provider_id, expected, "priority {priority:?}")
+                }
+                other => panic!("expected {expected} to win, got {other:?}"),
+            }
+        }
+    }
+
+    /// The time bound must not depend on the event loop reading again: with a
+    /// real, waitable stream, a quiet PTY after a partial trigger releases the
+    /// held prefix instead of hiding it forever.
+    #[cfg(unix)]
+    #[test]
+    fn quiet_stream_releases_the_held_prefix() {
+        use std::io::Write as _;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+        let (_runtime, shared) = test_shared(vec![Arc::new(LoopbackProvider)]);
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+        let mut writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+        writer.write_all(b"ZTLOOP:ST").unwrap();
+
+        let fd = reader.as_raw_fd();
+        let mut tap = TapReader::new(reader, shared.clone(), Some(fd));
+        let mut buf = [0u8; 4096];
         let count = tap.read(&mut buf).unwrap();
         assert_eq!(&buf[..count], b"ZTLOOP:ST");
         assert!(!shared.is_active());
@@ -1423,7 +1755,7 @@ mod tests {
         }
 
         fn new_detector(&self) -> Box<dyn TransferDetector> {
-            Box::new(LineTriggerDetector::new(b"PICK:GO\n"))
+            Box::new(LineTriggerDetector::new(b"PICK:GO\n", self.id()))
         }
 
         fn start_session(&self, _offer: &TransferOffer) -> Box<dyn TransferSession> {
@@ -1558,6 +1890,224 @@ mod tests {
         let ui_rx = shared.ui_events();
         let event = wait_event(&ui_rx, Duration::from_secs(5));
         assert_eq!(event, Some(TransferUiEvent::Cancelled));
+        assert!(!shared.is_active());
+    }
+
+    /// Host that accepts every file operation, so a test observes driver
+    /// policy rather than host IO.
+    struct PermissiveHost {
+        read_size: u64,
+    }
+
+    impl TransferHost for PermissiveHost {
+        fn open_read(&self, _path: &std::path::Path) -> io::Result<u64> {
+            Ok(self.read_size)
+        }
+        fn read_chunk(&self, _offset: u64, _max_len: usize) -> io::Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+        fn open_write(&self, _remote_name: &str, _size: Option<u64>) -> io::Result<String> {
+            Ok("big.bin".to_string())
+        }
+        fn write_chunk(&self, _offset: u64, _data: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+        fn close_write(&self) -> io::Result<PathBuf> {
+            Ok(PathBuf::from("/tmp/big.bin"))
+        }
+        fn commit(&self) -> io::Result<PathBuf> {
+            Ok(PathBuf::from("/tmp/big.bin"))
+        }
+        fn set_destination(&self, _destination: &std::path::Path) {}
+        fn request_upload_paths(&self) -> Option<Vec<PathBuf>> {
+            None
+        }
+        fn request_download_dir(&self) -> Option<PathBuf> {
+            None
+        }
+        fn discard_staged(&self) {}
+    }
+
+    /// A download that opens a staging file with no declared size and then
+    /// writes past the per-file cap (the trzsz NAME-before-SIZE ordering).
+    struct OversizedWriteProvider;
+
+    struct OversizedWriteSession {
+        wrote: bool,
+    }
+
+    impl TransferSession for OversizedWriteSession {
+        fn start(&mut self) -> Vec<SessionAction> {
+            vec![SessionAction::OpenWrite {
+                remote_name: "big.bin".into(),
+                size: None,
+            }]
+        }
+        fn feed_wire(&mut self, _bytes: &[u8]) -> Vec<SessionAction> {
+            Vec::new()
+        }
+        fn submit(&mut self, event: HostEvent) -> Vec<SessionAction> {
+            match event {
+                HostEvent::FileOpened(Ok(_)) if !self.wrote => {
+                    self.wrote = true;
+                    vec![SessionAction::WriteFile {
+                        offset: 0,
+                        data: vec![0u8; 64],
+                    }]
+                }
+                _ => Vec::new(),
+            }
+        }
+        fn abort_bytes(&mut self) -> Vec<u8> {
+            Vec::new()
+        }
+    }
+
+    impl TransferProvider for OversizedWriteProvider {
+        fn id(&self) -> Arc<str> {
+            "oversized-write".into()
+        }
+        fn display_name(&self) -> Arc<str> {
+            "Oversized write".into()
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+        fn manifest(&self) -> ProviderManifest {
+            ProviderManifest {
+                id: self.id(),
+                display_name: self.display_name(),
+                capabilities: self.capabilities(),
+                default_config: serde_json::json!({}),
+                config_schema: serde_json::json!({}),
+            }
+        }
+        fn configure(&mut self, _config: &serde_json::Value) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn new_detector(&self) -> Box<dyn TransferDetector> {
+            Box::new(LineTriggerDetector::new(b"NEVER", self.id()))
+        }
+        fn start_session(&self, _offer: &TransferOffer) -> Box<dyn TransferSession> {
+            Box::new(OversizedWriteSession { wrote: false })
+        }
+        fn start_manual_upload(&self) -> Option<Box<dyn TransferSession>> {
+            None
+        }
+    }
+
+    /// Regression: the cap was checked only against the size a provider
+    /// declared at `OpenWrite`; trzsz declares it later, so a remote SIZE
+    /// could exceed `max_file_size` unchecked.
+    #[test]
+    fn download_write_past_the_file_cap_fails_the_session() {
+        let runtime = TransferRuntime::new(
+            Arc::new(TransferRegistry::new(
+                vec![Arc::new(OversizedWriteProvider)],
+                vec![],
+            )),
+            Arc::new(PermissiveHost { read_size: 0 }),
+            TransferPolicy {
+                max_file_size: 8,
+                ..TransferPolicy::default()
+            },
+        );
+        let shared = runtime.shared();
+        shared.send_driver(DriverMsg::StartSession(TransferOffer {
+            provider_id: "oversized-write".into(),
+            direction: Some(Direction::Download),
+            remote_names: Vec::new(),
+        }));
+        let ui_rx = shared.ui_events();
+        let event = wait_event(&ui_rx, Duration::from_secs(5));
+        assert!(
+            matches!(event, Some(TransferUiEvent::Failed { ref reason }) if reason.contains("file size limit")),
+            "expected a size-cap failure, got {event:?}"
+        );
+        assert!(!shared.is_active());
+    }
+
+    struct OversizedReadProvider;
+
+    struct OversizedReadSession;
+
+    impl TransferSession for OversizedReadSession {
+        fn start(&mut self) -> Vec<SessionAction> {
+            vec![SessionAction::OpenRead {
+                path: PathBuf::from("/tmp/huge.bin"),
+            }]
+        }
+        fn feed_wire(&mut self, _bytes: &[u8]) -> Vec<SessionAction> {
+            Vec::new()
+        }
+        fn submit(&mut self, _event: HostEvent) -> Vec<SessionAction> {
+            Vec::new()
+        }
+        fn abort_bytes(&mut self) -> Vec<u8> {
+            Vec::new()
+        }
+    }
+
+    impl TransferProvider for OversizedReadProvider {
+        fn id(&self) -> Arc<str> {
+            "oversized-read".into()
+        }
+        fn display_name(&self) -> Arc<str> {
+            "Oversized read".into()
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+        fn manifest(&self) -> ProviderManifest {
+            ProviderManifest {
+                id: self.id(),
+                display_name: self.display_name(),
+                capabilities: self.capabilities(),
+                default_config: serde_json::json!({}),
+                config_schema: serde_json::json!({}),
+            }
+        }
+        fn configure(&mut self, _config: &serde_json::Value) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn new_detector(&self) -> Box<dyn TransferDetector> {
+            Box::new(LineTriggerDetector::new(b"NEVER", self.id()))
+        }
+        fn start_session(&self, _offer: &TransferOffer) -> Box<dyn TransferSession> {
+            Box::new(OversizedReadSession)
+        }
+        fn start_manual_upload(&self) -> Option<Box<dyn TransferSession>> {
+            None
+        }
+    }
+
+    /// Regression: an upload larger than the cap used to start, stream up to
+    /// the cap, and only then fail.
+    #[test]
+    fn upload_is_rejected_before_announcing_an_oversized_file() {
+        let runtime = TransferRuntime::new(
+            Arc::new(TransferRegistry::new(
+                vec![Arc::new(OversizedReadProvider)],
+                vec![],
+            )),
+            Arc::new(PermissiveHost { read_size: 1024 }),
+            TransferPolicy {
+                max_file_size: 8,
+                ..TransferPolicy::default()
+            },
+        );
+        let shared = runtime.shared();
+        shared.send_driver(DriverMsg::StartSession(TransferOffer {
+            provider_id: "oversized-read".into(),
+            direction: Some(Direction::Upload),
+            remote_names: Vec::new(),
+        }));
+        let ui_rx = shared.ui_events();
+        let event = wait_event(&ui_rx, Duration::from_secs(5));
+        assert!(
+            matches!(event, Some(TransferUiEvent::Failed { ref reason }) if reason.contains("file size limit")),
+            "expected a size-cap failure, got {event:?}"
+        );
         assert!(!shared.is_active());
     }
 }

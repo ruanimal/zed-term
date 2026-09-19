@@ -9,7 +9,6 @@
 use std::collections::VecDeque;
 use std::io::Read as _;
 use std::io::Write as _;
-use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -305,7 +304,7 @@ fn pump(
                         .expect("test must provide upload paths");
                     actions.extend(session.submit(HostEvent::UploadPaths(Some(paths))));
                 }
-                SessionAction::NeedDownloadDir { .. } => {
+                SessionAction::NeedDownloadDir => {
                     let destination = dialogs
                         .download_destination
                         .clone()
@@ -439,7 +438,7 @@ fn user_cancelled_download_dir_sends_unconfirmed_act() {
     assert!(
         actions
             .iter()
-            .any(|action| matches!(action, SessionAction::NeedDownloadDir { .. }))
+            .any(|action| matches!(action, SessionAction::NeedDownloadDir))
     );
 
     let actions = session.submit(HostEvent::DownloadDir(None));
@@ -456,6 +455,29 @@ fn user_cancelled_download_dir_sends_unconfirmed_act() {
     );
 }
 
+/// A remote that never sends a newline must not be able to grow the session
+/// line buffer without bound (§3.5).
+#[test]
+fn unterminated_line_fails_the_session() {
+    let mut session = TrzszProvider.start_session(&download_offer());
+    let actions = session.start();
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action, SessionAction::NeedDownloadDir))
+    );
+    let _ = session.submit(HostEvent::DownloadDir(Some(PathBuf::from("/tmp"))));
+
+    let huge = vec![b'a'; 4 * 1024 * 1024 + 1];
+    let actions = session.feed_wire(&huge);
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action, SessionAction::Failed(_))),
+        "an unterminated line must fail the session, got {actions:?}"
+    );
+}
+
 #[test]
 fn oversized_download_chunk_fails_the_session() {
     // A DATA chunk longer than the declared SIZE must abort the session.
@@ -466,7 +488,7 @@ fn oversized_download_chunk_fails_the_session() {
     assert!(
         actions
             .iter()
-            .any(|action| matches!(action, SessionAction::NeedDownloadDir { .. }))
+            .any(|action| matches!(action, SessionAction::NeedDownloadDir))
     );
     host.set_destination(&destination);
 
@@ -493,7 +515,7 @@ fn oversized_download_chunk_fails_the_session() {
                         local_name: Some(remote_name),
                     }))));
                 }
-                SessionAction::NeedDownloadDir { .. } => {
+                SessionAction::NeedDownloadDir => {
                     actions
                         .extend(session.submit(HostEvent::DownloadDir(Some(destination.clone()))));
                 }
@@ -586,6 +608,45 @@ fn detector_survives_garbage_without_matching() {
     let mut detector = TrzszDetector::new();
     let verdict = feed_all(&mut detector, b"plain terminal output;\nnothing to see.\n");
     assert!(matches!(verdict, DetectorVerdict::NoMatch));
+}
+
+/// Regression: a false alarm used to reset the detector's position, so a real
+/// trigger later in the same batch reported a range relative to the reset.
+/// The mux slices the stream with those coordinates, so it would flush and
+/// divert the wrong bytes.
+#[test]
+fn detector_ranges_stay_absolute_across_a_false_alarm() {
+    let chunk = b"::TRZSZ:TRANSFER:X:1.0.0:0\n::TRZSZ:TRANSFER:R:1.0.0:1\n";
+    let marker = b"::TRZSZ:TRANSFER:";
+    let absolute = chunk
+        .windows(marker.len())
+        .enumerate()
+        .filter(|(_, window)| *window == marker)
+        .nth(1)
+        .map(|(index, _)| index)
+        .expect("the chunk has two markers") as u64;
+
+    let mut detector = TrzszDetector::new();
+    match feed_all(&mut detector, chunk) {
+        DetectorVerdict::Matched { offer, trigger } => {
+            assert_eq!(offer.direction, Some(Direction::Upload));
+            assert_eq!(trigger.start, absolute, "range must be absolute");
+            assert_eq!(trigger.end, chunk.len() as u64);
+        }
+        other => panic!("expected the second marker to match, got {other:?}"),
+    }
+}
+
+/// `D` (send a directory) is a download from the remote, exactly like `S`.
+#[test]
+fn detector_treats_directory_mode_as_a_download() {
+    let mut detector = TrzszDetector::new();
+    match feed_all(&mut detector, b"::TRZSZ:TRANSFER:D:1.2.4:7\n") {
+        DetectorVerdict::Matched { offer, .. } => {
+            assert_eq!(offer.direction, Some(Direction::Download))
+        }
+        other => panic!("expected a match, got {other:?}"),
+    }
 }
 
 // ─── Interop (requires a real `tsz` binary) ────────────────────────────────
@@ -694,7 +755,7 @@ fn download_interop_with_real_tsz() {
                     let result = host.commit();
                     actions.extend(session.submit(HostEvent::FileCommitted(result)));
                 }
-                SessionAction::NeedDownloadDir { .. } => {
+                SessionAction::NeedDownloadDir => {
                     actions
                         .extend(session.submit(HostEvent::DownloadDir(Some(destination.clone()))));
                 }
@@ -707,9 +768,7 @@ fn download_interop_with_real_tsz() {
                 SessionAction::OpenRead { .. } | SessionAction::ReadFile { .. } => {
                     panic!("download must not read local files")
                 }
-                other @ (SessionAction::NeedUploadPaths
-                | SessionAction::NeedDownloadDir { .. }
-                | SessionAction::Cancelled) => {
+                other @ (SessionAction::NeedUploadPaths | SessionAction::Cancelled) => {
                     panic!("unexpected dialog request: {other:?}");
                 }
             }
@@ -803,7 +862,7 @@ fn upload_interop_with_real_trz() {
                 | SessionAction::WriteFile { .. }
                 | SessionAction::CloseFile
                 | SessionAction::CommitFile
-                | SessionAction::NeedDownloadDir { .. }
+                | SessionAction::NeedDownloadDir
                 | SessionAction::Cancelled) => {
                     panic!("upload must not write local files: {other:?}");
                 }

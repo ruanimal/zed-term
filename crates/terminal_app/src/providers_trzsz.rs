@@ -28,15 +28,19 @@ use transfer_core::{
 
 const MARKER: &[u8] = b"::TRZSZ:TRANSFER:";
 const MAX_LINE_BYTES: usize = 4096;
+/// Upper bound on wire bytes buffered waiting for a protocol line (§3.5).
+const MAX_SESSION_BUFFER: usize = 4 * 1024 * 1024;
 /// Upper bound for upload read chunks; the remote's CFG bufsize may lower it.
 const MAX_UPLOAD_CHUNK: usize = 512 * 1024;
 const CLIENT_VERSION: &str = "1.2.0";
 
-fn encode_bytes(bytes: &[u8]) -> String {
+/// Compress and base64 a protocol value. Compression into an in-memory
+/// buffer is effectively infallible, but the error is propagated rather than
+/// dropped: a silently empty payload would corrupt the transfer.
+fn try_encode_bytes(bytes: &[u8]) -> std::io::Result<String> {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-    let _ = encoder.write_all(bytes);
-    let compressed = encoder.finish().unwrap_or_default();
-    BASE64.encode(&compressed)
+    encoder.write_all(bytes)?;
+    Ok(BASE64.encode(encoder.finish()?))
 }
 
 fn decode_value(value: &str) -> std::io::Result<Vec<u8>> {
@@ -105,6 +109,15 @@ impl TrzszDetector {
             position: 0,
         }
     }
+
+    /// Drop an open candidate without touching `position`: the mux measures
+    /// trigger ranges from the last `reset`, so a false alarm in the middle of
+    /// a batch must not rebase them.
+    fn clear_candidate(&mut self) {
+        self.tail.clear();
+        self.candidate_start = None;
+        self.line.clear();
+    }
 }
 
 impl TransferDetector for TrzszDetector {
@@ -119,7 +132,7 @@ impl TransferDetector for TrzszDetector {
                 return match parse_trigger_line(&self.line) {
                     Some(trigger) => {
                         let direction = match trigger.mode {
-                            'S' => Direction::Download,
+                            'S' | 'D' => Direction::Download,
                             _ => Direction::Upload,
                         };
                         DetectorVerdict::Matched {
@@ -131,15 +144,16 @@ impl TransferDetector for TrzszDetector {
                             trigger: start..index + 1,
                         }
                     }
-                    // False alarm: reset and let the held bytes flush.
+                    // False alarm: drop the candidate and let the held bytes
+                    // flush, but keep counting for the next trigger.
                     None => {
-                        self.reset();
+                        self.clear_candidate();
                         DetectorVerdict::NoMatch
                     }
                 };
             }
             if self.line.len() > MAX_LINE_BYTES {
-                self.reset();
+                self.clear_candidate();
                 return DetectorVerdict::NoMatch;
             }
             return DetectorVerdict::NeedMore;
@@ -169,9 +183,7 @@ impl TransferDetector for TrzszDetector {
     }
 
     fn reset(&mut self) {
-        self.tail.clear();
-        self.candidate_start = None;
-        self.line.clear();
+        self.clear_candidate();
         self.position = 0;
     }
 }
@@ -259,12 +271,25 @@ fn send_integer(kind: &str, value: u64) -> SessionAction {
     action_line(kind, &value.to_string())
 }
 
+/// An encoding failure cannot be expressed in the protocol, so it ends the
+/// session instead of sending a corrupt frame.
+fn encode_failure(kind: &str, error: std::io::Error) -> SessionAction {
+    log::error!("trzsz: cannot encode the {kind} frame: {error}");
+    SessionAction::Failed(format!("cannot encode the {kind} protocol frame: {error}"))
+}
+
 fn send_string(kind: &str, value: &str) -> SessionAction {
-    action_line(kind, &encode_bytes(value.as_bytes()))
+    match try_encode_bytes(value.as_bytes()) {
+        Ok(encoded) => action_line(kind, &encoded),
+        Err(error) => encode_failure(kind, error),
+    }
 }
 
 fn send_bytes(kind: &str, value: &[u8]) -> SessionAction {
-    action_line(kind, &encode_bytes(value))
+    match try_encode_bytes(value) {
+        Ok(encoded) => action_line(kind, &encoded),
+        Err(error) => encode_failure(kind, error),
+    }
 }
 
 impl TrzszSession {
@@ -294,10 +319,15 @@ impl TrzszSession {
         self.finished = true;
         self.state = State::Finished;
         let reason = reason.into();
-        vec![
-            action_line("fail", &encode_bytes(reason.as_bytes())),
-            SessionAction::Failed(reason),
-        ]
+        let mut actions = Vec::new();
+        match try_encode_bytes(reason.as_bytes()) {
+            Ok(encoded) => actions.push(action_line("fail", &encoded)),
+            // The reason frame is best effort; the failure itself still has to
+            // reach the UI.
+            Err(error) => log::error!("trzsz: cannot encode the failure reason: {error}"),
+        }
+        actions.push(SessionAction::Failed(reason));
+        actions
     }
 
     fn progress(&self, bytes_total: Option<u64>) -> SessionAction {
@@ -590,9 +620,7 @@ impl TransferSession for TrzszSession {
             // bounds how long the user may take here.
             Direction::Download => {
                 self.state = State::DownloadAwaitDir;
-                vec![SessionAction::NeedDownloadDir {
-                    suggested_name: None,
-                }]
+                vec![SessionAction::NeedDownloadDir]
             }
             Direction::Upload => {
                 self.state = State::UploadAwaitPaths;
@@ -603,10 +631,24 @@ impl TransferSession for TrzszSession {
 
     fn feed_wire(&mut self, bytes: &[u8]) -> Vec<SessionAction> {
         let mut actions = Vec::new();
+        if self.finished {
+            return actions;
+        }
         self.buffer.extend_from_slice(bytes);
-        while let Some(position) = self.buffer.iter().position(|&byte| byte == b'\n') {
-            let line: Vec<u8> = self.buffer.drain(..=position).collect();
-            let mut line = &line[..line.len() - 1];
+        // A remote that never sends a newline must not be able to grow the
+        // session buffer without bound (§3.5).
+        if self.buffer.len() > MAX_SESSION_BUFFER {
+            return self.fail("protocol line exceeds the session buffer limit");
+        }
+
+        // Take every complete line in one move: draining one line at a time
+        // shifts the tail repeatedly, which is quadratic for many short lines.
+        let Some(last_newline) = self.buffer.iter().rposition(|&byte| byte == b'\n') else {
+            return actions;
+        };
+        let consumed: Vec<u8> = self.buffer.drain(..=last_newline).collect();
+        for raw in consumed.split_inclusive(|&byte| byte == b'\n') {
+            let mut line = &raw[..raw.len() - 1];
             if line.last() == Some(&b'\r') {
                 line = &line[..line.len() - 1];
             }
@@ -673,6 +715,12 @@ impl TransferSession for TrzszSession {
                         }
                         self.hasher.update(&data);
                         let length = data.len();
+                        let encoded = match try_encode_bytes(&data) {
+                            Ok(encoded) => encoded,
+                            Err(error) => {
+                                return self.fail(format!("cannot encode file data: {error}"));
+                            }
+                        };
                         self.state = State::UploadAwaitSuccData {
                             size,
                             offset,
@@ -680,9 +728,7 @@ impl TransferSession for TrzszSession {
                             chunk,
                         };
                         vec![
-                            SessionAction::WriteWire(
-                                format!("#DATA:{}\n", encode_bytes(&data)).into_bytes(),
-                            ),
+                            SessionAction::WriteWire(format!("#DATA:{encoded}\n").into_bytes()),
                             self.progress(Some(size)),
                         ]
                     }
@@ -787,7 +833,14 @@ impl TransferSession for TrzszSession {
     fn abort_bytes(&mut self) -> Vec<u8> {
         self.finished = true;
         self.state = State::Finished;
-        format!("#fail:{}\n", encode_bytes(b"canceled by user")).into_bytes()
+        match try_encode_bytes(b"canceled by user") {
+            Ok(encoded) => format!("#fail:{encoded}\n").into_bytes(),
+            Err(error) => {
+                // Nothing usable to send; the session is ending either way.
+                log::error!("trzsz: cannot encode the abort frame: {error}");
+                Vec::new()
+            }
+        }
     }
 }
 

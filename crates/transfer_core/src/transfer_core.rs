@@ -140,7 +140,7 @@ pub enum SessionAction {
     /// Ask the user to pick file(s) to upload.
     NeedUploadPaths,
     /// Ask the user where to save a download.
-    NeedDownloadDir { suggested_name: Option<String> },
+    NeedDownloadDir,
     Progress {
         file_index: usize,
         file_count: usize,
@@ -251,16 +251,21 @@ pub trait TransferHost: Send + Sync + 'static {
     /// resolving conflicts (overwrite confirmation or alternate name) as the
     /// app sees fit. Returns the final path.
     fn commit(&self) -> io::Result<PathBuf>;
-    /// Ask the user which file(s) to upload. Blocks until the user answers or
-    /// the picker times out; `None` means no files to upload.
+    /// Ask the user which file(s) to upload. Notification only: the app hosts
+    /// drive the dialog from the UI event the runtime emits and return `None`;
+    /// a host that owns its own dialog may block here instead.
     fn request_upload_paths(&self) -> Option<Vec<PathBuf>>;
-    /// Ask the user where to save the download. `suggested_name` is display
-    /// only. Blocks until the user answers or the picker times out; `None`
-    /// means cancelled.
-    fn request_download_dir(&self, suggested_name: Option<&str>) -> Option<PathBuf>;
+    /// Ask the user where to save the download. The file is named from the
+    /// remote's sanitized basename, so this only picks a directory. Same
+    /// notification semantics as [`TransferHost::request_upload_paths`].
+    fn request_download_dir(&self) -> Option<PathBuf>;
     /// Remove staged-but-uncommitted files when a session aborts (§3.4).
     /// A no-op when nothing was staged or everything was committed.
     fn discard_staged(&self);
+    /// Drop state left over from a previous session. Called once when a new
+    /// session runtime is built for a terminal, which happens when a terminal
+    /// is restarted while reusing the same host.
+    fn reset(&self) {}
 }
 
 /// Static description of a provider: identity, capabilities and
