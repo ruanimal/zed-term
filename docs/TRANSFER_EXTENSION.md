@@ -1,10 +1,14 @@
 # 文件传输扩展：接口与规范设计
 
-> 状态：Phase 0 + Phase 1 已实现（2026-02）。tap 分流层、`transfer_core` trait、
-> mux/会话驱动、trzsz provider（协议 v1 base64，上传/下载）、staging/安全落盘、
+> 状态：Phase 0 + Phase 1 + Phase 3 已实现（2026-02）。tap 分流层、`transfer_core` trait、
+> mux/会话驱动、trzsz provider（协议 v1 base64，上传/下载）、zmodem provider
+> （`zmodem2` 状态机，`rz`/`sz` 双向、多文件）、staging/安全落盘、
 > 进度 UI 与取消均已落地并有测试；trzsz-rs 的 `trz`/`tsz` 真机互操作测试通过
 > （`terminal_app/tests/transfer_trzsz.rs`，用 `ZEDTERM_TSZ_BIN`/`ZEDTERM_TRZ_BIN`
-> 指向真实 binary 启用）。Phase 2–4 尚未实现。
+> 指向真实 binary 启用），ZMODEM 的互操作测试见
+> `terminal_app/tests/transfer_zmodem.rs`（`zmodem2` 对端常开，真机 lrzsz 用
+> `ZEDTERM_SZ_BIN`/`ZEDTERM_RZ_BIN` 启用）。Phase 2 的菜单项（右键/Send File…）与
+> Phase 4 尚未实现——多文件本身两个 provider 都已支持，缺的是手动发起的 UI 入口。
 >
 > 与原设计的实现偏差（其余照旧）：
 > - `SessionAction` 增加了带路径的文件动作（`OpenRead`/`OpenWrite`/`CloseFile`/
@@ -20,6 +24,26 @@
 >   答案经 mux 控制通道回填），因为阻塞式询问会卡死会话线程、使看门狗失效。
 > - Windows：tap 依赖 fd 复制的 `TapSource`，暂只在 Unix 启用；Windows 上
 >   transfer 不挂载。
+> - **ZMODEM 的方向来自触发帧本身**（见 §12 的更正）：远端 `sz` 以 `ZRQINIT`
+>   开头（它要发，所以本地收 = 下载），远端 `rz` 以 `ZRINIT` 开头（它要收，
+>   所以本地发 = 上传）。因此 `TransferOffer.direction` 对 ZMODEM 也是 `Some`，
+>   UI 从一开始就显示正确方向，不需要"中性文案 + 后续对话框揭示"。
+> - **ZMODEM 下载的 `ZRINIT` 被推迟到用户确认目录之后**再发：`sz` 只有在收到
+>   `ZRINIT` 后才发 `ZFILE`，而它在发出 `ZFILE` 后只等 10 秒的 `ZRPOS`；
+>   反过来，它在等 `ZRINIT` 时按自己的握手超时反复重发 `ZRQINIT`，耐心得多。
+>   推迟握手因此既满足 §7.1（确认前不落盘、不开始传输），又不会让远端先行放弃
+>   （实测 lrzsz 下载全程 < 0.1 s 完成）。
+> - **ZMODEM provider 默认启用**（`default_config: {"enabled": true}`，§8.3 原写
+>   默认关）。原理由是"触发头误触成本高于 trzsz"，但 detector 现在要求收齐整个
+>   十六进制头并校验 CRC-16 且帧类型必须是 `ZRQINIT`/`ZRINIT`，误触概率量级为
+>   2⁻¹⁶ 以下；一个默认关掉、需要用户先改 settings 才能用的 rz/sz 支持等于没有。
+>   不想要的话在 `terminal.transfer.providers.zmodem.enabled` 关掉即可。
+> - ZMODEM detector 只认 **hex 头**（`**\x18B…`）：`ZRQINIT`/`ZRINIT` 按规范必须
+>   用 hex 头，lrzsz 与 zmodem2 都是这么发的（实测确认）。二进制头不会被误判成
+>   触发，也不会被猜测解析。
+> - 已知显示噪声：下载结束后远端 `sz` 仍会写 `OO`（over-and-out）；此时 mux 已回到
+>   Idle，这两个字节会经 parser 显示在提示符前。要抑制需要在 mux 里引入"会话结束后
+>   短暂 linger"的概念，本阶段不做（无害，且各终端实现普遍如此）。
 
 ## 0. 结论先行
 
@@ -216,8 +240,10 @@ pub struct TransferOffer {
     /// helper id 来自配置（§5.4），运行时才有：全部 id/display_name 用 `Arc<str>`，
     /// 内置 provider 构造时 mint 一次
     pub provider_id: Arc<str>,
-    /// match 时刻已知则填；ZMODEM 在 ZRQINIT 时刻判不了方向（§12），为 None。
-    /// UI 用中性文案，方向由后续对话框类型揭示（NeedUploadPaths=上传 / NeedDownloadDir=下载）。
+    /// match 时刻已知则填。内置 provider 都能判定（trzsz 读握手行模式，
+    /// ZMODEM 读触发帧类型，见 §12）；`None` 留给判不了方向的第三方 helper，
+    /// 此时 UI 用中性文案，方向由后续对话框类型揭示
+    /// （NeedUploadPaths=上传 / NeedDownloadDir=下载）。
     pub direction: Option<Direction>,
     /// 远端声明的文件名（仅用于展示与建议名；落盘前必做 sanitize，见 §7）
     pub remote_names: Vec<String>,
@@ -466,7 +492,7 @@ helper 发布前应通过：触发行被拆成 1 字节喂入仍能 serve；收�
 
 ```rust
 pub enum TransferUiEvent {
-    // direction 为 None 时（ZMODEM match 时刻判不了方向，§12）UI 用中性文案"文件传输中"，
+    // direction 为 None 时（判不了方向的第三方 helper）UI 用中性文案"文件传输中"，
     // 方向由随后出现的对话框类型揭示（选文件=上传 / 选目录=下载）
     Detected { provider_id: Arc<str>, direction: Option<Direction>, remote_names: Vec<String> },
     AwaitingUploadPaths { request_id: u64 },       // Tab 弹文件选择框
@@ -572,8 +598,9 @@ manifest 声明驱动，settings 里以 provider id 为 key 的开放表承载�
 每个 provider 声明（内置 provider 在代码里声明，helper 在 §5.4 的配置里声明）：
 
 - `id` / `display_name` / `capabilities`（见 §4）；
-- `default_config`：默认开关由 provider 自己声明。内置：trzsz `{enabled: true}`，
-  zmodem `{enabled: false}`（默认关的理由：触发头误触成本高于 trzsz，见 §12）；
+- `default_config`：默认开关由 provider 自己声明。内置：trzsz `{enabled: true}`、
+  zmodem `{enabled: true}`（实现时改的：detector 校验完整头 + CRC-16 后误触概率已远低于
+  当初的估计，而默认关掉等于功能不可见；理由见文首偏差）；
 - `config_schema`：JSON Schema 子集，描述除 `enabled` 外的参数；host 用它校验用户配置。
 
 合并规则：用户没写某 provider 节 → 用 `default_config`；用户写了未知 id → warn 后忽略
@@ -593,9 +620,16 @@ manifest 声明驱动，settings 里以 provider id 为 key 的开放表承载�
   验收：与 trzsz go/py 服务端对传通过；tmux 内同样通过；真机联调。
 - **Phase 2 — 多文件 + 手动菜单**：`multi_file`、右键菜单项、下载目录记忆。
   （拖拽上传暂不支持，不在本阶段。）
-- **Phase 3 — ZMODEM**：`zmodem2` crate（`Sender`/`Receiver` caller-driven 状态机，
-  接口形状与 `SessionAction` 同构，适配层薄）包成 provider；与 trzsz 共存优先级；
-  默认关闭，收集误触数据。
+- **Phase 3 — ZMODEM（已实现）**：`zmodem2` crate（`Sender`/`Receiver` caller-driven
+  状态机，接口形状与 `SessionAction` 同构，适配层薄）包成 provider；与 trzsz 共存优先级；
+  单文件与多文件（含空文件）双向均已通过 `zmodem2` 对端与真机 lrzsz 互操作测试。
+  默认启用（理由与偏差见文首）；provider id 为 `zmodem`，可在
+  `terminal.transfer.providers.zmodem.enabled` 关闭。上传方向发送端**无条件全转义
+  控制字符**（`Sender::set_escape_control(true)`）：lrzsz 0.12.20 置 raw 时不清
+  `IEXTEN`，线上的裸控制字符会被 tty 的 VLNEXT 等扩展编辑字符静默吞掉；转义形式任何
+  接收端都能解码。`zmodem2` 依赖目前 pin 到 ESCCTL 修复（codeberg
+  [`jarkko/zmodem2#10`](https://codeberg.org/jarkko/zmodem2/pulls/10)，rev `a17df2a`）以支持
+  `rz -e`（ZRINIT 置 ESCCTL），待上游发布后换回 crates.io 版本。
 - **Phase 4（可选）**：helper 子进程协议 v1、设置页 UI、单会话限速显示。
 
 每阶段独立可验收，不预支下一阶段接口。
@@ -638,7 +672,7 @@ manifest 声明驱动，settings 里以 provider id 为 key 的开放表承载�
 | 会话状态机 | 大：`ZRQINIT → ZRINIT → ZFILE → ZRPOS → ZDATA → ZEOF → ZFIN`，发送窗口、NAK 重传、`CAN×5` 中止 | 小：握手 → 文件信息 JSON → 数据帧 → 结束；中止就是一个取消帧 |
 | 可靠性 | CRC32 + 重传 + ZRPOS 续传（串口时代遗产，在 SSH 上是免费 bonus） | 依赖流本身可靠；续传 = 重来（Phase 1 可接受） |
 | tmux | 经典 lrzsz 在 tmux 下会坏（透传问题），历史包袱 | 为 tmux 兼容而设计，这是 trzsz 存在的理由之一 |
-| 方向判定 | `ZRQINIT` 判不了方向：远端 `sz`（下载）与远端 `rz`（上传）启动时都发 ZRQINIT——`rz` 先发是为了触发本地 autostart（敲 `rz` 弹上传框的机制）。方向由 **ZFILE 的发送方**确定：远端发 ZFILE = 下载；本地需发 ZFILE（先回 ZRINIT）= 上传。故 `TransferOffer.direction` 在 match 时刻是 `None`，会话必须立即回 ZRINIT 再按 ZFILE 分流 | 握手行里直接声明方向 |
+| 方向判定 | **更正（实现阶段实测 lrzsz 0.12.20）**：两个方向的首帧并不同。远端 `sz` 先写 `rz\r` 再发 `ZRQINIT`（`**\x18B00000…`），远端 `rz` 先打印 `rz waiting to receive.` 再发 `ZRINIT`（`**\x18B0100…`）——`rz` 发出的是 ZRINIT 本身，而它收到 ZRINIT 会直接报错退出。因此触发帧的类型就是方向：`ZRQINIT`=远端要发（本地下载），`ZRINIT`=远端要收（本地上传）。`TransferOffer.direction` 在 match 时刻即可填 `Some` | 握手行里直接声明方向 |
 | 手动上传 | 发送方可主动发起（`sz` 方先发 `ZRQINIT`），机制与 trzsz 的 `start_manual_upload` 同构 | 同左 |
 | 文件名元数据 | `ZFILE` 帧带文件名+大小+时间 | JSON 里带。**两者都是攻击者可控**，§7 的 sanitize/staging/确认框要求完全一样 |
 | 进度 | 从 `ZDATA` 偏移推导（转义膨胀导致不精确） | 协议层原生进度 |
@@ -653,10 +687,13 @@ manifest 声明驱动，settings 里以 provider id 为 key 的开放表承载�
 2. **Session**：ZMODEM 用 `zmodem2` 包一层；trzsz 包 `trzsz-rs` 或手写。
    `feed_wire`/`submit`/`abort_bytes` 签名一样。
 3. **Mux/UI/安全**：完全复用。
-4. **方向**：`TransferOffer.direction` 是 `Option<Direction>`，ZMODEM match 时刻为 `None`
-   （见上表）；UI 中性文案，方向由后续 `NeedUploadPaths`/`NeedDownloadDir` 揭示。
-   ZMODEM 会话从 match 起就要立即回 `ZRINIT`，不能等对话框——caller-driven 模型天然允许
-   （`feed_wire(ZRQINIT) → [WriteWire(ZRINIT)]`）。
+4. **方向**：`TransferOffer.direction` 是 `Option<Direction>`；ZMODEM 由触发帧填
+   `Some`（见上表更正），第三方 helper 判不了时才留 `None`，UI 用中性文案、方向由后续
+   `NeedUploadPaths`/`NeedDownloadDir` 揭示。实现里还多了一条与方向无关的时序约束：
+   下载方向的 `ZRINIT` 推迟到用户确认落地目录之后再发（§7.1），因为 `sz` 收到
+   `ZRINIT` 才发 `ZFILE`，而它等 `ZRPOS` 只肯等 10 秒；等 `ZRINIT` 时它反而会按自己的
+   握手超时反复重发 `ZRQINIT`。上传方向则相反：`ZRQINIT` 立刻发出，让远端 `rz`
+   多撑几轮，等用户选完文件再发 `ZFILE`。
 
 先做 trzsz 的理由：detector 和 session 都简单，Phase 0→1 最快跑通端到端；
 ZMODEM 的复杂度集中在 detector 正确性上，而 hold-and-release 语义正好拿 trzsz
@@ -672,7 +709,8 @@ crates/terminal_app/src/transfer_ui.rs      # TerminalTab 侧状态、进度条�
 crates/terminal_app/src/transfer_io.rs      # 后台文件读写、staging、sanitize（新文件，可测）
 crates/terminal_app/src/transfer_helper.rs  # HelperProvider：helper 子进程 spawn/shuttle/看门狗（Phase 4）
 crates/terminal_app/src/providers_trzsz.rs  # trzsz detector+session（Phase 1）
-crates/terminal_app/src/providers_zmodem.rs # zmodem2 适配（Phase 3）
+crates/terminal_app/src/providers_zmodem.rs # zmodem2 适配：detector + session + provider（Phase 3）
+crates/terminal_app/tests/transfer_zmodem.rs # ZMODEM 会话测试（zmodem2 对端 + 真机 lrzsz）
 ```
 
 ---
@@ -685,7 +723,8 @@ ZMODEM 帧结构（三帧头编码、`ZRQINIT`/`ZRINIT` 须用 Hex 头）——
 见 [TeraTerm ZMODEM Protocol](https://github.com/TeraTermProject/teraterm/wiki/ZMODEM-Protocol)
 与 [ZMODEM Protocol Reference](http://www.ethernetgateway.com/zmodemreference.html)
 （第三方资料，仅作协议背景参考）。
-`rz` 启动时同样发送 ZRQINIT（方向判定依据，见 §12）——
+`rz` 启动时发送的是 `ZRINIT`（`**B0100000023be50` 的首字节 `01` 即 ZRINIT，实测 lrzsz
+0.12.20 确认，见 §12 方向判定的更正）——
 见 [unix.stackexchange: rz 产生的 `**B0100000023be50`](https://unix.stackexchange.com/questions/365422/z-waiting-to-receive-b0100000023be50-when-i-use-rz-to-upload-file)
 与 [ZOC Terminal help](https://www.emtec.com/kb/en/2007/zmodem-transfer-to-from-linux)（第三方资料，仅作协议背景参考）。
 Alacritty 侧结论来自本仓库 `Cargo.toml` 锁定的上游源码

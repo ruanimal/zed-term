@@ -7584,6 +7584,7 @@ dependencies = [
  "gpui_platform",
  "http_client",
  "itertools 0.14.0",
+ "libc",
  "log",
  "md-5",
  "parking_lot",
@@ -7607,6 +7608,7 @@ dependencies = [
  "ui",
  "url",
  "util",
+ "zmodem2",
 ]
 
 [[package]]
@@ -10472,6 +10474,16 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zmodem2"
+version = "0.7.2"
+source = "git+https://codeberg.org/fivetime/zmodem2?rev=a17df2a824d08eebe4e35d599940c940500e460b#a17df2a824d08eebe4e35d599940c940500e460b"
+dependencies = [
+ "bitflags 2.13.1",
+ "hex",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "ztracing"

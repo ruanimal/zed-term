@@ -50,6 +50,11 @@ theme_settings.workspace = true
 ui.workspace = true
 url.workspace = true
 util.workspace = true
+# Pinned to the ESCCTL fix (upstream PR #10): `rz -e` announces ESCCTL and
+# decodes nothing unescaped, and 0.7.2 never escapes control characters, so
+# every upload to `rz -e` stalls. Move back to a crates.io release once the
+# fix is merged and published.
+zmodem2 = { git = "https://codeberg.org/fivetime/zmodem2", rev = "a17df2a824d08eebe4e35d599940c940500e460b" }
 
 [build-dependencies]
 embed-resource = "=3.0.6"
@@ -98,6 +103,7 @@ assets = [
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 http_client = { workspace = true, features = ["test-support"] }
+libc.workspace = true
 tempfile.workspace = true
 proptest.workspace = true
 settings = { workspace = true, features = ["test-support"] }

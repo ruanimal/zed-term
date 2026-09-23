@@ -91,7 +91,7 @@ impl From<TransferSettingsContent> for TransferSettings {
             idle_timeout_secs: content.idle_timeout_secs.unwrap_or(30),
             priority: content
                 .priority
-                .unwrap_or_else(|| vec!["trzsz".to_string()]),
+                .unwrap_or_else(|| vec!["trzsz".to_string(), "zmodem".to_string()]),
             providers: content.providers.unwrap_or_default(),
         }
     }

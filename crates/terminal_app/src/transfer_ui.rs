@@ -16,9 +16,18 @@ use ui::prelude::*;
 use ui::{IconButtonShape, Tooltip};
 
 use crate::providers_trzsz::TrzszProvider;
+use crate::providers_zmodem::ZmodemProvider;
 use crate::transfer_io::AppTransferHost;
 
 // ─── Setup (settings → registry + host + policy, §8) ───────────────────────
+
+/// The in-process providers this build ships, in default adjudication order.
+/// Settings never name a protocol here: each provider declares its own
+/// `default_config` and validates its own section, so adding one is a line in
+/// this list (§8.3).
+fn built_in_providers() -> Vec<Box<dyn TransferProvider>> {
+    vec![Box::new(TrzszProvider), Box::new(ZmodemProvider)]
+}
 
 /// Build the transfer runtime configuration for a new terminal. Returns
 /// `None` when every provider is disabled, which leaves the terminal with no
@@ -27,15 +36,21 @@ pub fn transfer_setup(settings: &TransferSettings) -> Option<TransferSetup> {
     // `configure` runs before the provider is frozen into the shared
     // registry (§4). A provider whose configuration fails validation is
     // disabled with a warning; other providers are unaffected.
-    let mut trzsz = TrzszProvider;
     let mut providers: Vec<Arc<dyn TransferProvider>> = Vec::new();
-    match settings.providers.get("trzsz") {
-        Some(config) if config.get("enabled") == Some(&serde_json::json!(false)) => {}
-        Some(config) => match trzsz.configure(config) {
-            Ok(()) => providers.push(Arc::new(trzsz)),
-            Err(error) => log::warn!("disabling transfer provider trzsz: {error}"),
-        },
-        None => providers.push(Arc::new(trzsz)),
+    for mut provider in built_in_providers() {
+        let id = provider.id();
+        let config = settings
+            .providers
+            .get(&*id)
+            .cloned()
+            .unwrap_or_else(|| provider.manifest().default_config);
+        if config.get("enabled") == Some(&serde_json::json!(false)) {
+            continue;
+        }
+        match provider.configure(&config) {
+            Ok(()) => providers.push(Arc::from(provider)),
+            Err(error) => log::warn!("disabling transfer provider {id}: {error}"),
+        }
     }
     if providers.is_empty() {
         log::info!("file transfer: all providers disabled");
@@ -471,22 +486,38 @@ mod tests {
 
     /// Regression: with no `[terminal.transfer]` settings section the tap
     /// used to be left unmounted entirely, so trigger detection could never
-    /// fire. Default settings must arm trzsz (§8.3 default_config).
+    /// fire. Default settings must arm every built-in provider (§8.3).
     #[test]
-    fn default_settings_arm_trzsz() {
+    fn default_settings_arm_every_built_in_provider() {
         let setup = transfer_setup(&TransferSettings::default())
             .expect("default settings must arm file transfer");
         assert!(setup.registry.provider("trzsz").is_some());
+        assert!(setup.registry.provider("zmodem").is_some());
         assert!(!setup.registry.is_empty());
     }
 
     #[test]
     fn disabled_provider_yields_no_setup() {
         let mut settings = TransferSettings::default();
+        for id in ["trzsz", "zmodem"] {
+            settings
+                .providers
+                .insert(id.to_owned(), serde_json::json!({ "enabled": false }));
+        }
+        assert!(transfer_setup(&settings).is_none());
+    }
+
+    /// A provider whose section fails validation is disabled on its own:
+    /// the other providers, and the terminal itself, are unaffected (§8.3).
+    #[test]
+    fn invalid_provider_config_only_disables_that_provider() {
+        let mut settings = TransferSettings::default();
         settings
             .providers
-            .insert("trzsz".to_owned(), serde_json::json!({ "enabled": false }));
-        assert!(transfer_setup(&settings).is_none());
+            .insert("zmodem".to_owned(), serde_json::json!({ "enabled": "yes" }));
+        let setup = transfer_setup(&settings).expect("trzsz must stay armed");
+        assert!(setup.registry.provider("zmodem").is_none());
+        assert!(setup.registry.provider("trzsz").is_some());
     }
 
     /// Regression: `TransferSettings` used to derive `Default`, so an

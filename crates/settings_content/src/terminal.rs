@@ -234,7 +234,7 @@ pub struct TransferSettingsContent {
     /// Provider ids in adjudication order when several detectors match the
     /// same bytes. Unknown ids are ignored.
     ///
-    /// Default: ["trzsz"]
+    /// Default: ["trzsz", "zmodem"]
     pub priority: Option<Vec<String>>,
     /// Per-provider configuration, keyed by provider id. `enabled` is
     /// understood by the host; every other key is passed to the provider

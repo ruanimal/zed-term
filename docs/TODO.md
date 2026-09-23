@@ -179,6 +179,70 @@
 - rz/sz 支持
 - trzsz 支持 https://github.com/ruanimal/trzsz-rs
 
+**已完成（2026-02）**：Phase 0/1（tap 分流层、trzsz）之外，Phase 3 的 **rz/sz 支持**
+也已落地：新增 `terminal_app/src/providers_zmodem.rs`（detector + session + provider），
+会话层包 [`zmodem2`](https://crates.io/crates/zmodem2) 0.7.2 的 caller-driven
+`Sender`/`Receiver`，不手写 ZMODEM 状态机。
+
+- 触发检测：只认 hex 头 `**\x18B` + 14 位十六进制，且必须**收齐整个头 + CRC-16
+  校验通过 + 帧类型是 `ZRQINIT`/`ZRINIT`** 才算 match（`cat` 二进制文件不会误触）。
+  `sz` 握手前那句 autostart 的 `rz\r` 若仍在本轮检测窗口内，会连同触发头一起被吞掉，
+  不会留在提示符前。
+- 方向：**触发帧类型即方向**。实测 lrzsz 0.12.20：远端 `sz` 首发 `ZRQINIT`
+  （`**\x18B00000…`，它要发 → 本地下载），远端 `rz` 首发 `ZRINIT`（`**\x18B0100…`，
+  它要收 → 本地上传；而 `rz` 收到 `ZRINIT` 会直接报错退出）。设计稿 §12 原先写
+  "两个方向都发 ZRQINIT、match 时判不了方向"，实现阶段按真机行为更正（文档已同步）。
+- 时序：下载方向的 `ZRINIT` 推迟到用户确认落地目录之后才发（§7.1 要求确认前不放行），
+  因为 `sz` 收到 `ZRINIT` 才发 `ZFILE`、而它等 `ZRPOS` 只等 10 秒；上传方向则立刻发
+  `ZRQINIT` 让远端 `rz` 多撑几轮，用户选完文件再发 `ZFILE`。取消/超时/远端 abort 都
+  发 ZMODEM 规范的 `CAN×8 + BS×8`，远端 abort（连续 5 个 CAN）也会立刻失败会话而不是
+  干等 idle 看门狗。
+- 多文件与空文件：一批文件里每个都要先 `CloseFile`+`CommitFile`（staging 在用户选定
+  目录内、同盘原子改名）再开下一个；`ZRINIT` 必须在磁盘 `fsync` 之前发出去。
+- 默认启用（`default_config: {"enabled": true}`，可在
+  `terminal.transfer.providers.zmodem.enabled` 关掉）；`transfer_setup` 改为按 provider
+  列表 + manifest 的 `default_config` 逐个装配，不再对协议名硬编码；默认
+  `priority` 变为 `["trzsz", "zmodem"]`。
+- 验证：`cargo test -p terminal_app`（170 lib + 11 `transfer_zmodem` + 15
+  `transfer_trzsz`，全绿）、`cargo test -p terminal_core`（115）、
+  `cargo fmt --all -- --check`、`cargo clippy -p terminal_app --all-targets -- --deny
+  warnings`、`cargo check --workspace --all-targets` 均通过。`transfer_zmodem.rs` 里
+  zmodem2 对端（双向、单文件/多文件/空文件、触发头被 tap 吞掉的时序）常开；真机 lrzsz
+  互操作用本地编译的 lrzsz 0.12.20 跑通：
+  `ZEDTERM_SZ_BIN=/path/sz ZEDTERM_RZ_BIN=/path/rz cargo test -p terminal_app --test
+  transfer_zmodem interop`（`sz` 批量两文件含空文件、`rz` 上传，全程 < 0.1 s）。
+- 已知显示噪声：下载结束后远端 `sz` 会补一个 `OO`（over-and-out），此时 mux 已回到
+  Idle，这两个字节会经 parser 落在提示符前；抑制它需要在 mux 里引入"会话结束后
+  linger"，暂不做（无害，其它终端实现同样如此）。
+- 修复（2026-09-23，真机反馈「rz 上传失败：小文件成功、稍大必挂且进度恒为 0；`rz -e`
+  则无论大小必挂」）。两个独立根因，都出在发送端把**裸控制字符**放上了线：
+  1. **`rz -e`（ESCCTL）必挂**：`zmodem2` 0.7.2 只定义了 ZRINIT 的 ESCCTL 标志、从未实现；
+     而 `rz -e` 的解码侧（lrzsz `zm.c` `zdlread2` 的 `Zctlesc` 分支）直接丢弃一切未转义的
+     控制字符，CRC 永远对不上。实测 `rz -e` 的 ZRINIT 只在 ZF3 置 ESCCTL（0x23→0x63），
+     `-b`/`-y` 线上无差别。修复：`zmodem2` 依赖 pin 到 ESCCTL PR（codeberg
+     `jarkko/zmodem2#10`，rev `a17df2a`），对端 ZRINIT 置 ESCCTL 即对 C0/C1 全转义；
+     待上游发布后换回 crates.io 版本（Cargo.toml 有注释）。
+  2. **裸控制字符被 lrzsz 的 tty 静默吞掉（与文件大小相关）**：lrzsz 0.12.20 `rbsb.c`
+     `io_mode(1/3)` 置 raw 时只清 `ECHO|ICANON|ISIG`，**没清 `IEXTEN`**（上游 master 的
+     `iomode.c` 后来补清并注明 "^V/^O/^R/^W"），macOS 的 VLNEXT(0x16)/VWERASE(0x17)/
+     VREPRINT(0x12)/VDISCARD(0x0f) 等扩展编辑字符在非规范模式下仍生效：数据流里的裸控制
+     字符被逐个静默吞掉（最小复现：子包 CRC-32 的尾字节恰为 0x16 被吞，`rz` 报
+     "Bad CRC" 后死循环重传）。文件小到不含这些字节才成功，与内容相关而与大小只是
+     概率关系。修复：发送端无条件 `Sender::set_escape_control(true)` 全转义——转义形式
+     任何 ZMODEM 接收端都能解码，不再依赖对端 `rz -e`。
+  3. 顺带修的真 bug：ZRPOS 回退（错误恢复从最后完整字节重传）时 `file_offset` 只增不减，
+     重传会被误判 "the file changed while it was being sent" 而失败；改为按
+     `FileData.offset` 记账，新增 `upload_resends_from_a_zrpos_rewind` 回归覆盖。
+  4. PTY 测试基建（`tests/transfer_pty.rs` 此前缺 `libc` 依赖、从未编译过）：补 dev-dep；
+     wire writer 在 EAGAIN 时丢协议字节，改为等待重试（对齐 app 内 event loop 的排队
+     语义）；lrzsz 收尾 `tcdrain` 要等 master 读完才退出（卡住后连 SIGKILL 都杀不掉），
+     `reap` 改为持续抽干 master 直到对端退出——顺带把"会话在线上正常收尾"也变成了
+     断言；新增 `rz -e` 真机回归用例。
+  验证：`ZEDTERM_RZ_BIN=… ZEDTERM_SZ_BIN=… cargo test -p terminal_app` 全绿（`transfer_pty`
+  真机 `sz`/`rz`/`rz -e` 全程走真实 tap，`transfer_zmodem` 含真机 lrzsz 互操作，
+  `transfer_trzsz`、lib 同场通过）；`cargo clippy -p terminal_app --all-targets -- --deny
+  warnings` 与 `cargo fmt --all -- --check` 通过。
+
 ### 复杂度评估
 
 实现真正可用的 rz/sz 支持属于高复杂度功能，约为 8/10。它不是终端 UI 层的小功能，而是 `terminal_core` 的 PTY 传输层扩展。
