@@ -1,6 +1,7 @@
 //! Transfer UI: per-tab overlay state, dialogs and the pane-top bar
 //! (§6 of docs/TRANSFER_EXTENSION.md).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
@@ -134,6 +135,18 @@ struct FinishedTransfer {
     ok: bool,
 }
 
+/// The finished-transfer summary line. Only a download "saves" anything
+/// locally; an upload's paths are the files that were sent, so "Saved" there
+/// would claim a local save that never happened.
+fn completion_summary(paths: &[PathBuf], direction: Option<Direction>) -> String {
+    match paths.len() {
+        0 => "Transfer completed".to_string(),
+        1 if direction == Some(Direction::Upload) => format!("Sent {}", paths[0].display()),
+        1 => format!("Saved {}", paths[0].display()),
+        _ => format!("Transferred {} files", paths.len()),
+    }
+}
+
 /// Per-tab transfer state driving the overlay bar and the dialogs.
 #[derive(Default)]
 pub struct TransferUiState {
@@ -205,11 +218,8 @@ impl TransferUiState {
                 }
             }
             TransferUiEvent::Completed { paths } => {
-                let summary = match paths.len() {
-                    0 => "Transfer completed".to_string(),
-                    1 => format!("Saved {}", paths[0].display()),
-                    _ => format!("Transferred {} files", paths.len()),
-                };
+                let direction = self.active.as_ref().and_then(|active| active.direction);
+                let summary = completion_summary(&paths, direction);
                 self.finished = Some(FinishedTransfer {
                     message: summary,
                     ok: true,
@@ -539,6 +549,27 @@ mod tests {
         );
         assert_eq!(setup.policy.max_file_size, 2048 * 1024 * 1024);
         assert_eq!(setup.policy.max_session_bytes, 4096 * 1024 * 1024);
+    }
+
+    #[test]
+    fn completion_summary_distinguishes_uploads_from_downloads() {
+        let path = PathBuf::from("/tmp/report.csv");
+        assert_eq!(
+            completion_summary(std::slice::from_ref(&path), Some(Direction::Download)),
+            "Saved /tmp/report.csv"
+        );
+        assert_eq!(
+            completion_summary(std::slice::from_ref(&path), Some(Direction::Upload)),
+            "Sent /tmp/report.csv"
+        );
+        assert_eq!(completion_summary(&[], None), "Transfer completed");
+        assert_eq!(
+            completion_summary(
+                &[path.clone(), PathBuf::from("/tmp/b")],
+                Some(Direction::Upload)
+            ),
+            "Transferred 2 files"
+        );
     }
 
     fn active_transfer() -> ActiveTransfer {

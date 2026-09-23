@@ -227,6 +227,27 @@ struct TapCore {
     /// Whether a session owned the stream on the previous chunk, so the
     /// detectors can be reset once it ends.
     session_owned: bool,
+    /// Last byte handed to the parser; a session's intercept can leave the
+    /// visible line without its line break (the swallowed trigger was the
+    /// line's continuation).
+    parser_last: Option<u8>,
+    /// Set while a just-ended session's peer may still send ZMODEM's
+    /// over-and-out ("OO", sent after the closing exchange): printing it
+    /// would put protocol noise right before the next prompt.
+    over_and_out: Option<OverAndOut>,
+    /// A line break is owed before the next parser bytes, when the visible
+    /// line turns out to be partial.
+    newline_pending: bool,
+}
+
+/// How long the peer's trailing over-and-out stays plausible. It follows the
+/// closing exchange within milliseconds; anything later is real output.
+const OVER_AND_OUT_TIMEOUT: Duration = Duration::from_secs(1);
+
+struct OverAndOut {
+    armed_at: Instant,
+    /// Bytes of `OO` matched so far.
+    matched: u8,
 }
 
 impl TapCore {
@@ -235,6 +256,62 @@ impl TapCore {
         buf[..count].copy_from_slice(&self.pending[..count]);
         self.pending.drain(..count);
         count
+    }
+
+    /// Queue parser-bound bytes, resolving a just-ended session's tail first:
+    /// eat the peer's over-and-out, and give the visible line its missing
+    /// line break before whatever comes next (the prompt).
+    fn queue_parser_bytes(&mut self, bytes: &[u8]) {
+        let mut rest = bytes;
+        let mut flushed: Vec<u8> = Vec::new();
+        if let Some(tail) = self.over_and_out.take() {
+            if tail.armed_at.elapsed() >= OVER_AND_OUT_TIMEOUT {
+                flushed.extend_from_slice(&b"OO"[..tail.matched as usize]);
+            } else {
+                let OverAndOut {
+                    armed_at,
+                    mut matched,
+                } = tail;
+                while rest.first() == Some(&b'O') && matched < 2 {
+                    matched += 1;
+                    rest = &rest[1..];
+                }
+                if matched < 2 && rest.is_empty() {
+                    // Could still be the over-and-out; wait for more bytes.
+                    self.over_and_out = Some(OverAndOut { armed_at, matched });
+                } else if matched < 2 {
+                    // Not the over-and-out after all: the matched bytes are
+                    // ordinary output.
+                    flushed.extend_from_slice(&b"OO"[..matched as usize]);
+                }
+            }
+        }
+        if rest.is_empty() && flushed.is_empty() {
+            return;
+        }
+        if self.newline_pending {
+            self.newline_pending = false;
+            if self.parser_last.is_some_and(|byte| byte != b'\n') {
+                self.pending.extend_from_slice(b"\r\n");
+            }
+        }
+        self.pending.extend_from_slice(&flushed);
+        self.pending.extend_from_slice(rest);
+        self.parser_last = self.pending.last().copied();
+    }
+
+    /// Deliver `count` leading bytes of `chunk` to the parser: in place when
+    /// nothing needs rewriting, through `pending` when a just-ended session's
+    /// tail does.
+    fn deliver_parser_prefix(&mut self, chunk: &[u8], count: usize) -> Delivery {
+        if self.over_and_out.is_some() || self.newline_pending {
+            self.queue_parser_bytes(&chunk[..count]);
+            return Delivery::Consumed;
+        }
+        if let Some(&last) = chunk[..count].last() {
+            self.parser_last = Some(last);
+        }
+        Delivery::Parser(count)
     }
 
     fn is_holding(&self) -> bool {
@@ -254,8 +331,8 @@ impl TapCore {
     /// never straddle a flush (§3.2 invariant).
     fn release_hold(&mut self) {
         if !self.hold.is_empty() {
-            self.pending.extend_from_slice(&self.hold);
-            self.hold.clear();
+            let hold = std::mem::take(&mut self.hold);
+            self.queue_parser_bytes(&hold);
         }
         self.hold_since = None;
         self.reset_detectors();
@@ -272,14 +349,21 @@ impl TapCore {
         }
         if self.session_owned {
             // The session ended: its match left the detectors mid-candidate
-            // and `fed_offset` at zero, so start detection fresh.
+            // and `fed_offset` at zero, so start detection fresh. Its peer
+            // may still send the over-and-out, and the intercept swallowed
+            // the bytes that ended the visible line.
             self.session_owned = false;
             self.hold.clear();
             self.hold_since = None;
             self.reset_detectors();
+            self.over_and_out = Some(OverAndOut {
+                armed_at: Instant::now(),
+                matched: 0,
+            });
+            self.newline_pending = true;
         }
         if self.detectors.is_empty() {
-            return Delivery::Parser(chunk.len());
+            return self.deliver_parser_prefix(chunk, chunk.len());
         }
 
         let fed_before = self.fed_offset;
@@ -328,12 +412,12 @@ impl TapCore {
         // this chunk, so the two are queued together and in order.
         self.reset_detectors();
         if self.hold.is_empty() {
-            return Delivery::Parser(chunk.len());
+            return self.deliver_parser_prefix(chunk, chunk.len());
         }
-        self.pending.extend_from_slice(&self.hold);
-        self.hold.clear();
+        let hold = std::mem::take(&mut self.hold);
         self.hold_since = None;
-        self.pending.extend_from_slice(chunk);
+        self.queue_parser_bytes(&hold);
+        self.queue_parser_bytes(chunk);
         Delivery::Consumed
     }
 
@@ -352,6 +436,7 @@ impl TapCore {
         };
         self.hold_since = None;
         self.fed_offset = 0;
+        self.session_owned = true;
 
         // Detector coordinates are absolute since the last reset; `combined`
         // starts at `fed_before - held.len()` in that space.
@@ -376,10 +461,9 @@ impl TapCore {
         // are entirely inside this chunk (the common, zero-copy case);
         // otherwise they include previously held bytes and go via `pending`.
         if combined.len() == chunk.len() && start <= chunk.len() {
-            return Delivery::Parser(start);
+            return self.deliver_parser_prefix(chunk, start);
         }
-        self.pending
-            .extend_from_slice(&combined[..start.min(combined.len())]);
+        self.queue_parser_bytes(&combined[..start.min(combined.len())]);
         Delivery::Consumed
     }
 }
@@ -721,6 +805,9 @@ impl TransferRuntime {
                 fed_offset: 0,
                 pending: Vec::new(),
                 session_owned: false,
+                parser_last: None,
+                over_and_out: None,
+                newline_pending: false,
                 registry: registry.clone(),
             }),
             state: AtomicU8::new(0),
@@ -1685,6 +1772,126 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// After a session ends the stream still carries its tail: the peer's
+    /// over-and-out ("OO", protocol noise) and, when the intercept left the
+    /// visible line partial, a missing line break before the next prompt.
+    #[test]
+    fn post_session_tail_is_eaten_and_the_line_ended() {
+        use std::io::Write as _;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+        let (_runtime, shared) = test_shared(vec![Arc::new(LoopbackProvider)]);
+        let (written_tx, _written_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        shared.set_wire_writer(Arc::new(move |bytes: &[u8]| {
+            let _ = written_tx.send(bytes.to_vec());
+        }));
+
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+        let mut writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+        let fd = reader.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+            0
+        );
+        let mut tap = TapReader::new(reader, shared.clone(), Some(fd));
+        let mut buf = [0u8; 4096];
+        let mut shown = Vec::new();
+        let mut drain = |shown: &mut Vec<u8>| match tap.read(&mut buf) {
+            Ok(count) => shown.extend_from_slice(&buf[..count]),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("tap read failed: {error}"),
+        };
+
+        // A partial visible line first: a ZMODEM banner ends without one.
+        writer.write_all(b"banner.").unwrap();
+        drain(&mut shown);
+        assert_eq!(shown, b"banner.");
+
+        // The trigger line (swallowed) and what follows it (the session's),
+        // then the completion input.
+        writer.write_all(b"ZTLOOP:START here\nnoise").unwrap();
+        writer.write_all(LOOPBACK_END).unwrap();
+        for _ in 0..4 {
+            drain(&mut shown);
+        }
+        let ui_rx = shared.ui_events();
+        loop {
+            match wait_event(&ui_rx, Duration::from_secs(5)) {
+                Some(TransferUiEvent::Completed { .. }) => break,
+                Some(_) => {}
+                None => panic!("the session must complete before its tail arrives"),
+            }
+        }
+
+        // The peer's over-and-out and the prompt after it.
+        writer.write_all(b"OOprompt> ").unwrap();
+        for _ in 0..4 {
+            drain(&mut shown);
+        }
+        assert_eq!(shown, b"banner.\r\nprompt> ");
+    }
+
+    /// A complete line gets no line break, and a lone leading `O` that is
+    /// not the over-and-out is put back untouched.
+    #[test]
+    fn post_session_tail_keeps_a_complete_line_and_a_stray_o() {
+        use std::io::Write as _;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+        let (_runtime, shared) = test_shared(vec![Arc::new(LoopbackProvider)]);
+        let (written_tx, _written_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        shared.set_wire_writer(Arc::new(move |bytes: &[u8]| {
+            let _ = written_tx.send(bytes.to_vec());
+        }));
+
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+        let mut writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+        let fd = reader.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+            0
+        );
+        let mut tap = TapReader::new(reader, shared.clone(), Some(fd));
+        let mut buf = [0u8; 4096];
+        let mut shown = Vec::new();
+
+        writer.write_all(b"done\n").unwrap();
+        writer.write_all(b"ZTLOOP:START here\n").unwrap();
+        writer.write_all(LOOPBACK_END).unwrap();
+        for _ in 0..4 {
+            match tap.read(&mut buf) {
+                Ok(count) => shown.extend_from_slice(&buf[..count]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("tap read failed: {error}"),
+            }
+        }
+        assert_eq!(shown, b"done\n");
+        let ui_rx = shared.ui_events();
+        loop {
+            match wait_event(&ui_rx, Duration::from_secs(5)) {
+                Some(TransferUiEvent::Completed { .. }) => break,
+                Some(_) => {}
+                None => panic!("the session must complete before its tail arrives"),
+            }
+        }
+
+        writer.write_all(b"Ola!").unwrap();
+        for _ in 0..4 {
+            match tap.read(&mut buf) {
+                Ok(count) => shown.extend_from_slice(&buf[..count]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("tap read failed: {error}"),
+            }
+        }
+        assert_eq!(shown, b"done\nOla!");
     }
 
     /// Provider whose session asks for upload paths and, once answered,

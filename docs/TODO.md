@@ -242,6 +242,17 @@
   真机 `sz`/`rz`/`rz -e` 全程走真实 tap，`transfer_zmodem` 含真机 lrzsz 互操作，
   `transfer_trzsz`、lib 同场通过）；`cargo clippy -p terminal_app --all-targets -- --deny
   warnings` 与 `cargo fmt --all -- --check` 通过。
+- 修复（2026-09-23，真机反馈二则）：
+  1. 传输结束后终端里的残留内容（`rz waiting to receive.`、收尾的 `OO` 等）缺少换行，
+     bash 的下一行 prompt 错位（zsh 靠 `%` 标记尚可）。原因：触发头吞掉了可见行的
+     后半段，而 lrzsz 成功收尾不打印换行——`rz` 静默退出、`sz` 退出前只发 ZMODEM 的
+     over-and-out `OO`（无换行）。修复：mux 在会话结束后收口尾部——按协议吃掉对端的
+     `OO`（带 1s 时效，非 `OO` 原样放回），且当可见行未以换行结束时，在下一批 parser
+     字节前补 `\r\n`。回归测试 `post_session_tail_is_eaten_and_the_line_ended` 与
+     `post_session_tail_keeps_a_complete_line_and_a_stray_o`。
+  2. 上传的完成消息写成 "Saved <本地路径>"——"Saved" 只对下载成立，上传只是发送源。
+     改为按方向区分：上传 `Sent <路径>`，下载保持 `Saved <路径>`（`completion_summary`
+     纯函数 + 单测）。
 
 ### 复杂度评估
 
