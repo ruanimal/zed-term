@@ -134,7 +134,7 @@ fn trigger_direction(mode: char) -> Direction {
 fn maximum_protocol_for(remote_version: Option<&TrzszVersion>) -> i32 {
     let oldest_protocol_two_version = TrzszVersion {
         major: 1,
-        minor: 0,
+        minor: 1,
         patch: 0,
     };
     let newest_protocol_two_version = TrzszVersion {
@@ -148,7 +148,7 @@ fn maximum_protocol_for(remote_version: Option<&TrzszVersion>) -> i32 {
     }) {
         2
     } else {
-        1
+        4
     }
 }
 
@@ -556,6 +556,7 @@ struct HostFileWriter {
     events: mpsc::Sender<WorkerEvent>,
     cancelled: Arc<AtomicBool>,
     offset: u64,
+    size: u64,
 }
 
 impl FileWriter for HostFileWriter {
@@ -570,6 +571,46 @@ impl FileWriter for HostFileWriter {
             .map_err(|error| io::Error::other(format!("transfer host stopped: {error}")))?;
         await_reply(response, &self.cancelled).map_err(io::Error::other)?;
         self.offset = self.offset.saturating_add(bytes.len() as u64);
+        self.size = self.size.max(self.offset);
+        Ok(())
+    }
+
+    // Downloads use fresh staging files, so v4 only inspects an empty local prefix.
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() || self.offset == self.size {
+            return Ok(0);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "cannot read existing staged download data",
+        ))
+    }
+
+    fn seek(&mut self, position: io::SeekFrom) -> io::Result<u64> {
+        match position {
+            io::SeekFrom::Start(offset) if offset <= self.size => {
+                self.offset = offset;
+                Ok(offset)
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "cannot seek outside staged download data",
+            )),
+        }
+    }
+
+    fn size(&self) -> io::Result<u64> {
+        Ok(self.size)
+    }
+
+    fn set_len(&mut self, size: u64) -> io::Result<()> {
+        if size != self.size {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "cannot resize staged download data",
+            ));
+        }
+        self.offset = self.offset.min(size);
         Ok(())
     }
 
@@ -707,6 +748,7 @@ fn download_files(
                 events: events.clone(),
                 cancelled: cancelled.clone(),
                 offset: 0,
+                size: 0,
             });
             Ok((Some(writer), local_name))
         });

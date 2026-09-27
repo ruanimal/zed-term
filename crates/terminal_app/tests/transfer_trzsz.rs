@@ -132,7 +132,7 @@ impl DownloadServer {
             "ACT" => {
                 self.out.push_back(string_line(
                     "CFG",
-                    br#"{"quiet":true,"binary":false,"bufsize":1048576,"timeout":20}"#,
+                    br#"{"quiet":true,"binary":false,"bufsize":1048576,"timeout":20,"protocol":1}"#,
                 ));
                 self.out
                     .push_back(integer_line("NUM", self.files.len() as u64));
@@ -225,13 +225,13 @@ impl UploadReceiver {
                 let action: serde_json::Value =
                     serde_json::from_slice(&decode_value(value)).unwrap();
                 assert_eq!(action["lang"], "rust");
-                assert_eq!(action["protocol"], 1);
+                assert_eq!(action["protocol"], 4);
                 assert_eq!(action["binary"], false);
                 assert_eq!(action["support_dir"], false);
                 assert_eq!(action["confirm"], true);
                 self.out.push_back(string_line(
                     "CFG",
-                    br#"{"quiet":true,"binary":false,"overwrite":true,"bufsize":1048576,"timeout":20}"#,
+                    br#"{"quiet":true,"binary":false,"overwrite":true,"bufsize":1048576,"timeout":20,"protocol":1}"#,
                 ));
             }
             "NUM" => self
@@ -619,7 +619,7 @@ fn oversized_download_chunk_fails_the_session() {
 
     let mut failed = None;
     let mut wire: VecDeque<Vec<u8>> = VecDeque::from(vec![
-        string_line("CFG", br#"{"binary":false}"#),
+        string_line("CFG", br#"{"binary":false,"protocol":1}"#),
         integer_line("NUM", 1),
         string_line("NAME", b"corrupt.bin"),
         integer_line("SIZE", 4),
@@ -845,7 +845,7 @@ fn upload_rejects_files_over_configured_size_before_announcing_count() {
             .any(|action| matches!(action, SessionAction::WriteWire(_)))
     );
     let configuration =
-        br#"{"quiet":true,"binary":false,"overwrite":true,"bufsize":1048576,"timeout":20}"#;
+        br#"{"quiet":true,"binary":false,"overwrite":true,"bufsize":1048576,"timeout":20,"protocol":1}"#;
     let actions = session.feed_wire(&string_line("CFG", configuration));
     assert!(actions.iter().any(|action| {
         matches!(action, SessionAction::Failed(reason) if reason.contains("file size limit exceeded"))
