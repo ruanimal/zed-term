@@ -48,6 +48,7 @@ pub enum TransferUiEvent {
     },
     AwaitingUploadPaths {
         request_id: u64,
+        allow_directories: bool,
     },
     AwaitingDownloadDir {
         request_id: u64,
@@ -1114,11 +1115,15 @@ fn run_actions(
                 let actions = driver.session.submit(HostEvent::FileCommitted(result));
                 run_actions(actions, slot, shared, host, policy);
             }
-            SessionAction::NeedUploadPaths => {
+            action @ (SessionAction::NeedUploadPaths
+            | SessionAction::NeedUploadPathsWithDirectories) => {
                 driver.next_request_id += 1;
                 driver.picker_deadline = Some(Instant::now() + policy.picker_timeout);
+                let allow_directories =
+                    matches!(action, SessionAction::NeedUploadPathsWithDirectories);
                 shared.emit_ui(TransferUiEvent::AwaitingUploadPaths {
                     request_id: driver.next_request_id,
+                    allow_directories,
                 });
                 host.request_upload_paths();
             }
@@ -1275,6 +1280,8 @@ impl TransferDetector for LineTriggerDetector {
                     offer: TransferOffer {
                         provider_id: self.provider_id.clone(),
                         direction: None,
+                        trigger_mode: None,
+                        trigger_version: None,
                         remote_names: Vec::new(),
                     },
                     trigger: start..end,
@@ -1738,6 +1745,8 @@ mod tests {
         shared.send_driver(DriverMsg::StartSession(TransferOffer {
             provider_id: "loopback".into(),
             direction: None,
+            trigger_mode: None,
+            trigger_version: None,
             remote_names: Vec::new(),
         }));
         shared.send_driver(DriverMsg::Wire(b"ping".to_vec()));
@@ -1901,11 +1910,16 @@ mod tests {
 
     struct PickerSession {
         answered: bool,
+        allow_directories: bool,
     }
 
     impl TransferSession for PickerSession {
         fn start(&mut self) -> Vec<SessionAction> {
-            vec![SessionAction::NeedUploadPaths]
+            if self.allow_directories {
+                vec![SessionAction::NeedUploadPathsWithDirectories]
+            } else {
+                vec![SessionAction::NeedUploadPaths]
+            }
         }
 
         fn feed_wire(&mut self, _bytes: &[u8]) -> Vec<SessionAction> {
@@ -1965,13 +1979,47 @@ mod tests {
             Box::new(LineTriggerDetector::new(b"PICK:GO\n", self.id()))
         }
 
-        fn start_session(&self, _offer: &TransferOffer) -> Box<dyn TransferSession> {
-            Box::new(PickerSession { answered: false })
+        fn start_session(&self, offer: &TransferOffer) -> Box<dyn TransferSession> {
+            Box::new(PickerSession {
+                answered: false,
+                allow_directories: offer.trigger_mode == Some('D'),
+            })
         }
 
         fn start_manual_upload(&self) -> Option<Box<dyn TransferSession>> {
             None
         }
+    }
+
+    #[test]
+    fn directory_upload_action_reaches_the_ui_with_directory_selection_enabled() {
+        let runtime = TransferRuntime::new(
+            Arc::new(TransferRegistry::new(
+                vec![Arc::new(PickerProvider)],
+                vec![],
+            )),
+            Arc::new(NoopHost),
+            TransferPolicy::default(),
+        );
+        let shared = runtime.shared();
+        shared.set_wire_writer(Arc::new(|_bytes: &[u8]| {}));
+        let events = shared.ui_events();
+        shared.send_driver(DriverMsg::StartSession(TransferOffer {
+            provider_id: "picker".into(),
+            direction: Some(Direction::Upload),
+            trigger_mode: Some('D'),
+            trigger_version: None,
+            remote_names: Vec::new(),
+        }));
+
+        assert!(matches!(
+            wait_event(&events, Duration::from_secs(5)),
+            Some(TransferUiEvent::AwaitingUploadPaths {
+                allow_directories: true,
+                ..
+            })
+        ));
+        shared.answer_upload_paths(None);
     }
 
     /// Regression: while the user is inside the picker dialog the idle
@@ -2000,6 +2048,8 @@ mod tests {
         shared.send_driver(DriverMsg::StartSession(TransferOffer {
             provider_id: "picker".into(),
             direction: Some(Direction::Upload),
+            trigger_mode: None,
+            trigger_version: None,
             remote_names: Vec::new(),
         }));
 
@@ -2046,6 +2096,8 @@ mod tests {
         shared.send_driver(DriverMsg::StartSession(TransferOffer {
             provider_id: "picker".into(),
             direction: Some(Direction::Upload),
+            trigger_mode: None,
+            trigger_version: None,
             remote_names: Vec::new(),
         }));
 
@@ -2084,6 +2136,8 @@ mod tests {
         shared.send_driver(DriverMsg::StartSession(TransferOffer {
             provider_id: "loopback".into(),
             direction: None,
+            trigger_mode: None,
+            trigger_version: None,
             remote_names: Vec::new(),
         }));
         let _ = written_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -2223,6 +2277,8 @@ mod tests {
         shared.send_driver(DriverMsg::StartSession(TransferOffer {
             provider_id: "oversized-write".into(),
             direction: Some(Direction::Download),
+            trigger_mode: None,
+            trigger_version: None,
             remote_names: Vec::new(),
         }));
         let ui_rx = shared.ui_events();
@@ -2307,6 +2363,8 @@ mod tests {
         shared.send_driver(DriverMsg::StartSession(TransferOffer {
             provider_id: "oversized-read".into(),
             direction: Some(Direction::Upload),
+            trigger_mode: None,
+            trigger_version: None,
             remote_names: Vec::new(),
         }));
         let ui_rx = shared.ui_events();

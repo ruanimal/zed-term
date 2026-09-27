@@ -46,6 +46,7 @@ settings.workspace = true
 terminal_core = { path = "../terminal_core" }
 transfer_core.workspace = true
 theme.workspace = true
+trzsz-rs = { package = "trzsz-rs", git = "https://github.com/ruanimal/trzsz-rs", rev = "a9dbaaec729d5adf336b9bc6c40404fecb4f8218", default-features = false }
 theme_settings.workspace = true
 ui.workspace = true
 url.workspace = true

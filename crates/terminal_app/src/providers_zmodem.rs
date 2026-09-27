@@ -209,6 +209,8 @@ impl ZmodemDetector {
             offer: TransferOffer {
                 provider_id: "zmodem".into(),
                 direction: Some(direction),
+                trigger_mode: None,
+                trigger_version: None,
                 remote_names: Vec::new(),
             },
             trigger: trigger_start..index + 1,

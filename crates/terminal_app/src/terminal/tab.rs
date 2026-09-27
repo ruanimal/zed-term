@@ -982,6 +982,84 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn transfer_picker_events_open_the_platform_path_picker(cx: &mut gpui::TestAppContext) {
+        let pane = cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            test_pane(cx)
+        });
+
+        let terminal = cx.update(|cx| pane.read(cx).terminal.clone());
+        cx.update(|cx| {
+            terminal.update(cx, |_terminal, cx| {
+                cx.emit(Event::Transfer(
+                    terminal_core::TransferUiEvent::AwaitingUploadPaths {
+                        request_id: 1,
+                        allow_directories: false,
+                    },
+                ));
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.did_prompt_for_paths(),
+            "upload picker event must open a dialog"
+        );
+        cx.simulate_path_prompt_response(|options| {
+            assert!(options.files);
+            assert!(!options.directories);
+            assert!(options.multiple);
+            Some(vec![PathBuf::from("/tmp/source.txt")])
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            pane.update(cx, |pane, cx| {
+                let terminal = pane.terminal.clone();
+                pane.transfer_ui.handle(
+                    terminal_core::TransferUiEvent::AwaitingUploadPaths {
+                        request_id: 2,
+                        allow_directories: true,
+                    },
+                    &terminal,
+                    cx,
+                );
+            });
+        });
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(|options| {
+            assert!(options.files);
+            assert!(options.directories);
+            assert!(options.multiple);
+            Some(vec![PathBuf::from("/tmp/source-directory")])
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            pane.update(cx, |pane, cx| {
+                let terminal = pane.terminal.clone();
+                pane.transfer_ui.handle(
+                    terminal_core::TransferUiEvent::AwaitingDownloadDir { request_id: 2 },
+                    &terminal,
+                    cx,
+                );
+            });
+        });
+        assert!(
+            cx.did_prompt_for_paths(),
+            "download picker request must reach the platform"
+        );
+        cx.simulate_path_prompt_response(|options| {
+            assert!(!options.files);
+            assert!(options.directories);
+            assert!(!options.multiple);
+            Some(vec![PathBuf::from("/tmp/downloads")])
+        });
+        cx.run_until_parked();
+        assert!(!cx.did_prompt_for_paths());
+    }
+
+    #[gpui::test]
     async fn blink_changed_resets_phase_on_existing_pane(cx: &mut gpui::TestAppContext) {
         let pane = cx.update(|cx| {
             let settings_store = SettingsStore::test(cx);

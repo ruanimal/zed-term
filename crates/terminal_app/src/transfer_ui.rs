@@ -26,19 +26,23 @@ use crate::transfer_io::AppTransferHost;
 /// Settings never name a protocol here: each provider declares its own
 /// `default_config` and validates its own section, so adding one is a line in
 /// this list (§8.3).
-fn built_in_providers() -> Vec<Box<dyn TransferProvider>> {
-    vec![Box::new(TrzszProvider), Box::new(ZmodemProvider)]
+fn built_in_providers(max_file_size: u64) -> Vec<Box<dyn TransferProvider>> {
+    vec![
+        Box::new(TrzszProvider::new(max_file_size)),
+        Box::new(ZmodemProvider),
+    ]
 }
 
 /// Build the transfer runtime configuration for a new terminal. Returns
 /// `None` when every provider is disabled, which leaves the terminal with no
 /// tap at all (zero overhead, zero false positives).
 pub fn transfer_setup(settings: &TransferSettings) -> Option<TransferSetup> {
+    let max_file_size = settings.max_file_size_mb * 1024 * 1024;
     // `configure` runs before the provider is frozen into the shared
     // registry (§4). A provider whose configuration fails validation is
     // disabled with a warning; other providers are unaffected.
     let mut providers: Vec<Arc<dyn TransferProvider>> = Vec::new();
-    for mut provider in built_in_providers() {
+    for mut provider in built_in_providers(max_file_size) {
         let id = provider.id();
         let config = settings
             .providers
@@ -86,14 +90,11 @@ pub fn transfer_setup(settings: &TransferSettings) -> Option<TransferSetup> {
         }
     }
 
-    let host = AppTransferHost::new(
-        settings.download_dir.clone(),
-        settings.max_file_size_mb * 1024 * 1024,
-    );
+    let host = AppTransferHost::new(settings.download_dir.clone(), max_file_size);
     let policy = TransferPolicy {
         picker_timeout: std::time::Duration::from_secs(settings.picker_timeout_secs),
         idle_timeout: std::time::Duration::from_secs(settings.idle_timeout_secs),
-        max_file_size: settings.max_file_size_mb * 1024 * 1024,
+        max_file_size,
         max_session_bytes: settings.max_session_mb * 1024 * 1024,
     };
 
@@ -197,8 +198,10 @@ impl TransferUiState {
                 self.finished = None;
                 self.hint = None;
             }
-            TransferUiEvent::AwaitingUploadPaths { .. } => {
-                self.prompt_upload_paths(cx);
+            TransferUiEvent::AwaitingUploadPaths {
+                allow_directories, ..
+            } => {
+                self.prompt_upload_paths(cx, allow_directories);
             }
             TransferUiEvent::AwaitingDownloadDir { .. } => {
                 self.prompt_download_dir(terminal, cx);
@@ -263,10 +266,15 @@ impl TransferUiState {
         self.active = None;
     }
 
-    fn prompt_upload_paths(&self, cx: &mut Context<crate::terminal::TerminalTab>) {
+    fn prompt_upload_paths(
+        &self,
+        cx: &mut Context<crate::terminal::TerminalTab>,
+        allow_directories: bool,
+    ) {
+        log::info!("requesting upload path picker (allow_directories={allow_directories})");
         let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
-            directories: false,
+            directories: allow_directories,
             multiple: true,
             prompt: None,
         });
@@ -274,25 +282,31 @@ impl TransferUiState {
             let answer = match receiver.await {
                 Ok(Ok(paths)) => paths,
                 Ok(Err(error)) => {
-                    // The picker itself failed (e.g. xdg-desktop-portal is
-                    // unavailable on Linux): the session cannot continue, so
-                    // end it and say why instead of silently "cancelling".
-                    let _ = this.update(cx, |this, cx| {
+                    log::error!("cannot open transfer file picker: {error}");
+                    if let Err(update_error) = this.update(cx, |this, cx| {
                         this.terminal.update(cx, |terminal, _| {
                             terminal.transfer_answer_upload_paths(None);
                         });
                         this.transfer_ui
                             .fail(format!("无法打开文件选择器: {error}"));
-                    });
+                        cx.notify();
+                    }) {
+                        log::debug!("transfer file picker error UI was closed: {update_error}");
+                    }
                     return;
                 }
-                Err(_) => None,
+                Err(error) => {
+                    log::debug!("transfer file picker response was dropped: {error}");
+                    None
+                }
             };
-            let _ = this.update(cx, |this, cx| {
+            if let Err(error) = this.update(cx, |this, cx| {
                 this.terminal.update(cx, |terminal, _| {
                     terminal.transfer_answer_upload_paths(answer);
                 });
-            });
+            }) {
+                log::debug!("transfer file picker answer was dropped: {error}");
+            }
         })
         .detach();
     }
@@ -320,6 +334,7 @@ impl TransferUiState {
             });
             return;
         }
+        log::info!("requesting download directory picker");
 
         let receiver = cx.prompt_for_paths(download_dir_prompt_options());
         cx.spawn(async move |this, cx| {
@@ -327,22 +342,33 @@ impl TransferUiState {
                 Ok(Ok(Some(mut paths))) => paths.pop(),
                 Ok(Ok(None)) => None,
                 Ok(Err(error)) => {
-                    let _ = this.update(cx, |this, cx| {
+                    log::error!("cannot open transfer directory picker: {error}");
+                    if let Err(update_error) = this.update(cx, |this, cx| {
                         this.terminal.update(cx, |terminal, _| {
                             terminal.transfer_answer_download_dir(None);
                         });
                         this.transfer_ui
                             .fail(format!("无法打开目录选择器: {error}"));
-                    });
+                        cx.notify();
+                    }) {
+                        log::debug!(
+                            "transfer directory picker error UI was closed: {update_error}"
+                        );
+                    }
                     return;
                 }
-                Err(_) => None,
+                Err(error) => {
+                    log::debug!("transfer directory picker response was dropped: {error}");
+                    None
+                }
             };
-            let _ = this.update(cx, |this, cx| {
+            if let Err(error) = this.update(cx, |this, cx| {
                 this.terminal.update(cx, |terminal, _| {
                     terminal.transfer_answer_download_dir(answer);
                 });
-            });
+            }) {
+                log::debug!("transfer directory picker answer was dropped: {error}");
+            }
         })
         .detach();
     }

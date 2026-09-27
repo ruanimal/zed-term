@@ -71,6 +71,10 @@ pub struct TransferOffer {
     /// copy in that case; the direction is revealed later by which dialog the
     /// session asks for (`NeedUploadPaths` vs `NeedDownloadDir`).
     pub direction: Option<Direction>,
+    /// Provider-specific mode when a trigger has distinct host requirements.
+    pub trigger_mode: Option<char>,
+    /// Parsed remote version from the trigger for protocol compatibility negotiation.
+    pub trigger_version: Option<String>,
     /// File names declared by the remote, when the trigger carries them.
     /// Display/suggestion only: they are attacker-controlled and must be
     /// sanitized before anything touches the filesystem.
@@ -139,6 +143,8 @@ pub enum SessionAction {
     CommitFile,
     /// Ask the user to pick file(s) to upload.
     NeedUploadPaths,
+    /// Ask the user to pick files and directories to upload.
+    NeedUploadPathsWithDirectories,
     /// Ask the user where to save a download.
     NeedDownloadDir,
     Progress {
@@ -360,6 +366,8 @@ mod tests {
                         offer: TransferOffer {
                             provider_id: "line".into(),
                             direction: Some(Direction::Download),
+                            trigger_mode: None,
+                            trigger_version: None,
                             remote_names: vec![text[TRIGGER.len()..text.len() - 1].to_string()],
                         },
                         trigger: start..index + 1,

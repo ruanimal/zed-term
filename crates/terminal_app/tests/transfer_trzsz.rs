@@ -11,6 +11,7 @@ use std::io::Read as _;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -52,6 +53,8 @@ fn download_offer() -> TransferOffer {
     TransferOffer {
         provider_id: "trzsz".into(),
         direction: Some(Direction::Download),
+        trigger_mode: Some('S'),
+        trigger_version: Some("1.2.0".into()),
         remote_names: Vec::new(),
     }
 }
@@ -60,6 +63,8 @@ fn upload_offer() -> TransferOffer {
     TransferOffer {
         provider_id: "trzsz".into(),
         direction: Some(Direction::Upload),
+        trigger_mode: Some('R'),
+        trigger_version: Some("1.2.0".into()),
         remote_names: Vec::new(),
     }
 }
@@ -81,11 +86,12 @@ enum DownloadStage {
     NameAcked,
     SizeAcked,
     DigestSent,
+    Finished,
 }
 
 struct DownloadServer {
-    file: Vec<u8>,
-    file_name: String,
+    files: Vec<(String, Vec<u8>)>,
+    file_index: usize,
     chunk: usize,
     hasher: Md5,
     sent: usize,
@@ -95,15 +101,30 @@ struct DownloadServer {
 
 impl DownloadServer {
     fn new(file: Vec<u8>, file_name: String) -> Self {
-        DownloadServer {
-            file,
-            file_name,
+        Self::with_files(vec![(file_name, file)])
+    }
+
+    fn with_files(files: Vec<(String, Vec<u8>)>) -> Self {
+        Self {
+            files,
+            file_index: 0,
             chunk: 16 * 1024,
             hasher: Md5::new(),
             sent: 0,
             stage: DownloadStage::Start,
             out: VecDeque::new(),
         }
+    }
+
+    fn send_data_chunk(&mut self) {
+        let Some((_, file)) = self.files.get(self.file_index) else {
+            return;
+        };
+        let end = (self.sent + self.chunk).min(file.len());
+        let chunk = file[self.sent..end].to_vec();
+        self.hasher.update(&chunk);
+        self.sent = end;
+        self.out.push_back(string_line("DATA", chunk));
     }
 
     fn on_client_line(&mut self, kind: &str, value: &str) {
@@ -113,50 +134,57 @@ impl DownloadServer {
                     "CFG",
                     br#"{"quiet":true,"binary":false,"bufsize":1048576,"timeout":20}"#,
                 ));
-                self.out.push_back(integer_line("NUM", 1));
+                self.out
+                    .push_back(integer_line("NUM", self.files.len() as u64));
                 self.stage = DownloadStage::Start;
             }
-            "SUCC" => {
-                // Stop-and-wait: every client ack advances the stage.
-                match self.stage {
-                    DownloadStage::Start => {
-                        self.out
-                            .push_back(string_line("NAME", self.file_name.as_bytes()));
+            "SUCC" => match self.stage {
+                DownloadStage::Start => {
+                    if let Some((name, _)) = self.files.get(self.file_index) {
+                        self.out.push_back(string_line("NAME", name.as_bytes()));
                         self.stage = DownloadStage::NumAcked;
                     }
-                    DownloadStage::NumAcked => {
-                        self.out
-                            .push_back(integer_line("SIZE", self.file.len() as u64));
+                }
+                DownloadStage::NumAcked => {
+                    if let Some((_, file)) = self.files.get(self.file_index) {
+                        self.out.push_back(integer_line("SIZE", file.len() as u64));
                         self.stage = DownloadStage::NameAcked;
                     }
-                    DownloadStage::NameAcked => {
-                        let end = (self.sent + self.chunk).min(self.file.len());
-                        let chunk = &self.file[self.sent..end];
-                        self.hasher.update(chunk);
-                        self.out.push_back(string_line("DATA", chunk));
-                        self.sent = end;
-                        self.stage = DownloadStage::SizeAcked;
-                    }
-                    DownloadStage::SizeAcked => {
-                        if self.sent < self.file.len() {
-                            let end = (self.sent + self.chunk).min(self.file.len());
-                            let chunk = &self.file[self.sent..end];
-                            self.hasher.update(chunk);
-                            self.out.push_back(string_line("DATA", chunk));
-                            self.sent = end;
-                        } else {
-                            let digest: [u8; 16] = self.hasher.clone().finalize().into();
-                            self.out.push_back(string_line("MD5", digest));
-                            self.stage = DownloadStage::DigestSent;
-                        }
-                    }
-                    DownloadStage::DigestSent => {
-                        // The digest ack; nothing left to send.
+                }
+                DownloadStage::NameAcked => {
+                    self.send_data_chunk();
+                    self.stage = DownloadStage::SizeAcked;
+                }
+                DownloadStage::SizeAcked => {
+                    if self
+                        .files
+                        .get(self.file_index)
+                        .is_some_and(|(_, file)| self.sent < file.len())
+                    {
+                        self.send_data_chunk();
+                    } else {
+                        let digest: [u8; 16] = self.hasher.clone().finalize().into();
+                        self.out.push_back(string_line("MD5", digest));
+                        self.stage = DownloadStage::DigestSent;
                     }
                 }
-            }
+                DownloadStage::DigestSent => {
+                    if self.file_index + 1 < self.files.len() {
+                        self.file_index += 1;
+                        self.sent = 0;
+                        self.hasher = Md5::new();
+                        if let Some((name, _)) = self.files.get(self.file_index) {
+                            self.out.push_back(string_line("NAME", name.as_bytes()));
+                            self.stage = DownloadStage::NumAcked;
+                        }
+                    } else {
+                        self.out.push_back(string_line("EXIT", "done"));
+                        self.stage = DownloadStage::Finished;
+                    }
+                }
+                DownloadStage::Finished => {}
+            },
             "MD5" => {
-                // The client echoes the digest it verified.
                 let digest: [u8; 16] = self.hasher.clone().finalize().into();
                 assert_eq!(
                     decode_value(value),
@@ -173,15 +201,19 @@ impl DownloadServer {
 // ─── Scripted upload receiver (mirrors remote `trz`) ───────────────────────
 
 struct UploadReceiver {
-    received: Vec<u8>,
+    current_file_name: String,
+    current_file: Vec<u8>,
+    received_files: Vec<(String, Vec<u8>)>,
     hasher: Md5,
     out: VecDeque<Vec<u8>>,
 }
 
 impl UploadReceiver {
     fn new() -> Self {
-        UploadReceiver {
-            received: Vec::new(),
+        Self {
+            current_file_name: String::new(),
+            current_file: Vec::new(),
+            received_files: Vec::new(),
             hasher: Md5::new(),
             out: VecDeque::new(),
         }
@@ -190,34 +222,34 @@ impl UploadReceiver {
     fn on_client_line(&mut self, kind: &str, value: &str) {
         match kind {
             "ACT" => {
-                assert_eq!(
-                    decode_value(value),
-                    &br#"{"lang":"zedterm","version":"1.2.0","confirm":true,"newline":"\n","protocol":1,"binary":false,"support_dir":false}"# [
-                        ..
-                    ],
-                    "unexpected ACT payload"
-                );
+                let action: serde_json::Value =
+                    serde_json::from_slice(&decode_value(value)).unwrap();
+                assert_eq!(action["lang"], "rust");
+                assert_eq!(action["protocol"], 1);
+                assert_eq!(action["binary"], false);
+                assert_eq!(action["support_dir"], false);
+                assert_eq!(action["confirm"], true);
                 self.out.push_back(string_line(
                     "CFG",
                     br#"{"quiet":true,"binary":false,"overwrite":true,"bufsize":1048576,"timeout":20}"#,
                 ));
             }
-            "NUM" => {
-                self.out
-                    .push_back(integer_line("SUCC", value.parse().unwrap()));
-            }
+            "NUM" => self
+                .out
+                .push_back(integer_line("SUCC", value.parse().unwrap())),
             "NAME" => {
-                assert_eq!(decode_value(value), b"uploaded.bin");
-                self.out.push_back(string_line("SUCC", b"uploaded.bin"));
-            }
-            "SIZE" => {
+                self.current_file_name = String::from_utf8(decode_value(value)).unwrap();
+                self.current_file.clear();
                 self.out
-                    .push_back(integer_line("SUCC", value.parse().unwrap()));
+                    .push_back(string_line("SUCC", self.current_file_name.as_bytes()));
             }
+            "SIZE" => self
+                .out
+                .push_back(integer_line("SUCC", value.parse().unwrap())),
             "DATA" => {
                 let chunk = decode_value(value);
                 self.hasher.update(&chunk);
-                self.received.extend_from_slice(&chunk);
+                self.current_file.extend_from_slice(&chunk);
                 self.out.push_back(integer_line("SUCC", chunk.len() as u64));
             }
             "MD5" => {
@@ -225,8 +257,13 @@ impl UploadReceiver {
                 assert_eq!(
                     decode_value(value),
                     digest,
-                    "uploaded data does not match the checksum"
+                    "uploaded data checksum mismatch"
                 );
+                self.received_files.push((
+                    self.current_file_name.clone(),
+                    std::mem::take(&mut self.current_file),
+                ));
+                self.hasher = Md5::new();
                 self.out.push_back(string_line("SUCC", digest));
             }
             "EXIT" => {}
@@ -297,7 +334,7 @@ fn pump(
                 SessionAction::Progress { .. } => {}
                 SessionAction::Done { paths } => done = Some(paths),
                 SessionAction::Failed(reason) => panic!("session failed: {reason}"),
-                SessionAction::NeedUploadPaths => {
+                SessionAction::NeedUploadPaths | SessionAction::NeedUploadPathsWithDirectories => {
                     let paths = dialogs
                         .upload_paths
                         .clone()
@@ -351,7 +388,7 @@ fn download_flow_against_scripted_server() {
     let host = AppTransferHost::new(None, u64::MAX);
 
     let paths = pump(
-        TrzszProvider.start_session(&download_offer()),
+        TrzszProvider::default().start_session(&download_offer()),
         {
             let mut server = DownloadServer::new(payload.clone(), "downloaded.bin".into());
             move |kind, value| {
@@ -378,6 +415,45 @@ fn download_flow_against_scripted_server() {
 }
 
 #[test]
+fn download_multiple_files_with_trzsz_library_protocol() {
+    let first_payload: Vec<u8> = (0..5 * 1024u32).map(|index| (index % 241) as u8).collect();
+    let second_payload: Vec<u8> = (0..9 * 1024u32)
+        .map(|index| (index * 3 % 251) as u8)
+        .collect();
+    let destination = temp_dir("multi-download-destination");
+    let host = AppTransferHost::new(None, u64::MAX);
+    let paths = pump(
+        TrzszProvider::default().start_session(&download_offer()),
+        {
+            let mut server = DownloadServer::with_files(vec![
+                ("first.txt".into(), first_payload.clone()),
+                ("second.bin".into(), second_payload.clone()),
+            ]);
+            move |kind, value| {
+                server.on_client_line(kind, value);
+                std::mem::take(&mut server.out)
+            }
+        },
+        Dialogs {
+            upload_paths: None,
+            download_destination: Some(destination.clone()),
+        },
+        &host,
+    );
+
+    assert_eq!(
+        paths,
+        vec![
+            destination.join("first.txt"),
+            destination.join("second.bin")
+        ]
+    );
+    assert_eq!(std::fs::read(&paths[0]).unwrap(), first_payload);
+    assert_eq!(std::fs::read(&paths[1]).unwrap(), second_payload);
+    let _ = std::fs::remove_dir_all(&destination);
+}
+
+#[test]
 fn upload_flow_against_scripted_receiver() {
     let workdir = temp_dir("upload-source");
     let source = workdir.join("uploaded.bin");
@@ -387,11 +463,13 @@ fn upload_flow_against_scripted_receiver() {
     std::fs::write(&source, &payload).unwrap();
 
     let host = AppTransferHost::new(None, u64::MAX);
+    let receiver = Arc::new(Mutex::new(UploadReceiver::new()));
     let paths = pump(
-        TrzszProvider.start_session(&upload_offer()),
+        TrzszProvider::default().start_session(&upload_offer()),
         {
-            let mut receiver = UploadReceiver::new();
+            let receiver = receiver.clone();
             move |kind, value| {
+                let mut receiver = receiver.lock().unwrap();
                 receiver.on_client_line(kind, value);
                 std::mem::take(&mut receiver.out)
             }
@@ -404,12 +482,59 @@ fn upload_flow_against_scripted_receiver() {
     );
 
     assert_eq!(paths, vec![source.clone()]);
+    assert_eq!(
+        receiver.lock().unwrap().received_files,
+        vec![("uploaded.bin".to_string(), payload)]
+    );
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn upload_multiple_files_with_trzsz_library_protocol() {
+    let workdir = temp_dir("multi-upload-source");
+    let first = workdir.join("first.txt");
+    let second = workdir.join("second.bin");
+    let first_payload: Vec<u8> = (0..8 * 1024u32).map(|index| (index % 239) as u8).collect();
+    let second_payload: Vec<u8> = (0..3 * 1024u32)
+        .map(|index| (index * 7 % 251) as u8)
+        .collect();
+    std::fs::write(&first, &first_payload).unwrap();
+    std::fs::write(&second, &second_payload).unwrap();
+
+    let host = AppTransferHost::new(None, u64::MAX);
+    let receiver = Arc::new(Mutex::new(UploadReceiver::new()));
+    let paths = vec![first.clone(), second.clone()];
+    let completed = pump(
+        TrzszProvider::default().start_session(&upload_offer()),
+        {
+            let receiver = receiver.clone();
+            move |kind, value| {
+                let mut receiver = receiver.lock().unwrap();
+                receiver.on_client_line(kind, value);
+                std::mem::take(&mut receiver.out)
+            }
+        },
+        Dialogs {
+            upload_paths: Some(paths.clone()),
+            download_destination: None,
+        },
+        &host,
+    );
+
+    assert_eq!(completed, paths);
+    assert_eq!(
+        receiver.lock().unwrap().received_files,
+        vec![
+            ("first.txt".to_string(), first_payload),
+            ("second.bin".to_string(), second_payload),
+        ]
+    );
     let _ = std::fs::remove_dir_all(&workdir);
 }
 
 #[test]
 fn user_cancelled_upload_sends_unconfirmed_act() {
-    let mut session = TrzszProvider.start_session(&upload_offer());
+    let mut session = TrzszProvider::default().start_session(&upload_offer());
     let actions = session.start();
     assert!(
         actions
@@ -433,7 +558,7 @@ fn user_cancelled_upload_sends_unconfirmed_act() {
 
 #[test]
 fn user_cancelled_download_dir_sends_unconfirmed_act() {
-    let mut session = TrzszProvider.start_session(&download_offer());
+    let mut session = TrzszProvider::default().start_session(&download_offer());
     let actions = session.start();
     assert!(
         actions
@@ -459,7 +584,7 @@ fn user_cancelled_download_dir_sends_unconfirmed_act() {
 /// line buffer without bound (§3.5).
 #[test]
 fn unterminated_line_fails_the_session() {
-    let mut session = TrzszProvider.start_session(&download_offer());
+    let mut session = TrzszProvider::default().start_session(&download_offer());
     let actions = session.start();
     assert!(
         actions
@@ -483,7 +608,7 @@ fn oversized_download_chunk_fails_the_session() {
     // A DATA chunk longer than the declared SIZE must abort the session.
     let destination = temp_dir("corrupt");
     let host = AppTransferHost::new(None, u64::MAX);
-    let mut session = TrzszProvider.start_session(&download_offer());
+    let mut session = TrzszProvider::default().start_session(&download_offer());
     let mut actions: VecDeque<SessionAction> = session.start().into();
     assert!(
         actions
@@ -506,14 +631,19 @@ fn oversized_download_chunk_fails_the_session() {
         while let Some(action) = actions.pop_front() {
             match action {
                 SessionAction::WriteWire(_) => {}
-                SessionAction::OpenWrite {
-                    remote_name,
-                    size: _,
-                } => {
+                SessionAction::OpenWrite { remote_name, .. } => {
                     actions.extend(session.submit(HostEvent::FileOpened(Ok(OpenedFile {
                         size: 0,
                         local_name: Some(remote_name),
                     }))));
+                }
+                SessionAction::CloseFile => {
+                    let result = host.close_write();
+                    actions.extend(session.submit(HostEvent::FileClosed(result)));
+                }
+                SessionAction::CommitFile => {
+                    let result = host.commit();
+                    actions.extend(session.submit(HostEvent::FileCommitted(result)));
                 }
                 SessionAction::NeedDownloadDir => {
                     actions
@@ -539,7 +669,7 @@ fn oversized_download_chunk_fails_the_session() {
     assert!(
         failed
             .as_ref()
-            .is_some_and(|reason| reason.contains("more data than declared")),
+            .is_some_and(|reason| reason.contains("DATA exceeds negotiated file size")),
         "expected a size mismatch failure, got {failed:?}"
     );
     let _ = std::fs::remove_dir_all(&destination);
@@ -574,6 +704,21 @@ fn detector_matches_download_trigger() {
 }
 
 #[test]
+fn detector_matches_screenshot_r_trigger_from_trzsz_1_1_8() {
+    let mut detector = TrzszDetector::new();
+    let header = b"\x1b[s::TRZSZ:TRANSFER:R:1.1.8:9047218932100:51087\r\r\n";
+    match feed_all(&mut detector, header) {
+        DetectorVerdict::Matched { offer, trigger } => {
+            assert_eq!(offer.direction, Some(Direction::Upload));
+            assert_eq!(offer.trigger_mode, Some('R'));
+            assert_eq!(offer.trigger_version.as_deref(), Some("1.1.8"));
+            assert_eq!(trigger.start, 3);
+            assert_eq!(trigger.end, header.len() as u64);
+        }
+        other => panic!("expected the real R handshake to match, got {other:?}"),
+    }
+}
+#[test]
 fn detector_matches_upload_trigger_split_at_every_offset() {
     let payload: &[u8] = b"hello\x1b[s::TRZSZ:TRANSFER:R:1.1.0:42\n";
     for split in 1..payload.len() {
@@ -596,8 +741,125 @@ fn detector_matches_upload_trigger_split_at_every_offset() {
 }
 
 #[test]
+fn detector_treats_directory_mode_as_an_upload_and_requests_directory_picker() {
+    let mut detector = TrzszDetector::new();
+    let payload = b"::TRZSZ:TRANSFER:D:1.2.4:7:0\n";
+    match feed_all(&mut detector, payload) {
+        DetectorVerdict::Matched { offer, .. } => {
+            assert_eq!(offer.direction, Some(Direction::Upload));
+            assert_eq!(offer.trigger_mode, Some('D'));
+            let mut session = TrzszProvider::default().start_session(&offer);
+            assert!(
+                session
+                    .start()
+                    .iter()
+                    .any(|action| matches!(action, SessionAction::NeedUploadPathsWithDirectories))
+            );
+        }
+        other => panic!("expected a directory upload trigger, got {other:?}"),
+    }
+}
+#[test]
+fn directory_mode_upload_advertises_support_directory_to_trz() {
+    let workdir = temp_dir("directory-mode");
+    let source = workdir.join("source.txt");
+    std::fs::write(&source, b"directory-mode payload").unwrap();
+    let offer = TransferOffer {
+        provider_id: "trzsz".into(),
+        direction: Some(Direction::Upload),
+        trigger_mode: Some('D'),
+        trigger_version: Some("1.2.4".into()),
+        remote_names: Vec::new(),
+    };
+    let mut session = TrzszProvider::default().start_session(&offer);
+    assert!(matches!(
+        session.start().as_slice(),
+        [SessionAction::NeedUploadPathsWithDirectories]
+    ));
+
+    let actions = session.submit(HostEvent::UploadPaths(Some(vec![source.clone()])));
+    let frame = actions
+        .iter()
+        .find_map(|action| match action {
+            SessionAction::WriteWire(bytes) => std::str::from_utf8(bytes).ok(),
+            _ => None,
+        })
+        .expect("confirmed upload sends ACT");
+    let (kind, value) = frame.trim_end().split_once(':').expect("ACT frame");
+    assert_eq!(kind, "#ACT");
+    let act: serde_json::Value = serde_json::from_slice(&decode_value(value)).unwrap();
+    assert_eq!(act["support_dir"], true);
+    assert_eq!(act["confirm"], true);
+
+    drop(session);
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
+fn legacy_remote_version_negotiates_protocol_two() {
+    let offer = TransferOffer {
+        provider_id: "trzsz".into(),
+        direction: Some(Direction::Upload),
+        trigger_mode: Some('R'),
+        trigger_version: Some("1.1.3".into()),
+        remote_names: Vec::new(),
+    };
+    let mut session = TrzszProvider::default().start_session(&offer);
+    assert!(matches!(
+        session.start().as_slice(),
+        [SessionAction::NeedUploadPaths]
+    ));
+
+    let actions = session.submit(HostEvent::UploadPaths(Some(vec![PathBuf::from(
+        "unused.bin",
+    )])));
+    let frame = actions
+        .iter()
+        .find_map(|action| match action {
+            SessionAction::WriteWire(bytes) => std::str::from_utf8(bytes).ok(),
+            _ => None,
+        })
+        .expect("confirmed upload sends ACT");
+    let (_, value) = frame.trim_end().split_once(':').expect("ACT frame");
+    let action: serde_json::Value = serde_json::from_slice(&decode_value(value)).unwrap();
+    assert_eq!(action["protocol"], 2);
+
+    drop(session);
+}
+
+#[test]
+fn upload_rejects_files_over_configured_size_before_announcing_count() {
+    let workdir = temp_dir("oversized-upload");
+    let source = workdir.join("oversized.bin");
+    std::fs::write(&source, b"0123456789").unwrap();
+    let mut session = TrzszProvider::new(8).start_session(&upload_offer());
+    assert!(matches!(
+        session.start().as_slice(),
+        [SessionAction::NeedUploadPaths]
+    ));
+
+    let actions = session.submit(HostEvent::UploadPaths(Some(vec![source.clone()])));
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action, SessionAction::WriteWire(_)))
+    );
+    let configuration =
+        br#"{"quiet":true,"binary":false,"overwrite":true,"bufsize":1048576,"timeout":20}"#;
+    let actions = session.feed_wire(&string_line("CFG", configuration));
+    assert!(actions.iter().any(|action| {
+        matches!(action, SessionAction::Failed(reason) if reason.contains("file size limit exceeded"))
+    }));
+    assert!(!actions.iter().any(|action| {
+        matches!(action, SessionAction::WriteWire(bytes) if bytes.windows(b"#NUM:".len()).any(|window| window == b"#NUM:"))
+    }));
+
+    drop(session);
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+
+#[test]
 fn detector_ignores_junk_containing_marker() {
-    // The marker inside a line that is not a valid trigger must not match.
     let mut detector = TrzszDetector::new();
     let verdict = feed_all(&mut detector, b"junk::TRZSZ:TRANSFER:X:1.0.0:0\n");
     assert!(matches!(verdict, DetectorVerdict::NoMatch));
@@ -634,18 +896,6 @@ fn detector_ranges_stay_absolute_across_a_false_alarm() {
             assert_eq!(trigger.end, chunk.len() as u64);
         }
         other => panic!("expected the second marker to match, got {other:?}"),
-    }
-}
-
-/// `D` (send a directory) is a download from the remote, exactly like `S`.
-#[test]
-fn detector_treats_directory_mode_as_a_download() {
-    let mut detector = TrzszDetector::new();
-    match feed_all(&mut detector, b"::TRZSZ:TRANSFER:D:1.2.4:7\n") {
-        DetectorVerdict::Matched { offer, .. } => {
-            assert_eq!(offer.direction, Some(Direction::Download))
-        }
-        other => panic!("expected a match, got {other:?}"),
     }
 }
 
@@ -690,6 +940,86 @@ fn detector_matches_real_tsz_handshake() {
     let _ = std::fs::remove_dir_all(&workdir);
 }
 
+#[test]
+fn real_trz_file_trigger_requests_a_file_upload_picker() {
+    let Ok(trz) = std::env::var("ZEDTERM_TRZ_BIN") else {
+        return;
+    };
+    let workdir = temp_dir("trz-picker-trigger");
+    let mut child = Command::new(&trz)
+        .arg("-y")
+        .arg("-q")
+        .arg(&workdir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn trz");
+    let mut stdout = child.stdout.take().unwrap();
+    let mut detector = TrzszDetector::new();
+    let mut buffer = [0u8; 4096];
+    let offer = loop {
+        let count = stdout.read(&mut buffer).unwrap();
+        assert!(count > 0, "trz closed stdout before its trigger");
+        if let DetectorVerdict::Matched { offer, .. } = feed_all(&mut detector, &buffer[..count]) {
+            break offer;
+        }
+    };
+
+    assert_eq!(offer.direction, Some(Direction::Upload));
+    assert_eq!(offer.trigger_mode, Some('R'));
+    let mut session = TrzszProvider::default().start_session(&offer);
+    assert!(matches!(
+        session.start().as_slice(),
+        [SessionAction::NeedUploadPaths]
+    ));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&workdir);
+}
+#[test]
+fn real_trz_directory_trigger_requests_a_directory_upload_picker() {
+    let Ok(trz) = std::env::var("ZEDTERM_TRZ_BIN") else {
+        return;
+    };
+    let workdir = temp_dir("trz-directory-picker-trigger");
+    let mut child = Command::new(&trz)
+        .arg("-d")
+        .arg("-y")
+        .arg("-q")
+        .arg(&workdir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn directory-mode trz");
+    let mut stdout = child.stdout.take().unwrap();
+    let mut detector = TrzszDetector::new();
+    let mut buffer = [0u8; 4096];
+    let offer = loop {
+        let count = stdout.read(&mut buffer).unwrap();
+        assert!(
+            count > 0,
+            "directory-mode trz closed stdout before its trigger"
+        );
+        if let DetectorVerdict::Matched { offer, .. } = feed_all(&mut detector, &buffer[..count]) {
+            break offer;
+        }
+    };
+
+    assert_eq!(offer.direction, Some(Direction::Upload));
+    assert_eq!(offer.trigger_mode, Some('D'));
+    let mut session = TrzszProvider::default().start_session(&offer);
+    assert!(matches!(
+        session.start().as_slice(),
+        [SessionAction::NeedUploadPathsWithDirectories]
+    ));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&workdir);
+}
 // ─── Full interop against a real `tsz` ─────────────────────────────────────
 
 #[test]
@@ -721,7 +1051,7 @@ fn download_interop_with_real_tsz() {
 
     let host = AppTransferHost::new(None, u64::MAX);
     host.set_destination(&destination);
-    let mut session = TrzszProvider.start_session(&download_offer());
+    let mut session = TrzszProvider::default().start_session(&download_offer());
 
     let mut actions: VecDeque<SessionAction> = session.start().into();
     let mut done = None;
@@ -769,7 +1099,9 @@ fn download_interop_with_real_tsz() {
                 SessionAction::OpenRead { .. } | SessionAction::ReadFile { .. } => {
                     panic!("download must not read local files")
                 }
-                other @ (SessionAction::NeedUploadPaths | SessionAction::Cancelled) => {
+                other @ (SessionAction::NeedUploadPaths
+                | SessionAction::NeedUploadPathsWithDirectories
+                | SessionAction::Cancelled) => {
                     panic!("unexpected dialog request: {other:?}");
                 }
             }
@@ -819,7 +1151,7 @@ fn upload_interop_with_real_trz() {
     let mut stdin = child.stdin.take().unwrap();
 
     let host = AppTransferHost::new(None, u64::MAX);
-    let mut session = TrzszProvider.start_session(&upload_offer());
+    let mut session = TrzszProvider::default().start_session(&upload_offer());
 
     let mut actions: VecDeque<SessionAction> = session.start().into();
     let mut done = None;
@@ -836,7 +1168,7 @@ fn upload_interop_with_real_trz() {
                     stdin.write_all(&bytes).unwrap();
                     stdin.flush().unwrap();
                 }
-                SessionAction::NeedUploadPaths => {
+                SessionAction::NeedUploadPaths | SessionAction::NeedUploadPathsWithDirectories => {
                     assert!(!upload_answered, "duplicate picker request");
                     upload_answered = true;
                     actions

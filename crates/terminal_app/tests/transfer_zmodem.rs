@@ -27,6 +27,8 @@ fn download_offer() -> TransferOffer {
     TransferOffer {
         provider_id: "zmodem".into(),
         direction: Some(Direction::Download),
+        trigger_mode: None,
+        trigger_version: None,
         remote_names: Vec::new(),
     }
 }
@@ -35,6 +37,8 @@ fn upload_offer() -> TransferOffer {
     TransferOffer {
         provider_id: "zmodem".into(),
         direction: Some(Direction::Upload),
+        trigger_mode: None,
+        trigger_version: None,
         remote_names: Vec::new(),
     }
 }
@@ -172,7 +176,7 @@ impl HostAnswers<'_> {
                 let result = self.host.commit();
                 session.submit(HostEvent::FileCommitted(result))
             }
-            SessionAction::NeedUploadPaths => {
+            SessionAction::NeedUploadPaths | SessionAction::NeedUploadPathsWithDirectories => {
                 session.submit(HostEvent::UploadPaths(Some(self.upload_paths.clone())))
             }
             SessionAction::NeedDownloadDir => {

@@ -1,68 +1,31 @@
-//! trzsz (trz/tsz) provider: line-based trigger detection plus a protocol v1
-//! base64 client for upload and download (Phase 1,
-//! docs/TRANSFER_EXTENSION.md).
-//!
-//! Protocol reference: the trzsz-rs checkout (transfer state machine,
-//! `#TYPE:value` lines, base64(zlib) encoding, stop-and-wait per-chunk SUCC
-//! acknowledgements) and the upstream trzsz protocol. Only base64 mode is
-//! implemented: the client declares `binary: false`, so the remote never
-//! sends escaped-binary chunks.
+//! Adapter between trzsz-rs and the terminal transfer runtime.
 
-use std::io::Read as _;
-use std::io::Write as _;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use flate2::Compression;
-use flate2::read::ZlibDecoder;
-use flate2::write::ZlibEncoder;
-use md5::{Digest, Md5};
-use serde_json::json;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::thread;
+use std::time::Duration;
 
 use transfer_core::{
-    Capabilities, DetectorVerdict, Direction, HostEvent, OpenedFile, ProviderManifest,
-    SessionAction, TransferDetector, TransferOffer, TransferProvider, TransferSession,
+    Capabilities, DetectorVerdict, Direction, HostEvent, ProviderManifest, SessionAction,
+    TransferDetector, TransferOffer, TransferProvider, TransferSession,
 };
+use trzsz_rs::comm::{self, FileWriter, TrzszError, check_paths_readable};
+use trzsz_rs::filter::parse_trzsz_trigger;
+use trzsz_rs::progress::ProgressCallback;
+use trzsz_rs::transfer::TrzszTransfer;
+use trzsz_rs::version::TrzszVersion;
 
-const MARKER: &[u8] = b"::TRZSZ:TRANSFER:";
-const MAX_LINE_BYTES: usize = 4096;
-/// Upper bound on wire bytes buffered waiting for a protocol line (§3.5).
+const TRIGGER_MARKER: &[u8] = b"::TRZSZ:TRANSFER:";
+const MAX_TRIGGER_LINE: usize = 4096;
 const MAX_SESSION_BUFFER: usize = 4 * 1024 * 1024;
-/// Upper bound for upload read chunks; the remote's CFG bufsize may lower it.
-const MAX_UPLOAD_CHUNK: usize = 512 * 1024;
-const CLIENT_VERSION: &str = "1.2.0";
+const MAX_TRANSFER_BUF_SIZE: i64 = 512 * 1024;
+const REPLY_POLL: Duration = Duration::from_millis(50);
 
-/// Compress and base64 a protocol value. Compression into an in-memory
-/// buffer is effectively infallible, but the error is propagated rather than
-/// dropped: a silently empty payload would corrupt the transfer.
-fn try_encode_bytes(bytes: &[u8]) -> std::io::Result<String> {
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(bytes)?;
-    Ok(BASE64.encode(encoder.finish()?))
-}
-
-fn decode_value(value: &str) -> std::io::Result<Vec<u8>> {
-    let compressed = BASE64
-        .decode(value)
-        .map_err(|error| std::io::Error::other(format!("base64 decode failed: {error}")))?;
-    let mut decoder = ZlibDecoder::new(&compressed[..]);
-    let mut decoded = Vec::new();
-    decoder
-        .read_to_end(&mut decoded)
-        .map_err(|error| std::io::Error::other(format!("zlib decode failed: {error}")))?;
-    Ok(decoded)
-}
-
-// ─── Trigger detection ─────────────────────────────────────────────────────
-
-/// Trigger detector for the trzsz handshake line
-/// `::TRZSZ:TRANSFER:<mode>:<version>:<id>[:<tunnel>]`.
-///
-/// The marker is matched with a sliding hold window (candidates survive
-/// arbitrary read chunking); the mode is only trusted once the complete line
-/// arrived, so binary junk ending in the marker cannot start a session.
+/// Trigger detector for trzsz's handshake line. The crate owns parsing and
+/// validation; this adapter only tracks the streaming range required by the mux.
 pub struct TrzszDetector {
     tail: Vec<u8>,
     candidate_start: Option<u64>,
@@ -76,33 +39,9 @@ impl Default for TrzszDetector {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TrzszTrigger {
-    pub mode: char,
-    pub version: String,
-}
-
-fn parse_trigger_line(line: &[u8]) -> Option<TrzszTrigger> {
-    let text = std::str::from_utf8(line).ok()?;
-    let rest = text.strip_prefix("::TRZSZ:TRANSFER:")?;
-    let end = rest.find(['\n', '\r']).unwrap_or(rest.len());
-    let parts: Vec<&str> = rest[..end].split(':').collect();
-    if parts.len() < 3 {
-        return None;
-    }
-    let mode = parts[0].chars().next()?;
-    if !matches!(mode, 'S' | 'R' | 'D') {
-        return None;
-    }
-    Some(TrzszTrigger {
-        mode,
-        version: parts[1].to_string(),
-    })
-}
-
 impl TrzszDetector {
     pub fn new() -> Self {
-        TrzszDetector {
+        Self {
             tail: Vec::new(),
             candidate_start: None,
             line: Vec::new(),
@@ -110,9 +49,6 @@ impl TrzszDetector {
         }
     }
 
-    /// Drop an open candidate without touching `position`: the mux measures
-    /// trigger ranges from the last `reset`, so a false alarm in the middle of
-    /// a batch must not rebase them.
     fn clear_candidate(&mut self) {
         self.tail.clear();
         self.candidate_start = None;
@@ -129,30 +65,29 @@ impl TransferDetector for TrzszDetector {
             self.line.push(byte);
             if byte == b'\n' {
                 self.candidate_start = None;
-                return match parse_trigger_line(&self.line) {
+                return match parse_trzsz_trigger(&self.line) {
                     Some(trigger) => {
-                        let direction = match trigger.mode {
-                            'S' | 'D' => Direction::Download,
-                            _ => Direction::Upload,
-                        };
+                        let direction = trigger_direction(trigger.mode);
                         DetectorVerdict::Matched {
                             offer: TransferOffer {
                                 provider_id: "trzsz".into(),
                                 direction: Some(direction),
+                                trigger_mode: Some(trigger.mode),
+                                trigger_version: trigger.version.as_ref().map(|version| {
+                                    format!("{}.{}.{}", version.major, version.minor, version.patch)
+                                }),
                                 remote_names: Vec::new(),
                             },
                             trigger: start..index + 1,
                         }
                     }
-                    // False alarm: drop the candidate and let the held bytes
-                    // flush, but keep counting for the next trigger.
                     None => {
                         self.clear_candidate();
                         DetectorVerdict::NoMatch
                     }
                 };
             }
-            if self.line.len() > MAX_LINE_BYTES {
+            if self.line.len() > MAX_TRIGGER_LINE {
                 self.clear_candidate();
                 return DetectorVerdict::NoMatch;
             }
@@ -160,19 +95,19 @@ impl TransferDetector for TrzszDetector {
         }
 
         self.tail.push(byte);
-        let max = self.tail.len().min(MARKER.len());
+        let max = self.tail.len().min(TRIGGER_MARKER.len());
         let mut keep = 0;
         for length in (0..=max).rev() {
             let suffix = &self.tail[self.tail.len() - length..];
-            if suffix == &MARKER[..length] {
+            if suffix == &TRIGGER_MARKER[..length] {
                 keep = length;
                 break;
             }
         }
         self.tail.drain(..self.tail.len() - keep);
-        if keep == MARKER.len() {
-            self.candidate_start = Some(index + 1 - MARKER.len() as u64);
-            self.line = MARKER.to_vec();
+        if keep == TRIGGER_MARKER.len() {
+            self.candidate_start = Some(index + 1 - TRIGGER_MARKER.len() as u64);
+            self.line = TRIGGER_MARKER.to_vec();
             self.tail.clear();
         }
         if self.candidate_start.is_some() || keep > 0 {
@@ -188,665 +123,738 @@ impl TransferDetector for TrzszDetector {
     }
 }
 
-// ─── Session ───────────────────────────────────────────────────────────────
-
-fn dotted_version(candidate: &str) -> (u32, u32, u32) {
-    let mut parts = [0u32; 3];
-    for (index, part) in candidate.split('.').take(3).enumerate() {
-        parts[index] = part.parse().unwrap_or(0);
+fn trigger_direction(mode: char) -> Direction {
+    match mode {
+        'S' => Direction::Download,
+        'R' | 'D' => Direction::Upload,
+        _ => Direction::Download,
     }
-    (parts[0], parts[1], parts[2])
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum State {
-    /// Download: the remote is sending (remote runs `tsz`).
-    DownloadAwaitDir,
-    DownloadAwaitCfg,
-    DownloadAwaitNum,
-    DownloadAwaitName,
-    DownloadAwaitOpen,
-    DownloadAwaitSize,
-    DownloadAwaitData {
-        remaining: u64,
-        offset: u64,
-    },
-    DownloadAwaitWrite {
-        remaining: u64,
-        offset: u64,
-        length: u64,
-    },
-    DownloadAwaitMd5,
-    DownloadAwaitClose,
-    DownloadAwaitCommit,
-    /// Upload: the remote is receiving (remote runs `trz`).
-    UploadAwaitPaths,
-    UploadAwaitCfg,
-    UploadAwaitOpen,
-    UploadAwaitSuccNum,
-    UploadAwaitSuccName,
-    UploadAwaitSuccSize {
-        size: u64,
-    },
-    UploadAwaitFileData {
-        size: u64,
-        offset: u64,
-        chunk: usize,
-    },
-    UploadAwaitSuccData {
-        size: u64,
-        offset: u64,
-        length: usize,
-        chunk: usize,
-    },
-    UploadAwaitSuccMd5,
-    /// Waiting for nothing; the session is over.
+fn maximum_protocol_for(remote_version: Option<&TrzszVersion>) -> i32 {
+    let oldest_protocol_two_version = TrzszVersion {
+        major: 1,
+        minor: 0,
+        patch: 0,
+    };
+    let newest_protocol_two_version = TrzszVersion {
+        major: 1,
+        minor: 1,
+        patch: 3,
+    };
+    if remote_version.is_some_and(|version| {
+        version.compare(&oldest_protocol_two_version) >= 0
+            && version.compare(&newest_protocol_two_version) <= 0
+    }) {
+        2
+    } else {
+        1
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionState {
+    AwaitingPaths,
+    AwaitingDirectory,
+    Running,
     Finished,
 }
 
-/// The trzsz protocol session. One instance per transfer.
+type Reply<T> = SyncSender<Result<T, String>>;
+
+enum WorkerEvent {
+    Wire(Vec<u8>),
+    WaitingForWire,
+    OpenWrite {
+        remote_name: String,
+        reply: Reply<String>,
+    },
+    WriteFile {
+        offset: u64,
+        data: Vec<u8>,
+        reply: Reply<()>,
+    },
+    CloseFile {
+        reply: Reply<PathBuf>,
+    },
+    CommitFile {
+        reply: Reply<PathBuf>,
+    },
+    Progress {
+        file_index: usize,
+        file_count: usize,
+        bytes_done: u64,
+        bytes_total: Option<u64>,
+    },
+    Done,
+    Failed(String),
+    Cancelled,
+}
+
+struct Worker {
+    input: SyncSender<Vec<u8>>,
+    events: Receiver<WorkerEvent>,
+    cancelled: Arc<AtomicBool>,
+    buffer_stopped: Arc<AtomicBool>,
+}
+
+enum PendingHostReply {
+    OpenWrite(Reply<String>),
+    WriteFile(Reply<()>),
+    CloseFile(Reply<PathBuf>),
+    CommitFile(Reply<PathBuf>),
+}
+
+/// The protocol runs on its own thread because trzsz-rs exposes a synchronous
+/// caller API. Channel-backed host writers preserve the transfer runtime's
+/// staging and commit policy without blocking the PTY reader.
 pub struct TrzszSession {
     direction: Direction,
-    remote_version: String,
-    state: State,
-    /// Upload: local files chosen by the user.
-    paths: Vec<PathBuf>,
-    /// Completed local paths (committed downloads / uploaded files).
+    state: SessionState,
+    directory_mode: bool,
+    remote_version: Option<TrzszVersion>,
+    max_file_size: u64,
+    worker: Option<Worker>,
+    pending_host_reply: Option<PendingHostReply>,
     completed: Vec<PathBuf>,
-    file_count: usize,
-    file_index: usize,
-    bytes_done: u64,
-    hasher: Md5,
-    upload_digest: Option<Vec<u8>>,
-    bufsize: usize,
-    buffer: Vec<u8>,
-    finished: bool,
-}
-
-fn action_line(kind: &str, value: &str) -> SessionAction {
-    SessionAction::WriteWire(format!("#{}:{}\n", kind, value).into_bytes())
-}
-
-fn send_integer(kind: &str, value: u64) -> SessionAction {
-    action_line(kind, &value.to_string())
-}
-
-/// An encoding failure cannot be expressed in the protocol, so it ends the
-/// session instead of sending a corrupt frame.
-fn encode_failure(kind: &str, error: std::io::Error) -> SessionAction {
-    log::error!("trzsz: cannot encode the {kind} frame: {error}");
-    SessionAction::Failed(format!("cannot encode the {kind} protocol frame: {error}"))
-}
-
-fn send_string(kind: &str, value: &str) -> SessionAction {
-    match try_encode_bytes(value.as_bytes()) {
-        Ok(encoded) => action_line(kind, &encoded),
-        Err(error) => encode_failure(kind, error),
-    }
-}
-
-fn send_bytes(kind: &str, value: &[u8]) -> SessionAction {
-    match try_encode_bytes(value) {
-        Ok(encoded) => action_line(kind, &encoded),
-        Err(error) => encode_failure(kind, error),
-    }
+    selected_paths: Vec<PathBuf>,
+    pending_line_bytes: usize,
 }
 
 impl TrzszSession {
-    pub fn new(direction: Direction, remote_version: String) -> Self {
-        TrzszSession {
+    pub fn new(
+        direction: Direction,
+        directory_mode: bool,
+        remote_version: Option<TrzszVersion>,
+        max_file_size: u64,
+    ) -> Self {
+        Self {
             direction,
+            directory_mode,
             remote_version,
-            state: State::Finished,
-            paths: Vec::new(),
+            max_file_size,
+            state: match direction {
+                Direction::Upload => SessionState::AwaitingPaths,
+                Direction::Download => SessionState::AwaitingDirectory,
+            },
+            worker: None,
+            pending_host_reply: None,
             completed: Vec::new(),
-            file_count: 0,
-            file_index: 0,
-            bytes_done: 0,
-            hasher: Md5::new(),
-            upload_digest: None,
-            bufsize: MAX_UPLOAD_CHUNK,
-            buffer: Vec::new(),
-            finished: false,
+            selected_paths: Vec::new(),
+            pending_line_bytes: 0,
         }
     }
 
-    pub fn new_manual() -> Self {
-        Self::new(Direction::Upload, String::new())
-    }
-
-    fn fail(&mut self, reason: impl Into<String>) -> Vec<SessionAction> {
-        self.finished = true;
-        self.state = State::Finished;
-        let reason = reason.into();
-        let mut actions = Vec::new();
-        match try_encode_bytes(reason.as_bytes()) {
-            Ok(encoded) => actions.push(action_line("fail", &encoded)),
-            // The reason frame is best effort; the failure itself still has to
-            // reach the UI.
-            Err(error) => log::error!("trzsz: cannot encode the failure reason: {error}"),
-        }
-        actions.push(SessionAction::Failed(reason));
-        actions
-    }
-
-    fn progress(&self, bytes_total: Option<u64>) -> SessionAction {
-        SessionAction::Progress {
-            file_index: self.file_index,
-            file_count: self.file_count,
-            bytes_done: self.bytes_done,
-            bytes_total,
-        }
-    }
-
-    fn send_act(&self, confirm: bool) -> SessionAction {
-        // Old go servers (1.1.0–1.1.3) only speak protocol 2.
-        let (major, minor, patch) = dotted_version(&self.remote_version);
-        let protocol = if (major, minor, patch) >= (1, 1, 0) && (major, minor, patch) <= (1, 1, 3) {
-            2
+    fn start_worker(&mut self, confirmed: bool, paths: Option<Vec<PathBuf>>) -> Vec<SessionAction> {
+        self.selected_paths = if self.direction == Direction::Upload {
+            paths.clone().unwrap_or_default()
         } else {
-            1
+            Vec::new()
         };
-        let action = json!({
-            "lang": "zedterm",
-            "version": CLIENT_VERSION,
-            "confirm": confirm,
-            "newline": "\n",
-            "protocol": protocol,
-            "binary": false,
-            "support_dir": false,
+        let (event_sender, event_receiver) = mpsc::channel();
+        let mut transfer = TrzszTransfer::new(Box::new(ProtocolWriter {
+            events: event_sender.clone(),
+        }));
+        transfer.transfer_config.bufsize = MAX_TRANSFER_BUF_SIZE;
+        let input = transfer.buffer.sender();
+        let buffer_stopped = transfer.buffer.stop_handle();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let thread_cancelled = cancelled.clone();
+        transfer.buffer.set_waiting_callback({
+            let event_sender = event_sender.clone();
+            move || {
+                if let Err(error) = event_sender.send(WorkerEvent::WaitingForWire) {
+                    log::debug!("trzsz adapter is no longer receiving protocol events: {error}");
+                }
+            }
         });
-        send_string("ACT", &action.to_string())
+        let direction = self.direction;
+        let directory_mode = self.directory_mode;
+        let remote_version = self.remote_version.clone();
+        let max_file_size = self.max_file_size;
+        let spawn_result = thread::Builder::new()
+            .name("zedterm-trzsz-session".to_string())
+            .spawn(move || {
+                run_protocol_worker(
+                    transfer,
+                    direction,
+                    directory_mode,
+                    remote_version,
+                    max_file_size,
+                    confirmed,
+                    paths,
+                    event_sender,
+                    thread_cancelled,
+                );
+            });
+        if let Err(error) = spawn_result {
+            self.state = SessionState::Finished;
+            return vec![SessionAction::Failed(format!(
+                "cannot start trzsz session: {error}"
+            ))];
+        }
+
+        self.worker = Some(Worker {
+            input,
+            events: event_receiver,
+            cancelled,
+            buffer_stopped,
+        });
+        self.state = SessionState::Running;
+        self.drive_worker()
     }
 
-    fn current_path(&self) -> Option<PathBuf> {
-        self.paths.get(self.file_index).cloned()
-    }
-
-    fn current_file_name(&self) -> String {
-        self.current_path()
-            .and_then(|path| {
-                path.file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-            })
-            .unwrap_or_else(|| "file".to_string())
-    }
-
-    fn parse_config(&self, value: &str) -> std::io::Result<serde_json::Value> {
-        let bytes = decode_value(value)?;
-        serde_json::from_slice(&bytes)
-            .map_err(|error| std::io::Error::other(format!("invalid trzsz config: {error}")))
-    }
-
-    fn handle_line(&mut self, kind: &str, value: &str) -> Vec<SessionAction> {
-        if self.finished {
+    fn drive_worker(&mut self) -> Vec<SessionAction> {
+        let Some(worker) = self.worker.as_ref() else {
             return Vec::new();
-        }
-        match (&self.state, kind) {
-            // ── Download ──
-            (State::DownloadAwaitCfg, "CFG") => match self.parse_config(value) {
-                Ok(config) => {
-                    if config
-                        .get("binary")
-                        .and_then(|value| value.as_bool())
-                        .unwrap_or(false)
-                    {
-                        return self.fail("binary transfer mode is not supported");
-                    }
-                    if let Some(bufsize) = config.get("bufsize").and_then(|value| value.as_i64()) {
-                        self.bufsize = bufsize.clamp(1024, MAX_UPLOAD_CHUNK as i64) as usize;
-                    }
-                    self.state = State::DownloadAwaitNum;
-                    Vec::new()
+        };
+        let mut actions = Vec::new();
+        loop {
+            let event = match worker.events.recv() {
+                Ok(event) => event,
+                Err(error) => {
+                    self.state = SessionState::Finished;
+                    actions.push(SessionAction::Failed(format!(
+                        "trzsz protocol worker stopped unexpectedly: {error}"
+                    )));
+                    return actions;
                 }
-                Err(error) => self.fail(error.to_string()),
-            },
-            (State::DownloadAwaitNum, "NUM") => match value.parse::<usize>() {
-                Ok(count) => {
-                    self.file_count = count;
-                    self.file_index = 0;
-                    self.state = State::DownloadAwaitName;
-                    vec![send_integer("SUCC", count as u64), self.progress(None)]
+            };
+            match event {
+                WorkerEvent::Wire(bytes) => actions.push(SessionAction::WriteWire(bytes)),
+                WorkerEvent::WaitingForWire => return actions,
+                WorkerEvent::OpenWrite { remote_name, reply } => {
+                    self.pending_host_reply = Some(PendingHostReply::OpenWrite(reply));
+                    actions.push(SessionAction::OpenWrite {
+                        remote_name,
+                        size: None,
+                    });
+                    return actions;
                 }
-                Err(_) => self.fail("invalid file count"),
-            },
-            (State::DownloadAwaitName, "NAME") => match decode_value(value) {
-                Ok(remote_name) => {
-                    self.hasher = Md5::new();
-                    self.bytes_done = 0;
-                    self.state = State::DownloadAwaitOpen;
-                    vec![
-                        SessionAction::OpenWrite {
-                            remote_name: String::from_utf8_lossy(&remote_name).into_owned(),
-                            size: None,
-                        },
-                        self.progress(None),
-                    ]
-                }
-                Err(_) => self.fail("invalid file name"),
-            },
-            (State::DownloadAwaitSize, "SIZE") => match value.parse::<u64>() {
-                Ok(size) => {
-                    self.bytes_done = 0;
-                    self.state = State::DownloadAwaitData {
-                        remaining: size,
-                        offset: 0,
-                    };
-                    vec![send_integer("SUCC", size), self.progress(Some(size))]
-                }
-                Err(_) => self.fail("invalid file size"),
-            },
-            (State::DownloadAwaitData { remaining, offset }, "DATA") => match decode_value(value) {
-                Ok(chunk) => {
-                    let length = chunk.len() as u64;
-                    if length > *remaining {
-                        return self.fail("received more data than declared");
-                    }
-                    self.hasher.update(&chunk);
-                    self.bytes_done += length;
-                    let (remaining, offset) = (*remaining, *offset);
-                    self.state = State::DownloadAwaitWrite {
-                        remaining,
-                        offset,
-                        length,
-                    };
-                    vec![
-                        SessionAction::WriteFile {
-                            offset,
-                            data: chunk,
-                        },
-                        self.progress(None),
-                    ]
-                }
-                Err(_) => self.fail("invalid data chunk"),
-            },
-            (State::DownloadAwaitMd5, "MD5") => match decode_value(value) {
-                Ok(digest) => {
-                    let expected = self.hasher.clone().finalize();
-                    if digest != expected.as_slice() {
-                        return self.fail("MD5 checksum mismatch");
-                    }
-                    self.state = State::DownloadAwaitClose;
-                    vec![send_bytes("SUCC", &digest), SessionAction::CloseFile]
-                }
-                Err(_) => self.fail("invalid checksum"),
-            },
-            // ── Upload ──
-            (State::UploadAwaitCfg, "CFG") => match self.parse_config(value) {
-                Ok(config) => {
-                    if config
-                        .get("binary")
-                        .and_then(|value| value.as_bool())
-                        .unwrap_or(false)
-                    {
-                        return self.fail("binary transfer mode is not supported");
-                    }
-                    if let Some(bufsize) = config.get("bufsize").and_then(|value| value.as_i64()) {
-                        self.bufsize = bufsize.clamp(1024, MAX_UPLOAD_CHUNK as i64) as usize;
-                    }
-                    self.state = State::UploadAwaitSuccNum;
-                    vec![send_integer("NUM", self.file_count as u64)]
-                }
-                Err(error) => self.fail(error.to_string()),
-            },
-            (State::UploadAwaitSuccNum, "SUCC") => match value.parse::<u64>() {
-                Ok(count) if count == self.file_count as u64 => {
-                    self.state = State::UploadAwaitSuccName;
-                    vec![send_string("NAME", &self.current_file_name())]
-                }
-                _ => self.fail("remote rejected the file count"),
-            },
-            (State::UploadAwaitSuccName, "SUCC") => match self.current_path() {
-                Some(path) => {
-                    self.hasher = Md5::new();
-                    self.bytes_done = 0;
-                    self.state = State::UploadAwaitOpen;
-                    vec![SessionAction::OpenRead { path }]
-                }
-                None => self.fail("no upload file"),
-            },
-            (State::UploadAwaitSuccSize { size }, "SUCC") => match value.parse::<u64>() {
-                Ok(acked) if acked == *size => {
-                    self.state = State::UploadAwaitFileData {
-                        size: *size,
-                        offset: 0,
-                        chunk: self.bufsize,
-                    };
-                    vec![SessionAction::ReadFile {
-                        offset: 0,
-                        max_len: self.bufsize,
-                    }]
-                }
-                _ => self.fail("remote rejected the file size"),
-            },
-            (
-                State::UploadAwaitSuccData {
-                    size,
+                WorkerEvent::WriteFile {
                     offset,
-                    length,
-                    chunk,
-                },
-                "SUCC",
-            ) => {
-                match value.parse::<u64>() {
-                    Ok(acked) if acked == *length as u64 => {
-                        let (size, offset, length, chunk) = (*size, *offset, *length, *chunk);
-                        let offset = offset + length as u64;
-                        self.bytes_done = offset;
-                        if offset >= size || length < chunk {
-                            // End of file: send the checksum.
-                            let digest = self.hasher.clone().finalize().to_vec();
-                            self.upload_digest = Some(digest.clone());
-                            self.state = State::UploadAwaitSuccMd5;
-                            return vec![send_bytes("MD5", &digest)];
-                        }
-                        self.state = State::UploadAwaitFileData {
-                            size,
-                            offset,
-                            chunk,
-                        };
-                        vec![
-                            SessionAction::ReadFile {
-                                offset,
-                                max_len: chunk,
-                            },
-                            self.progress(Some(size)),
-                        ]
-                    }
-                    _ => self.fail("remote acknowledged the wrong chunk length"),
+                    data,
+                    reply,
+                } => {
+                    self.pending_host_reply = Some(PendingHostReply::WriteFile(reply));
+                    actions.push(SessionAction::WriteFile { offset, data });
+                    return actions;
                 }
-            }
-            (State::UploadAwaitSuccMd5, "SUCC") => match decode_value(value) {
-                Ok(digest) if Some(&digest) == self.upload_digest.as_ref() => {
-                    self.file_index += 1;
-                    if self.file_index < self.file_count {
-                        self.state = State::UploadAwaitSuccName;
-                        vec![send_string("NAME", &self.current_file_name())]
-                    } else {
-                        self.finished = true;
-                        self.state = State::Finished;
-                        vec![
-                            send_string("EXIT", "done"),
-                            SessionAction::Done {
-                                paths: self.paths.clone(),
-                            },
-                        ]
-                    }
+                WorkerEvent::CloseFile { reply } => {
+                    self.pending_host_reply = Some(PendingHostReply::CloseFile(reply));
+                    actions.push(SessionAction::CloseFile);
+                    return actions;
                 }
-                _ => self.fail("remote reported a different checksum"),
-            },
-            (_, "EXIT") => {
-                // Remote-side graceful end before we finished: treat as a
-                // failure so the user sees what happened.
-                let reason = decode_value(value)
-                    .ok()
-                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                    .unwrap_or_else(|| "remote ended the transfer".into());
-                self.fail(reason)
-            }
-            (_, "fail" | "FAIL") => {
-                let reason = decode_value(value)
-                    .ok()
-                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                    .unwrap_or_else(|| "remote reported a transfer error".into());
-                self.fail(reason)
-            }
-            _ => {
-                log::debug!("trzsz: ignoring unexpected {} line", kind);
-                Vec::new()
+                WorkerEvent::CommitFile { reply } => {
+                    self.pending_host_reply = Some(PendingHostReply::CommitFile(reply));
+                    actions.push(SessionAction::CommitFile);
+                    return actions;
+                }
+                WorkerEvent::Progress {
+                    file_index,
+                    file_count,
+                    bytes_done,
+                    bytes_total,
+                } => actions.push(SessionAction::Progress {
+                    file_index,
+                    file_count,
+                    bytes_done,
+                    bytes_total,
+                }),
+                WorkerEvent::Done => {
+                    self.state = SessionState::Finished;
+                    let paths = match self.direction {
+                        Direction::Upload => self.selected_paths.clone(),
+                        Direction::Download => self.completed.clone(),
+                    };
+                    actions.push(SessionAction::Done { paths });
+                    return actions;
+                }
+                WorkerEvent::Failed(reason) => {
+                    self.state = SessionState::Finished;
+                    actions.push(SessionAction::Failed(reason));
+                    return actions;
+                }
+                WorkerEvent::Cancelled => {
+                    self.state = SessionState::Finished;
+                    actions.push(SessionAction::Cancelled);
+                    return actions;
+                }
             }
         }
     }
 
-    /// All files done (download): commit each staged file. Called after the
-    /// last file's checksum verified.
-    fn finish_download(&mut self) -> Vec<SessionAction> {
-        self.finished = true;
-        self.state = State::Finished;
-        vec![
-            send_string("EXIT", "done"),
-            SessionAction::Done {
-                paths: self.completed.clone(),
+    fn answer_host_request(&mut self, event: HostEvent) -> Vec<SessionAction> {
+        let Some(pending) = self.pending_host_reply.take() else {
+            return Vec::new();
+        };
+        match (pending, event) {
+            (PendingHostReply::OpenWrite(reply), HostEvent::FileOpened(result)) => {
+                let result = result
+                    .and_then(|opened| {
+                        opened.local_name.ok_or_else(|| {
+                            io::Error::other("host did not report the sanitized file name")
+                        })
+                    })
+                    .map_err(|error| error.to_string());
+                send_reply(reply, result);
+            }
+            (PendingHostReply::WriteFile(reply), HostEvent::FileWritten { result, .. }) => {
+                send_reply(reply, result.map_err(|error| error.to_string()))
+            }
+            (PendingHostReply::CloseFile(reply), HostEvent::FileClosed(result)) => {
+                send_reply(reply, result.map_err(|error| error.to_string()));
+            }
+            (PendingHostReply::CommitFile(reply), HostEvent::FileCommitted(result)) => match result
+            {
+                Ok(path) => {
+                    self.completed.push(path.clone());
+                    send_reply(reply, Ok(path));
+                }
+                Err(error) => send_reply(reply, Err(error.to_string())),
             },
-        ]
+            (pending, _) => {
+                self.pending_host_reply = Some(pending);
+                return Vec::new();
+            }
+        }
+        self.drive_worker()
+    }
+}
+
+impl Drop for TrzszSession {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.as_ref() {
+            worker.cancelled.store(true, Ordering::SeqCst);
+            worker.buffer_stopped.store(true, Ordering::SeqCst);
+        }
     }
 }
 
 impl TransferSession for TrzszSession {
     fn start(&mut self) -> Vec<SessionAction> {
         match self.direction {
-            // Download: ask where to save before talking to the remote
-            // (§7.1: downloads are never silent). The remote's own timeout
-            // bounds how long the user may take here.
-            Direction::Download => {
-                self.state = State::DownloadAwaitDir;
-                vec![SessionAction::NeedDownloadDir]
+            Direction::Upload if self.directory_mode => {
+                vec![SessionAction::NeedUploadPathsWithDirectories]
             }
-            Direction::Upload => {
-                self.state = State::UploadAwaitPaths;
-                vec![SessionAction::NeedUploadPaths]
-            }
+            Direction::Upload => vec![SessionAction::NeedUploadPaths],
+            Direction::Download => vec![SessionAction::NeedDownloadDir],
         }
     }
 
     fn feed_wire(&mut self, bytes: &[u8]) -> Vec<SessionAction> {
-        let mut actions = Vec::new();
-        if self.finished {
-            return actions;
+        if self.state != SessionState::Running {
+            return Vec::new();
         }
-        self.buffer.extend_from_slice(bytes);
-        // A remote that never sends a newline must not be able to grow the
-        // session buffer without bound (§3.5).
-        if self.buffer.len() > MAX_SESSION_BUFFER {
-            return self.fail("protocol line exceeds the session buffer limit");
+        let mut line_length = self.pending_line_bytes;
+        for byte in bytes {
+            if *byte == b'\n' {
+                line_length = 0;
+            } else {
+                line_length = line_length.saturating_add(1);
+                if line_length > MAX_SESSION_BUFFER {
+                    self.state = SessionState::Finished;
+                    return vec![SessionAction::Failed(
+                        "trzsz protocol line exceeds the session buffer limit".into(),
+                    )];
+                }
+            }
         }
-
-        // Take every complete line in one move: draining one line at a time
-        // shifts the tail repeatedly, which is quadratic for many short lines.
-        let Some(last_newline) = self.buffer.iter().rposition(|&byte| byte == b'\n') else {
-            return actions;
+        self.pending_line_bytes = line_length;
+        let Some(worker) = self.worker.as_ref() else {
+            return Vec::new();
         };
-        let consumed: Vec<u8> = self.buffer.drain(..=last_newline).collect();
-        for raw in consumed.split_inclusive(|&byte| byte == b'\n') {
-            let mut line = &raw[..raw.len() - 1];
-            if line.last() == Some(&b'\r') {
-                line = &line[..line.len() - 1];
-            }
-            if line.last() == Some(&b'!') {
-                // Windows servers terminate protocol lines with '!'.
-                line = &line[..line.len() - 1];
-            }
-            if line.contains(&0x03) {
-                actions.extend(self.fail("interrupted by remote"));
-                return actions;
-            }
-            let Some(hash) = line.iter().position(|&byte| byte == b'#') else {
-                continue;
-            };
-            let line = &line[hash..];
-            let Ok(line_text) = std::str::from_utf8(line) else {
-                continue;
-            };
-            let Some(colon) = line_text.find(':') else {
-                continue;
-            };
-            let (kind, value) = (&line_text[1..colon], &line_text[colon + 1..]);
-            actions.extend(self.handle_line(kind, value));
-            if self.finished {
-                break;
-            }
+        if let Err(error) = worker.input.send(bytes.to_vec()) {
+            self.state = SessionState::Finished;
+            return vec![SessionAction::Failed(format!(
+                "cannot deliver bytes to trzsz-rs: {error}"
+            ))];
         }
-        actions
+        self.drive_worker()
     }
 
     fn submit(&mut self, event: HostEvent) -> Vec<SessionAction> {
-        if self.finished {
+        if self.state == SessionState::Finished {
             return Vec::new();
         }
         match event {
-            HostEvent::FileOpened(Ok(OpenedFile { size, local_name })) => match &self.state {
-                State::DownloadAwaitOpen => {
-                    let Some(local_name) = local_name else {
-                        return self.fail("host did not report the local file name");
-                    };
-                    self.state = State::DownloadAwaitSize;
-                    vec![send_string("SUCC", &local_name)]
-                }
-                State::UploadAwaitOpen => {
-                    self.state = State::UploadAwaitSuccSize { size };
-                    vec![send_integer("SIZE", size), self.progress(Some(size))]
-                }
-                _ => Vec::new(),
-            },
-            HostEvent::FileOpened(Err(error)) => self.fail(format!("cannot open file: {error}")),
-            HostEvent::FileData { offset: _, result } => match &self.state {
-                State::UploadAwaitFileData {
-                    size,
-                    offset,
-                    chunk,
-                } => match result {
-                    Ok(data) => {
-                        let (size, offset, chunk) = (*size, *offset, *chunk);
-                        if data.is_empty() {
-                            return self.fail("file ended unexpectedly");
-                        }
-                        if offset + data.len() as u64 > size {
-                            return self.fail("file grew during upload");
-                        }
-                        self.hasher.update(&data);
-                        let length = data.len();
-                        let encoded = match try_encode_bytes(&data) {
-                            Ok(encoded) => encoded,
-                            Err(error) => {
-                                return self.fail(format!("cannot encode file data: {error}"));
-                            }
-                        };
-                        self.state = State::UploadAwaitSuccData {
-                            size,
-                            offset,
-                            length,
-                            chunk,
-                        };
-                        vec![
-                            SessionAction::WriteWire(format!("#DATA:{encoded}\n").into_bytes()),
-                            self.progress(Some(size)),
-                        ]
-                    }
-                    Err(error) => self.fail(format!("cannot read file: {error}")),
-                },
-                _ => Vec::new(),
-            },
-            HostEvent::FileWritten { offset: _, result } => match result {
-                Ok(()) => {
-                    if let State::DownloadAwaitWrite {
-                        remaining,
-                        offset,
-                        length,
-                    } = self.state
-                    {
-                        let remaining = remaining - length;
-                        let offset = offset + length;
-                        let actions = vec![send_integer("SUCC", length)];
-                        if remaining == 0 {
-                            self.state = State::DownloadAwaitMd5;
-                        } else {
-                            self.state = State::DownloadAwaitData { remaining, offset };
-                        }
-                        return actions;
-                    }
-                    Vec::new()
-                }
-                Err(error) => self.fail(format!("cannot write file: {error}")),
-            },
-            HostEvent::FileClosed(Ok(_staged_path)) => {
-                if self.state == State::DownloadAwaitClose {
-                    self.state = State::DownloadAwaitCommit;
-                    vec![SessionAction::CommitFile]
-                } else {
-                    Vec::new()
-                }
+            HostEvent::UploadPaths(paths) if self.state == SessionState::AwaitingPaths => {
+                let confirmed = paths.as_ref().is_some_and(|paths| !paths.is_empty());
+                self.start_worker(confirmed, paths.filter(|paths| !paths.is_empty()))
             }
-            HostEvent::FileClosed(Err(error)) => self.fail(format!("cannot finish file: {error}")),
-            HostEvent::FileCommitted(Ok(path)) => {
-                if self.state == State::DownloadAwaitCommit {
-                    self.completed.push(path);
-                    self.file_index += 1;
-                    if self.file_index < self.file_count {
-                        self.state = State::DownloadAwaitName;
-                        Vec::new()
-                    } else {
-                        self.finish_download()
-                    }
-                } else {
-                    Vec::new()
-                }
+            HostEvent::DownloadDir(path) if self.state == SessionState::AwaitingDirectory => {
+                self.start_worker(path.is_some(), None)
             }
-            HostEvent::FileCommitted(Err(error)) => self.fail(format!("cannot save file: {error}")),
-            HostEvent::UploadPaths(None) => {
-                self.finished = true;
-                self.state = State::Finished;
-                // An unconfirmed ACT makes the remote exit; report a cancel
-                // so the UI does not show "completed" for an empty transfer.
-                vec![
-                    self.send_act(false),
-                    send_string("EXIT", "canceled"),
-                    SessionAction::Cancelled,
-                ]
-            }
-            HostEvent::UploadPaths(Some(paths)) => {
-                if paths.is_empty() {
-                    return self.submit(HostEvent::UploadPaths(None));
-                }
-                self.paths = paths;
-                self.file_count = self.paths.len();
-                self.file_index = 0;
-                self.state = State::UploadAwaitCfg;
-                vec![self.send_act(true)]
-            }
-            HostEvent::DownloadDir(None) => {
-                self.finished = true;
-                self.state = State::Finished;
-                // The remote is already sending/waiting for our ACT; tell it
-                // the transfer is off instead of leaving it to time out.
-                vec![
-                    self.send_act(false),
-                    send_string("EXIT", "canceled"),
-                    SessionAction::Cancelled,
-                ]
-            }
-            HostEvent::DownloadDir(Some(_)) => {
-                if self.state == State::DownloadAwaitDir {
-                    self.state = State::DownloadAwaitCfg;
-                    vec![self.send_act(true)]
-                } else {
-                    Vec::new()
-                }
-            }
+            HostEvent::FileOpened(_)
+            | HostEvent::FileData { .. }
+            | HostEvent::FileWritten { .. }
+            | HostEvent::FileClosed(_)
+            | HostEvent::FileCommitted(_) => self.answer_host_request(event),
             HostEvent::Cancelled | HostEvent::TimedOut => {
-                self.finished = true;
-                self.state = State::Finished;
+                self.state = SessionState::Finished;
+                if let Some(worker) = self.worker.as_ref() {
+                    worker.cancelled.store(true, Ordering::SeqCst);
+                    worker.buffer_stopped.store(true, Ordering::SeqCst);
+                }
                 Vec::new()
             }
+            _ => Vec::new(),
         }
     }
 
     fn abort_bytes(&mut self) -> Vec<u8> {
-        self.finished = true;
-        self.state = State::Finished;
-        match try_encode_bytes(b"canceled by user") {
-            Ok(encoded) => format!("#fail:{encoded}\n").into_bytes(),
-            Err(error) => {
-                // Nothing usable to send; the session is ending either way.
-                log::error!("trzsz: cannot encode the abort frame: {error}");
-                Vec::new()
+        self.state = SessionState::Finished;
+        if let Some(worker) = self.worker.as_ref() {
+            worker.cancelled.store(true, Ordering::SeqCst);
+            worker.buffer_stopped.store(true, Ordering::SeqCst);
+        }
+        TrzszTransfer::abort_bytes("canceled by user")
+    }
+}
+
+fn send_reply<T>(reply: Reply<T>, value: Result<T, String>) {
+    if let Err(error) = reply.send(value) {
+        log::debug!("trzsz host request was abandoned: {error}");
+    }
+}
+
+fn await_reply<T>(reply: Receiver<Result<T, String>>, cancelled: &AtomicBool) -> Result<T, String> {
+    loop {
+        if cancelled.load(Ordering::SeqCst) {
+            return Err("transfer cancelled".into());
+        }
+        match reply.recv_timeout(REPLY_POLL) {
+            Ok(result) => return result,
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err("terminal transfer host disconnected".into());
             }
         }
     }
 }
 
-// ─── Provider ──────────────────────────────────────────────────────────────
+struct ProtocolWriter {
+    events: mpsc::Sender<WorkerEvent>,
+}
 
-pub struct TrzszProvider;
+impl io::Write for ProtocolWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.events
+            .send(WorkerEvent::Wire(bytes.to_vec()))
+            .map_err(|error| {
+                io::Error::other(format!("protocol output receiver stopped: {error}"))
+            })?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct HostFileWriter {
+    events: mpsc::Sender<WorkerEvent>,
+    cancelled: Arc<AtomicBool>,
+    offset: u64,
+}
+
+impl FileWriter for HostFileWriter {
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.events
+            .send(WorkerEvent::WriteFile {
+                offset: self.offset,
+                data: bytes.to_vec(),
+                reply,
+            })
+            .map_err(|error| io::Error::other(format!("transfer host stopped: {error}")))?;
+        await_reply(response, &self.cancelled).map_err(io::Error::other)?;
+        self.offset = self.offset.saturating_add(bytes.len() as u64);
+        Ok(())
+    }
+
+    fn close(&mut self) -> io::Result<()> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.events
+            .send(WorkerEvent::CloseFile { reply })
+            .map_err(|error| io::Error::other(format!("transfer host stopped: {error}")))?;
+        await_reply(response, &self.cancelled)
+            .map(|_| ())
+            .map_err(io::Error::other)
+    }
+}
+
+fn run_protocol_worker(
+    mut transfer: TrzszTransfer,
+    direction: Direction,
+    directory_mode: bool,
+    remote_version: Option<TrzszVersion>,
+    max_file_size: u64,
+    confirmed: bool,
+    paths: Option<Vec<PathBuf>>,
+    events: mpsc::Sender<WorkerEvent>,
+    cancelled: Arc<AtomicBool>,
+) {
+    let maximum_protocol = maximum_protocol_for(remote_version.as_ref());
+    let outcome = (|| -> Result<(), TrzszError> {
+        transfer.send_action_with_capabilities(
+            confirmed,
+            remote_version.as_ref(),
+            false,
+            false,
+            directory_mode,
+            maximum_protocol,
+        )?;
+        if !confirmed {
+            transfer.client_exit("canceled")?;
+            return Ok(());
+        }
+        match direction {
+            Direction::Upload => upload_files(
+                &mut transfer,
+                paths.unwrap_or_default(),
+                directory_mode,
+                max_file_size,
+                &events,
+            )?,
+            Direction::Download => download_files(&mut transfer, &events, cancelled.clone())?,
+        }
+        Ok(())
+    })();
+
+    match outcome {
+        Ok(()) if confirmed => {
+            if let Err(error) = events.send(WorkerEvent::Done) {
+                log::debug!("trzsz session outcome was abandoned: {error}");
+            }
+        }
+        Ok(()) => {
+            if let Err(error) = events.send(WorkerEvent::Cancelled) {
+                log::debug!("trzsz cancellation outcome was abandoned: {error}");
+            }
+        }
+        Err(_error) if cancelled.load(Ordering::SeqCst) => {
+            if let Err(send_error) = events.send(WorkerEvent::Cancelled) {
+                log::debug!("trzsz cancellation outcome was abandoned: {send_error}");
+            }
+        }
+        Err(error) => {
+            transfer.client_error(&error);
+            if let Err(send_error) = events.send(WorkerEvent::Failed(error.message)) {
+                log::debug!("trzsz failure outcome was abandoned: {send_error}");
+            }
+        }
+    }
+}
+
+fn upload_files(
+    transfer: &mut TrzszTransfer,
+    paths: Vec<PathBuf>,
+    directory_mode: bool,
+    max_file_size: u64,
+    events: &mpsc::Sender<WorkerEvent>,
+) -> Result<(), TrzszError> {
+    let config = transfer.recv_config()?;
+    if directory_mode && !config.directory {
+        return Err(comm::simple_error(
+            "Remote trzsz peer did not enable directory transfers",
+        ));
+    }
+    let files = check_paths_readable(&paths, directory_mode)?;
+    for file in &files {
+        let file_size = u64::try_from(file.size)
+            .map_err(|error| comm::simple_trzsz_error("Invalid file size", error))?;
+        if file_size > max_file_size {
+            return Err(comm::simple_error("file size limit exceeded"));
+        }
+    }
+    if config.overwrite {
+        comm::check_duplicate_names(&files)?;
+    }
+    let mut progress = TransferProgress::new(events.clone());
+    let mut callback = Some(&mut progress as &mut dyn ProgressCallback);
+    transfer.send_files(&files, &mut callback)?;
+    transfer.client_exit("done")
+}
+
+fn download_files(
+    transfer: &mut TrzszTransfer,
+    events: &mpsc::Sender<WorkerEvent>,
+    cancelled: Arc<AtomicBool>,
+) -> Result<(), TrzszError> {
+    let config = transfer.recv_config()?;
+    if config.directory {
+        return Err(comm::simple_error(
+            "Directory downloads are not supported by this terminal",
+        ));
+    }
+    let buffer_stopped = transfer.buffer.stop_handle();
+    let mut progress =
+        TransferProgress::new_download(events.clone(), cancelled.clone(), buffer_stopped);
+    let mut callback = Some(&mut progress as &mut dyn ProgressCallback);
+    let receive_result =
+        transfer.recv_files_with_writer(Path::new("."), &mut callback, |remote_name| {
+            let (reply, response) = mpsc::sync_channel(1);
+            events
+                .send(WorkerEvent::OpenWrite {
+                    remote_name: remote_name.to_string(),
+                    reply,
+                })
+                .map_err(|error| comm::simple_trzsz_error("Transfer host stopped", error))?;
+            let local_name = await_reply(response, &cancelled)
+                .map_err(|error| comm::simple_trzsz_error("Open staged download failed", error))?;
+            let writer: Box<dyn FileWriter> = Box::new(HostFileWriter {
+                events: events.clone(),
+                cancelled: cancelled.clone(),
+                offset: 0,
+            });
+            Ok((Some(writer), local_name))
+        });
+    if let Some(error) = progress.commit_error.take() {
+        return Err(comm::simple_trzsz_error(
+            "Commit downloaded file failed",
+            error,
+        ));
+    }
+    receive_result?;
+    transfer.client_exit("done")
+}
+
+struct TransferProgress {
+    events: mpsc::Sender<WorkerEvent>,
+    file_index: usize,
+    file_count: usize,
+    bytes_done: u64,
+    bytes_total: Option<u64>,
+    last_reported: u64,
+    download: bool,
+    cancelled: Arc<AtomicBool>,
+    buffer_stopped: Arc<AtomicBool>,
+    commit_error: Option<String>,
+}
+
+impl TransferProgress {
+    fn new(events: mpsc::Sender<WorkerEvent>) -> Self {
+        Self::with_download_commit(
+            events,
+            false,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    fn new_download(
+        events: mpsc::Sender<WorkerEvent>,
+        cancelled: Arc<AtomicBool>,
+        buffer_stopped: Arc<AtomicBool>,
+    ) -> Self {
+        Self::with_download_commit(events, true, cancelled, buffer_stopped)
+    }
+
+    fn with_download_commit(
+        events: mpsc::Sender<WorkerEvent>,
+        download: bool,
+        cancelled: Arc<AtomicBool>,
+        buffer_stopped: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            events,
+            file_index: 0,
+            file_count: 0,
+            bytes_done: 0,
+            bytes_total: None,
+            last_reported: 0,
+            download,
+            cancelled,
+            buffer_stopped,
+            commit_error: None,
+        }
+    }
+
+    fn report(&self) {
+        if let Err(error) = self.events.send(WorkerEvent::Progress {
+            file_index: self.file_index,
+            file_count: self.file_count,
+            bytes_done: self.bytes_done,
+            bytes_total: self.bytes_total,
+        }) {
+            log::debug!("trzsz progress receiver stopped: {error}");
+        }
+    }
+
+    fn commit_download(&mut self) {
+        if !self.download {
+            return;
+        }
+        let result = (|| {
+            let (reply, response) = mpsc::sync_channel(1);
+            self.events
+                .send(WorkerEvent::CommitFile { reply })
+                .map_err(|error| format!("transfer host stopped: {error}"))?;
+            await_reply(response, &self.cancelled)
+        })();
+        if let Err(error) = result {
+            self.commit_error = Some(error);
+            self.buffer_stopped.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+impl ProgressCallback for TransferProgress {
+    fn on_num(&mut self, count: i64) {
+        self.file_count = usize::try_from(count).unwrap_or_default();
+        self.report();
+    }
+
+    fn on_name(&mut self, _name: &str) {
+        self.bytes_done = 0;
+        self.bytes_total = None;
+        self.last_reported = 0;
+        self.report();
+    }
+
+    fn on_size(&mut self, size: i64) {
+        self.bytes_total = u64::try_from(size).ok();
+        self.report();
+    }
+
+    fn on_step(&mut self, step: i64) {
+        self.bytes_done = u64::try_from(step).unwrap_or_default();
+        if self.bytes_done.saturating_sub(self.last_reported) >= 64 * 1024 {
+            self.last_reported = self.bytes_done;
+            self.report();
+        }
+    }
+
+    fn on_done(&mut self) {
+        self.report();
+        self.commit_download();
+        self.file_index = self.file_index.saturating_add(1);
+    }
+
+    fn set_pre_size(&mut self, size: i64) {
+        self.bytes_total = u64::try_from(size).ok();
+        self.report();
+    }
+
+    fn set_pause(&mut self, _pausing: bool) {}
+}
+
+pub struct TrzszProvider {
+    max_file_size: u64,
+}
+
+impl TrzszProvider {
+    pub fn new(max_file_size: u64) -> Self {
+        Self { max_file_size }
+    }
+}
+
+impl Default for TrzszProvider {
+    fn default() -> Self {
+        Self::new(u64::MAX)
+    }
+}
 
 impl TransferProvider for TrzszProvider {
     fn id(&self) -> Arc<str> {
@@ -890,13 +898,24 @@ impl TransferProvider for TrzszProvider {
     }
 
     fn start_session(&self, offer: &TransferOffer) -> Box<dyn TransferSession> {
+        let remote_version = offer
+            .trigger_version
+            .as_deref()
+            .and_then(TrzszVersion::parse);
         Box::new(TrzszSession::new(
             offer.direction.unwrap_or(Direction::Download),
-            String::new(),
+            offer.trigger_mode == Some('D'),
+            remote_version,
+            self.max_file_size,
         ))
     }
 
     fn start_manual_upload(&self) -> Option<Box<dyn TransferSession>> {
-        Some(Box::new(TrzszSession::new_manual()))
+        Some(Box::new(TrzszSession::new(
+            Direction::Upload,
+            false,
+            None,
+            self.max_file_size,
+        )))
     }
 }
