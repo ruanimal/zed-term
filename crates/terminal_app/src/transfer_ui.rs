@@ -463,24 +463,31 @@ impl RenderOnce for TransferBar {
             div()
                 .h_1()
                 .w_full()
-                .rounded_sm()
-                .bg(colors.element_background)
+                .rounded_full()
+                .bg(colors.element_active)
                 .child(
                     div()
-                        .h_1()
-                        .rounded_sm()
-                        .bg(colors.border_focused)
+                        .h_full()
+                        .rounded_full()
+                        .bg(colors.text_accent)
                         .w(relative(fraction)),
                 )
+        });
+        let progress_label = fraction.map(|fraction| {
+            Label::new(format!("{:.0}%", fraction * 100.0))
+                .size(LabelSize::Small)
+                .color(Color::Muted)
         });
 
         div()
             .flex()
             .flex_col()
-            .px_2()
-            .py_1()
-            .gap_1()
-            .bg(colors.element_background)
+            .px_3()
+            .py_2()
+            .gap_2()
+            .bg(colors.toolbar_background)
+            .border_b_1()
+            .border_color(colors.border)
             .child(
                 div()
                     .flex()
@@ -491,6 +498,8 @@ impl RenderOnce for TransferBar {
                     } else {
                         Color::Error
                     }))
+                    .child(div().flex_grow_1())
+                    .when_some(progress_label, |row, label| row.child(label))
                     .child(
                         IconButton::new("transfer-close", IconName::Close)
                             .shape(IconButtonShape::Square)
