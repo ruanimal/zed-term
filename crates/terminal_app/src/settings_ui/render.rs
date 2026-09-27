@@ -743,6 +743,12 @@ impl Render for SettingsPage {
             .unwrap_or_else(|| "auto".to_string());
         let alternate_scroll = format!("{:?}", settings.alternate_scroll).to_lowercase();
         let bell = format!("{:?}", settings.bell).to_lowercase();
+        let transfer_settings = settings.transfer.clone().unwrap_or_default();
+        let download_directory = transfer_settings
+            .download_dir
+            .as_ref()
+            .map(|directory| directory.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let current_theme = self.theme_name.clone();
         let page = cx.weak_entity();
 
@@ -1076,6 +1082,46 @@ impl Render for SettingsPage {
                         settings.bell = settings::TerminalBell::Off
                     }),
                 ],
+            ))
+            .child(self.section_header("File transfer", cx))
+            .child(self.row(
+                "Download directory",
+                "Where received files are saved. Leave blank to choose a directory for each download.",
+                self.text_input(
+                    "transfer-download-directory-input",
+                    EditableField::DownloadDirectory,
+                    download_directory.clone(),
+                    "e.g. /Users/name/Downloads",
+                    cx,
+                ),
+            ))
+            .child(self.toggle_row(
+                "Confirm download location",
+                "Ask where each download should be saved. When disabled, the configured directory is used without prompting.",
+                transfer_settings.confirm_before_download,
+                {
+                    let page = page.clone();
+                    move |cx| {
+                        page.update(cx, |this, cx| {
+                            let next = !this
+                                .draft_settings
+                                .transfer
+                                .as_ref()
+                                .map_or(true, |transfer| transfer.confirm_before_download);
+                            this.update_draft(
+                                DirtySetting::ConfirmBeforeDownload,
+                                |settings| {
+                                    settings
+                                        .transfer
+                                        .get_or_insert_with(Default::default)
+                                        .confirm_before_download = next;
+                                },
+                                cx,
+                            );
+                        })
+                        .log_err();
+                    }
+                },
             ))
             .child(self.section_header("Shell and environment", cx))
             .child(self.render_shell_form(window, cx))

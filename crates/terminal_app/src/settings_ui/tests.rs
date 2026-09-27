@@ -2164,6 +2164,58 @@ fn invalid_structured_shell_text_is_rejected_before_persistence(
 }
 
 #[test]
+fn file_transfer_settings_patch_updates_only_download_options() -> anyhow::Result<()> {
+    let defaults: settings::SettingsContent =
+        settings::parse_json_with_comments(&settings::default_settings())?;
+    let mut draft = settings_page_draft_from_settings(
+        TerminalSettings::from_settings(&defaults),
+        "One Dark".to_string(),
+    );
+    let transfer = draft
+        .draft_settings
+        .transfer
+        .get_or_insert_with(Default::default);
+    transfer.download_dir = Some(PathBuf::from("/tmp/received files"));
+    transfer.confirm_before_download = false;
+
+    let patch = CapturedPatch::Save(Box::new(CapturedSavePatch {
+        draft,
+        dirty_settings: vec![
+            DirtySetting::DownloadDirectory,
+            DirtySetting::ConfirmBeforeDownload,
+        ],
+        shell: None,
+        environment: None,
+        working_directory: None,
+        appearance: theme::Appearance::Dark,
+    }));
+    let mut content = settings::SettingsContent::default();
+    let transfer = content
+        .terminal
+        .get_or_insert_with(Default::default)
+        .transfer
+        .get_or_insert_with(Default::default);
+    transfer.download_dir = Some("/previous/downloads".to_string());
+    transfer.confirm_before_download = Some(true);
+    transfer.max_file_size_mb = Some(512);
+
+    patch.apply(&mut content);
+
+    let transfer = content
+        .terminal
+        .as_ref()
+        .and_then(|terminal| terminal.transfer.as_ref())
+        .expect("the file transfer settings should remain present");
+    assert_eq!(
+        transfer.download_dir.as_deref(),
+        Some("/tmp/received files")
+    );
+    assert_eq!(transfer.confirm_before_download, Some(false));
+    assert_eq!(transfer.max_file_size_mb, Some(512));
+    Ok(())
+}
+
+#[test]
 fn reset_terminal_overrides_preserves_theme_and_non_terminal_settings() -> anyhow::Result<()> {
     let mut content = settings::SettingsContent::default();
     theme_settings::set_theme(

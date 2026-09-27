@@ -126,6 +126,7 @@ enum EditableField {
     EnvironmentKey(usize),
     EnvironmentValue(usize),
     WorkingDirectory,
+    DownloadDirectory,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -148,6 +149,8 @@ enum DirtySetting {
     Shell,
     Environment,
     WorkingDirectory,
+    DownloadDirectory,
+    ConfirmBeforeDownload,
     ScrollMultiplier,
     MaxScrollHistoryLines,
     Scrollbar,
@@ -478,6 +481,27 @@ impl CapturedPatch {
                         DirtySetting::WorkingDirectory => {
                             terminal.project.working_directory = patch.working_directory.clone();
                         }
+                        DirtySetting::DownloadDirectory => {
+                            let transfer = terminal.transfer.get_or_insert_with(Default::default);
+                            transfer.download_dir = patch
+                                .draft
+                                .draft_settings
+                                .transfer
+                                .as_ref()
+                                .and_then(|transfer| transfer.download_dir.as_ref())
+                                .map(|directory| directory.to_string_lossy().into_owned());
+                        }
+                        DirtySetting::ConfirmBeforeDownload => {
+                            let transfer = terminal.transfer.get_or_insert_with(Default::default);
+                            transfer.confirm_before_download = Some(
+                                patch
+                                    .draft
+                                    .draft_settings
+                                    .transfer
+                                    .as_ref()
+                                    .map_or(true, |transfer| transfer.confirm_before_download),
+                            );
+                        }
                         DirtySetting::ScrollMultiplier => {
                             terminal.scroll_multiplier =
                                 Some(patch.draft.draft_settings.scroll_multiplier);
@@ -608,6 +632,28 @@ impl SettingsPage {
                     }
                     DirtySetting::Bell => {
                         preview_settings.bell = self.draft_settings.bell;
+                    }
+                    DirtySetting::DownloadDirectory => {
+                        let directory = self
+                            .draft_settings
+                            .transfer
+                            .as_ref()
+                            .and_then(|transfer| transfer.download_dir.clone());
+                        preview_settings
+                            .transfer
+                            .get_or_insert_with(Default::default)
+                            .download_dir = directory;
+                    }
+                    DirtySetting::ConfirmBeforeDownload => {
+                        let confirm_before_download = self
+                            .draft_settings
+                            .transfer
+                            .as_ref()
+                            .map_or(true, |transfer| transfer.confirm_before_download);
+                        preview_settings
+                            .transfer
+                            .get_or_insert_with(Default::default)
+                            .confirm_before_download = confirm_before_download;
                     }
                     DirtySetting::ScrollMultiplier => {
                         preview_settings.scroll_multiplier = self.draft_settings.scroll_multiplier;
@@ -772,6 +818,28 @@ impl SettingsPage {
             DirtySetting::Environment => self.environment.clone_from(&source.environment),
             DirtySetting::WorkingDirectory => {
                 self.working_directory.clone_from(&source.working_directory)
+            }
+            DirtySetting::DownloadDirectory => {
+                let directory = source
+                    .draft_settings
+                    .transfer
+                    .as_ref()
+                    .and_then(|transfer| transfer.download_dir.clone());
+                self.draft_settings
+                    .transfer
+                    .get_or_insert_with(Default::default)
+                    .download_dir = directory;
+            }
+            DirtySetting::ConfirmBeforeDownload => {
+                let confirm_before_download = source
+                    .draft_settings
+                    .transfer
+                    .as_ref()
+                    .map_or(true, |transfer| transfer.confirm_before_download);
+                self.draft_settings
+                    .transfer
+                    .get_or_insert_with(Default::default)
+                    .confirm_before_download = confirm_before_download;
             }
             DirtySetting::ScrollMultiplier => {
                 self.draft_settings.scroll_multiplier = source.draft_settings.scroll_multiplier;
@@ -1013,6 +1081,13 @@ impl SettingsPage {
                 .map(|variable| variable.value.clone())
                 .unwrap_or_default(),
             Some(EditableField::WorkingDirectory) => self.working_directory.directory.clone(),
+            Some(EditableField::DownloadDirectory) => self
+                .draft_settings
+                .transfer
+                .as_ref()
+                .and_then(|transfer| transfer.download_dir.as_ref())
+                .map(|directory| directory.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             None => String::new(),
         }
     }
@@ -1072,6 +1147,18 @@ impl SettingsPage {
             EditableField::WorkingDirectory => {
                 self.working_directory.directory = updated_text;
                 Some(DirtySetting::WorkingDirectory)
+            }
+            EditableField::DownloadDirectory => {
+                let download_dir = if updated_text.trim().is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(updated_text))
+                };
+                self.draft_settings
+                    .transfer
+                    .get_or_insert_with(Default::default)
+                    .download_dir = download_dir;
+                Some(DirtySetting::DownloadDirectory)
             }
         };
         self.marked_range = mark_text
@@ -1242,6 +1329,7 @@ impl SettingsPage {
             fields.push(EditableField::EnvironmentKey(index));
             fields.push(EditableField::EnvironmentValue(index));
         }
+        fields.push(EditableField::DownloadDirectory);
         if self.working_directory.mode == WorkingDirectoryMode::Fixed {
             fields.push(EditableField::WorkingDirectory);
         }
