@@ -41,7 +41,8 @@ use util::paths::PathStyle;
 
 use crate::terminal::split::{self, SplitDirection, SplitNode};
 use crate::terminal::tab::{
-    ScrollAction, TerminalTabEvent, navigation_target_text, open_navigation_target,
+    ScrollAction, TerminalTabEvent, is_context_menu_navigation_target, navigation_target_text,
+    open_navigation_target,
 };
 use crate::terminal::{TerminalElement, TerminalSearchBar, TerminalTab};
 use crate::transfer_ui::{TransferBar, transfer_setup};
@@ -1988,8 +1989,9 @@ impl Render for TerminalWindowView {
                             if scroll_top > Pixels::ZERO {
                                 position.y += scroll_top;
                             }
-                            this.context_navigation_target =
-                                tab.update(cx, |tab, cx| tab.navigation_target_at(position, cx));
+                            this.context_navigation_target = tab
+                                .update(cx, |tab, cx| tab.navigation_target_at(position, cx))
+                                .filter(|target| is_context_menu_navigation_target(target));
                             this.deploy_terminal_context_menu(event.position, window, cx);
                             cx.notify();
                         }

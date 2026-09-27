@@ -746,6 +746,22 @@ pub(crate) fn navigation_target_text(target: &MaybeNavigationTarget) -> String {
     }
 }
 
+pub(crate) fn is_context_menu_navigation_target(target: &MaybeNavigationTarget) -> bool {
+    match target {
+        MaybeNavigationTarget::Url(_) => true,
+        MaybeNavigationTarget::PathLike(target) => {
+            let parsed = PathWithPosition::parse_str(&target.maybe_path);
+            let path_text = parsed.path.to_string_lossy();
+            parsed.row.is_some()
+                || path_text
+                    .chars()
+                    .any(|character| matches!(character, '/' | '\\' | '.'))
+                || resolve_path_like_target(&target.maybe_path, target.working_directory.as_deref())
+                    .is_some()
+        }
+    }
+}
+
 /// Resolves a path-like link into an existing file-system path.
 ///
 /// Terminal output carries `path:line:column` suffixes (the path regex appends
@@ -897,6 +913,26 @@ mod tests {
             None
         );
         assert_eq!(resolve_path_like_target("Cargo.toml:1", None), None);
+    }
+
+    #[test]
+    fn context_menu_navigation_targets_must_look_like_links() {
+        let target = |maybe_path: &str| {
+            MaybeNavigationTarget::PathLike(PathLikeTarget {
+                maybe_path: maybe_path.to_string(),
+                working_directory: None,
+            })
+        };
+
+        assert!(is_context_menu_navigation_target(
+            &MaybeNavigationTarget::Url("https://zed.dev/".to_string())
+        ));
+        assert!(is_context_menu_navigation_target(&target("src/main.rs")));
+        assert!(is_context_menu_navigation_target(&target(
+            "Cargo.toml:12:3"
+        )));
+        assert!(!is_context_menu_navigation_target(&target("ttys013")));
+        assert!(!is_context_menu_navigation_target(&target("Last")));
     }
 
     #[test]
