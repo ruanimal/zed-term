@@ -8237,7 +8237,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 [[package]]
 name = "trzsz-rs"
 version = "1.3.0"
-source = "git+https://github.com/ruanimal/trzsz-rs?rev=a9dbaaec729d5adf336b9bc6c40404fecb4f8218#a9dbaaec729d5adf336b9bc6c40404fecb4f8218"
+source = "git+https://github.com/ruanimal/trzsz-rs?rev=e2147abf83482a2e0451411a436f186ed454e98b#e2147abf83482a2e0451411a436f186ed454e98b"
 dependencies = [
  "base64 0.22.1",
  "clap",

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use transfer_core::{
     Capabilities, DetectorVerdict, Direction, HostEvent, ProviderManifest, SessionAction,
@@ -22,7 +22,18 @@ const TRIGGER_MARKER: &[u8] = b"::TRZSZ:TRANSFER:";
 const MAX_TRIGGER_LINE: usize = 4096;
 const MAX_SESSION_BUFFER: usize = 4 * 1024 * 1024;
 const MAX_TRANSFER_BUF_SIZE: i64 = 512 * 1024;
+const PROGRESS_REPORT_INTERVAL: Duration = Duration::from_millis(50);
 const REPLY_POLL: Duration = Duration::from_millis(50);
+
+fn progress_report_due(
+    bytes_done: u64,
+    last_reported: u64,
+    last_reported_at: Instant,
+    now: Instant,
+) -> bool {
+    bytes_done != last_reported
+        && now.saturating_duration_since(last_reported_at) >= PROGRESS_REPORT_INTERVAL
+}
 
 /// Trigger detector for trzsz's handshake line. The crate owns parsing and
 /// validation; this adapter only tracks the streaming range required by the mux.
@@ -769,6 +780,7 @@ struct TransferProgress {
     bytes_done: u64,
     bytes_total: Option<u64>,
     last_reported: u64,
+    last_reported_at: Instant,
     download: bool,
     cancelled: Arc<AtomicBool>,
     buffer_stopped: Arc<AtomicBool>,
@@ -806,6 +818,7 @@ impl TransferProgress {
             bytes_done: 0,
             bytes_total: None,
             last_reported: 0,
+            last_reported_at: Instant::now(),
             download,
             cancelled,
             buffer_stopped,
@@ -822,6 +835,12 @@ impl TransferProgress {
         }) {
             log::debug!("trzsz progress receiver stopped: {error}");
         }
+    }
+
+    fn report_progress(&mut self) {
+        self.last_reported = self.bytes_done;
+        self.last_reported_at = Instant::now();
+        self.report();
     }
 
     fn commit_download(&mut self) {
@@ -845,41 +864,75 @@ impl TransferProgress {
 impl ProgressCallback for TransferProgress {
     fn on_num(&mut self, count: i64) {
         self.file_count = usize::try_from(count).unwrap_or_default();
-        self.report();
+        self.report_progress();
     }
 
     fn on_name(&mut self, _name: &str) {
         self.bytes_done = 0;
         self.bytes_total = None;
-        self.last_reported = 0;
-        self.report();
+        self.report_progress();
     }
 
     fn on_size(&mut self, size: i64) {
         self.bytes_total = u64::try_from(size).ok();
-        self.report();
+        self.report_progress();
     }
 
     fn on_step(&mut self, step: i64) {
         self.bytes_done = u64::try_from(step).unwrap_or_default();
-        if self.bytes_done.saturating_sub(self.last_reported) >= 64 * 1024 {
+        let now = Instant::now();
+        if progress_report_due(
+            self.bytes_done,
+            self.last_reported,
+            self.last_reported_at,
+            now,
+        ) {
             self.last_reported = self.bytes_done;
+            self.last_reported_at = now;
             self.report();
         }
     }
 
     fn on_done(&mut self) {
-        self.report();
+        self.report_progress();
         self.commit_download();
         self.file_index = self.file_index.saturating_add(1);
     }
 
     fn set_pre_size(&mut self, size: i64) {
         self.bytes_total = u64::try_from(size).ok();
-        self.report();
+        self.report_progress();
     }
 
     fn set_pause(&mut self, _pausing: bool) {}
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    #[test]
+    fn progress_updates_are_limited_to_twenty_per_second() {
+        let last_reported_at = Instant::now();
+        assert!(!progress_report_due(
+            64 * 1024,
+            0,
+            last_reported_at,
+            last_reported_at + Duration::from_millis(49),
+        ));
+        assert!(progress_report_due(
+            64 * 1024,
+            0,
+            last_reported_at,
+            last_reported_at + PROGRESS_REPORT_INTERVAL,
+        ));
+        assert!(!progress_report_due(
+            0,
+            0,
+            last_reported_at,
+            last_reported_at + Duration::from_secs(1),
+        ));
+    }
 }
 
 pub struct TrzszProvider {
