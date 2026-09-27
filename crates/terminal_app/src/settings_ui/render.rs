@@ -1107,7 +1107,7 @@ impl Render for SettingsPage {
                                 .draft_settings
                                 .transfer
                                 .as_ref()
-                                .map_or(true, |transfer| transfer.confirm_before_download);
+                                .is_none_or(|transfer| transfer.confirm_before_download);
                             this.update_draft(
                                 DirtySetting::ConfirmBeforeDownload,
                                 |settings| {

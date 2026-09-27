@@ -499,7 +499,7 @@ impl CapturedPatch {
                                     .draft_settings
                                     .transfer
                                     .as_ref()
-                                    .map_or(true, |transfer| transfer.confirm_before_download),
+                                    .is_none_or(|transfer| transfer.confirm_before_download),
                             );
                         }
                         DirtySetting::ScrollMultiplier => {
@@ -649,7 +649,7 @@ impl SettingsPage {
                             .draft_settings
                             .transfer
                             .as_ref()
-                            .map_or(true, |transfer| transfer.confirm_before_download);
+                            .is_none_or(|transfer| transfer.confirm_before_download);
                         preview_settings
                             .transfer
                             .get_or_insert_with(Default::default)
@@ -835,7 +835,7 @@ impl SettingsPage {
                     .draft_settings
                     .transfer
                     .as_ref()
-                    .map_or(true, |transfer| transfer.confirm_before_download);
+                    .is_none_or(|transfer| transfer.confirm_before_download);
                 self.draft_settings
                     .transfer
                     .get_or_insert_with(Default::default)
