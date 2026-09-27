@@ -1991,7 +1991,7 @@ impl Render for TerminalWindowView {
                             }
                             this.context_navigation_target = tab
                                 .update(cx, |tab, cx| tab.navigation_target_at(position, cx))
-                                .filter(|target| is_context_menu_navigation_target(target));
+                                .filter(is_context_menu_navigation_target);
                             this.deploy_terminal_context_menu(event.position, window, cx);
                             cx.notify();
                         }
