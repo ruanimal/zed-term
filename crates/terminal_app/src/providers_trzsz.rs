@@ -288,14 +288,16 @@ impl TrzszSession {
             .spawn(move || {
                 run_protocol_worker(
                     transfer,
-                    direction,
-                    directory_mode,
-                    remote_version,
-                    max_file_size,
-                    confirmed,
-                    paths,
-                    event_sender,
-                    thread_cancelled,
+                    ProtocolWorkerConfig {
+                        direction,
+                        directory_mode,
+                        remote_version,
+                        max_file_size,
+                        confirmed,
+                        paths,
+                        events: event_sender,
+                        cancelled: thread_cancelled,
+                    },
                 );
             });
         if let Err(error) = spawn_result {
@@ -636,8 +638,7 @@ impl FileWriter for HostFileWriter {
     }
 }
 
-fn run_protocol_worker(
-    mut transfer: TrzszTransfer,
+struct ProtocolWorkerConfig {
     direction: Direction,
     directory_mode: bool,
     remote_version: Option<TrzszVersion>,
@@ -646,7 +647,19 @@ fn run_protocol_worker(
     paths: Option<Vec<PathBuf>>,
     events: mpsc::Sender<WorkerEvent>,
     cancelled: Arc<AtomicBool>,
-) {
+}
+
+fn run_protocol_worker(mut transfer: TrzszTransfer, config: ProtocolWorkerConfig) {
+    let ProtocolWorkerConfig {
+        direction,
+        directory_mode,
+        remote_version,
+        max_file_size,
+        confirmed,
+        paths,
+        events,
+        cancelled,
+    } = config;
     let maximum_protocol = maximum_protocol_for(remote_version.as_ref());
     let outcome = (|| -> Result<(), TrzszError> {
         transfer.send_action_with_capabilities(
@@ -907,34 +920,6 @@ impl ProgressCallback for TransferProgress {
     fn set_pause(&mut self, _pausing: bool) {}
 }
 
-#[cfg(test)]
-mod progress_tests {
-    use super::*;
-
-    #[test]
-    fn progress_updates_are_limited_to_twenty_per_second() {
-        let last_reported_at = Instant::now();
-        assert!(!progress_report_due(
-            64 * 1024,
-            0,
-            last_reported_at,
-            last_reported_at + Duration::from_millis(49),
-        ));
-        assert!(progress_report_due(
-            64 * 1024,
-            0,
-            last_reported_at,
-            last_reported_at + PROGRESS_REPORT_INTERVAL,
-        ));
-        assert!(!progress_report_due(
-            0,
-            0,
-            last_reported_at,
-            last_reported_at + Duration::from_secs(1),
-        ));
-    }
-}
-
 pub struct TrzszProvider {
     max_file_size: u64,
 }
@@ -1012,5 +997,32 @@ impl TransferProvider for TrzszProvider {
             None,
             self.max_file_size,
         )))
+    }
+}
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    #[test]
+    fn progress_updates_are_limited_to_twenty_per_second() {
+        let last_reported_at = Instant::now();
+        assert!(!progress_report_due(
+            64 * 1024,
+            0,
+            last_reported_at,
+            last_reported_at + Duration::from_millis(49),
+        ));
+        assert!(progress_report_due(
+            64 * 1024,
+            0,
+            last_reported_at,
+            last_reported_at + PROGRESS_REPORT_INTERVAL,
+        ));
+        assert!(!progress_report_due(
+            0,
+            0,
+            last_reported_at,
+            last_reported_at + Duration::from_secs(1),
+        ));
     }
 }
