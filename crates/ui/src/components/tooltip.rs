@@ -10,6 +10,7 @@ pub struct Tooltip {
     title: Title,
     meta: Option<SharedString>,
     key_binding: Option<KeyBinding>,
+    background_opacity: Option<f32>,
 }
 
 #[derive(Clone, IntoElement)]
@@ -39,6 +40,7 @@ impl Tooltip {
             title: Title::Str(title.into()),
             meta: None,
             key_binding: None,
+            background_opacity: None,
         })
         .into()
     }
@@ -50,6 +52,23 @@ impl Tooltip {
                 title: title.clone().into(),
                 meta: None,
                 key_binding: None,
+                background_opacity: None,
+            })
+            .into()
+        }
+    }
+
+    pub fn text_with_background_opacity(
+        title: impl Into<SharedString>,
+        opacity: f32,
+    ) -> impl Fn(&mut Window, &mut App) -> AnyView {
+        let title = title.into();
+        move |_, cx| {
+            cx.new(|_| Self {
+                title: title.clone().into(),
+                meta: None,
+                key_binding: None,
+                background_opacity: Some(opacity),
             })
             .into()
         }
@@ -66,6 +85,7 @@ impl Tooltip {
                 title: Title::Str(title.clone()),
                 meta: None,
                 key_binding: Some(KeyBinding::for_action(action.as_ref(), cx)),
+                background_opacity: None,
             })
             .into()
         }
@@ -88,6 +108,7 @@ impl Tooltip {
                     &focus_handle,
                     cx,
                 )),
+                background_opacity: None,
             })
             .into()
         }
@@ -102,6 +123,7 @@ impl Tooltip {
             title: Title::Str(title.into()),
             meta: None,
             key_binding: Some(KeyBinding::for_action(action, cx)),
+            background_opacity: None,
         })
         .into()
     }
@@ -116,6 +138,7 @@ impl Tooltip {
             title: title.into().into(),
             meta: None,
             key_binding: Some(KeyBinding::for_action_in(action, focus_handle, cx)),
+            background_opacity: None,
         })
         .into()
     }
@@ -130,6 +153,7 @@ impl Tooltip {
             title: title.into().into(),
             meta: Some(meta.into()),
             key_binding: action.map(|action| KeyBinding::for_action(action, cx)),
+            background_opacity: None,
         })
         .into()
     }
@@ -145,6 +169,7 @@ impl Tooltip {
             title: title.into().into(),
             meta: Some(meta.into()),
             key_binding: action.map(|action| KeyBinding::for_action_in(action, focus_handle, cx)),
+            background_opacity: None,
         })
         .into()
     }
@@ -154,6 +179,7 @@ impl Tooltip {
             title: title.into().into(),
             meta: None,
             key_binding: None,
+            background_opacity: None,
         }
     }
 
@@ -162,6 +188,7 @@ impl Tooltip {
             title: Title::Callback(Rc::new(title)),
             meta: None,
             key_binding: None,
+            background_opacity: None,
         }
     }
 
@@ -175,6 +202,7 @@ impl Tooltip {
                 title,
                 meta: None,
                 key_binding: None,
+                background_opacity: None,
             })
             .into()
         }
@@ -193,16 +221,26 @@ impl Tooltip {
 
 impl Render for Tooltip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        tooltip_container(cx, |el, _| {
+        let background = cx.theme().colors().elevated_surface_background;
+        let background_opacity = self.background_opacity;
+        let title = self.title.clone();
+        let key_binding = self.key_binding.clone();
+        let meta = self.meta.clone();
+        tooltip_container(cx, move |el, _| {
+            let el = if let Some(opacity) = background_opacity {
+                el.bg(background.opacity(opacity))
+            } else {
+                el
+            };
             el.child(
                 h_flex()
                     .gap_4()
-                    .child(div().max_w_72().child(self.title.clone()))
-                    .when_some(self.key_binding.clone(), |this, key_binding| {
+                    .child(div().max_w_72().child(title))
+                    .when_some(key_binding, |this, key_binding| {
                         this.justify_between().child(key_binding)
                     }),
             )
-            .when_some(self.meta.clone(), |this, meta| {
+            .when_some(meta, |this, meta| {
                 this.child(
                     div()
                         .max_w_72()

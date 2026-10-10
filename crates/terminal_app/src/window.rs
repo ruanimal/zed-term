@@ -58,9 +58,8 @@ use crate::{
 /// Titles longer than this are cut off with an ellipsis, like editor tabs
 /// (`MAX_TAB_TITLE_LEN` in the editor crate).
 const TAB_TITLE_WIDTH: gpui::Pixels = px(100.);
-/// Character cap applied to the title string itself, mirroring the editor's
-/// `MAX_TAB_TITLE_LEN`; keeps tooltips and copy-paste from carrying absurd
-/// titles even though the layout already truncates visually.
+/// Character cap applied to the tab label and drag title, mirroring the editor's
+/// `MAX_TAB_TITLE_LEN`. Hover tooltips retain the complete title.
 const TAB_TITLE_MAX_CHARS: usize = 24;
 
 #[derive(Clone, Copy)]
@@ -1525,11 +1524,11 @@ impl TerminalWindowView {
             .map(|(idx, tab)| {
                 let has_bell = tab.has_bell(cx);
                 let pane = tab.focused_tab();
-                let title = pane
+                let full_title = pane
                     .as_ref()
                     .map(|pane| pane.read(cx).title(cx))
                     .unwrap_or_else(|| "Terminal".to_string());
-                let title = util::truncate_and_trailoff(&title, TAB_TITLE_MAX_CHARS);
+                let title = util::truncate_and_trailoff(&full_title, TAB_TITLE_MAX_CHARS);
                 let dragged_tab = pane.map(|pane| DraggedTerminalTab {
                     source_window,
                     source_view: source_view.clone(),
@@ -1549,6 +1548,7 @@ impl TerminalWindowView {
                     .height(window_chrome::TITLE_BAR_HEIGHT)
                     .position(position)
                     .toggle_state(idx == self.active_tab_index)
+                    .tooltip(Tooltip::text_with_background_opacity(full_title, 0.8))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |_, _: &MouseDownEvent, _, cx| {
