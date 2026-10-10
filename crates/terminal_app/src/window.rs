@@ -5,17 +5,19 @@
 
 use std::{
     cmp::Ordering,
+    ops::Range,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use gpui::{
-    AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Decorations,
-    DismissEvent, Entity, FocusHandle, Focusable as _, InteractiveElement as _, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement as _, Pixels, PromptLevel, Render, ScrollHandle, StatefulInteractiveElement as _,
-    Styled as _, Subscription, WeakEntity, Window, anchored, deferred, div, prelude::FluentBuilder,
-    px,
+    AnyElement, App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Decorations,
+    DismissEvent, Edges, Element, ElementId, Entity, FocusHandle, Focusable as _, GlobalElementId,
+    InputHandler, InspectorElementId, InteractiveElement as _, IntoElement, KeyDownEvent, LayoutId,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+    Pixels, Position, PromptLevel, Render, ScrollHandle, StatefulInteractiveElement as _, Style,
+    Styled as _, Subscription, UTF16Selection, WeakEntity, Window, anchored, deferred, div,
+    prelude::FluentBuilder, px,
 };
 use settings::Settings as _;
 use settings::settings_content::TerminalBell;
@@ -31,7 +33,7 @@ use theme::ActiveTheme as _;
 use ui::scrollbars::{ScrollbarVisibility, ShowScrollbar};
 use ui::utils::TRAFFIC_LIGHT_PADDING;
 use ui::{
-    ButtonCommon as _, ButtonSize, ButtonStyle, Clickable as _, Color, ContextMenu,
+    Button, ButtonCommon as _, ButtonSize, ButtonStyle, Clickable as _, Color, ContextMenu,
     Disableable as _, DynamicSpacing, IconButton, IconButtonShape, IconName, IconSize, Indicator,
     Label, LabelCommon as _, LabelSize, ScrollAxes, Scrollbars, Tab, TabBar, TabPosition,
     Toggleable as _, Tooltip, WithScrollbar,
@@ -45,6 +47,9 @@ use crate::terminal::tab::{
     open_navigation_target,
 };
 use crate::terminal::{TerminalElement, TerminalSearchBar, TerminalTab};
+use crate::text_edit::{
+    next_utf16_boundary, previous_utf16_boundary, replace_utf16_range, substring_utf16,
+};
 use crate::transfer_ui::{TransferBar, transfer_setup};
 use crate::window_chrome;
 use crate::{
@@ -113,6 +118,7 @@ pub struct TerminalWindowView {
     /// Link under the last right-click, if that cell held one. Its menu entries
     /// act on the clicked cell rather than on the focused pane.
     context_navigation_target: Option<MaybeNavigationTarget>,
+    tab_rename: Option<TabRenameState>,
     /// Left-button state for the titlebar strip drag gesture.
     titlebar_mouse_down: std::cell::Cell<bool>,
     /// Tracks the tab bar's horizontal scroll so an activated tab can be
@@ -137,6 +143,17 @@ pub(crate) struct WindowTab {
     /// The pane temporarily occupying the entire content area. The split tree
     /// remains intact so restoring zoom preserves its layout and flexes.
     pub(crate) maximized_pane_tab: Option<Entity<TerminalTab>>,
+    title_override: Option<String>,
+}
+
+struct TabRenameState {
+    panes: Vec<Entity<TerminalTab>>,
+    name: String,
+    selection: Range<usize>,
+    anchor: usize,
+    cursor: usize,
+    marked_range: Option<Range<usize>>,
+    focus_handle: FocusHandle,
 }
 
 impl WindowTab {
@@ -146,6 +163,7 @@ impl WindowTab {
             split_root: None,
             active_pane_tab: Some(tab),
             maximized_pane_tab: None,
+            title_override: None,
         }
     }
 
@@ -154,6 +172,27 @@ impl WindowTab {
         self.active_pane_tab.clone()
     }
 
+    fn title(&self, cx: &App) -> String {
+        self.title_override
+            .clone()
+            .or_else(|| self.focused_tab().map(|pane| pane.read(cx).title(cx)))
+            .unwrap_or_else(|| "Terminal".to_string())
+    }
+
+    fn set_title_override(&mut self, title: String) {
+        let title = title.trim().to_string();
+        self.title_override = (!title.is_empty()).then_some(title);
+    }
+
+    fn panes(&self) -> Vec<Entity<TerminalTab>> {
+        if let Some(root) = self.split_root.as_ref() {
+            let mut panes = Vec::new();
+            root.collect_tabs(&mut panes);
+            panes.into_iter().cloned().collect()
+        } else {
+            self.active_pane_tab.iter().cloned().collect()
+        }
+    }
     fn contains_pane(&self, pane: &Entity<TerminalTab>) -> bool {
         self.split_root.as_ref().map_or_else(
             || self.active_pane_tab.as_ref() == Some(pane),
@@ -182,6 +221,260 @@ impl WindowTab {
     fn is_pane_maximized(&self) -> bool {
         self.maximized_pane_tab.is_some()
     }
+}
+
+struct TabRenameInput {
+    view: WeakEntity<TerminalWindowView>,
+    focus_handle: FocusHandle,
+}
+
+impl IntoElement for TabRenameInput {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for TabRenameInput {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let style = Style {
+            position: Position::Absolute,
+            inset: Edges::all(px(0.).into()),
+            ..Default::default()
+        };
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        window.set_focus_handle(&self.focus_handle, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        window.handle_input(
+            &self.focus_handle,
+            TabRenameInputHandler {
+                view: self.view.clone(),
+                bounds,
+            },
+            cx,
+        );
+    }
+}
+
+struct TabRenameInputHandler {
+    view: WeakEntity<TerminalWindowView>,
+    bounds: Bounds<Pixels>,
+}
+
+impl TabRenameInputHandler {
+    fn update(&self, cx: &mut App, update: impl FnOnce(&mut TabRenameState)) {
+        self.view
+            .update(cx, |view, cx| {
+                if let Some(state) = view.tab_rename.as_mut() {
+                    update(state);
+                    cx.notify();
+                }
+            })
+            .log_err();
+    }
+}
+
+impl InputHandler for TabRenameInputHandler {
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Option<UTF16Selection> {
+        self.view
+            .read_with(cx, |view, _| {
+                view.tab_rename.as_ref().map(|state| UTF16Selection {
+                    range: state.selection.clone(),
+                    reversed: state.cursor < state.anchor,
+                })
+            })
+            .log_err()
+            .flatten()
+    }
+
+    fn marked_text_range(&mut self, _window: &mut Window, cx: &mut App) -> Option<Range<usize>> {
+        self.view
+            .read_with(cx, |view, _| {
+                view.tab_rename
+                    .as_ref()
+                    .and_then(|state| state.marked_range.clone())
+            })
+            .log_err()
+            .flatten()
+    }
+
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        _actual_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Option<String> {
+        self.view
+            .read_with(cx, |view, _| {
+                view.tab_rename
+                    .as_ref()
+                    .map(|state| substring_utf16(&state.name, range_utf16))
+            })
+            .log_err()
+            .flatten()
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        replacement_range: Option<Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.update(cx, |state| {
+            replace_tab_rename_text(state, replacement_range, text, None, false);
+        });
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.update(cx, |state| {
+            replace_tab_rename_text(state, range_utf16, new_text, new_selected_range, true);
+        });
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut App) {
+        self.update(cx, |state| state.marked_range = None);
+    }
+
+    fn set_selected_text_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.update(cx, |state| {
+            let length = state.name.encode_utf16().count();
+            let start = range_utf16.start.min(length);
+            let end = range_utf16.end.min(length).max(start);
+            state.selection = start..end;
+            state.anchor = start;
+            state.cursor = end;
+            state.marked_range = None;
+        });
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<Bounds<Pixels>> {
+        Some(self.bounds)
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: gpui::Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<usize> {
+        None
+    }
+
+    fn element_bounds(&mut self, _window: &mut Window, _cx: &mut App) -> Option<Bounds<Pixels>> {
+        Some(self.bounds)
+    }
+
+    fn text_length_utf16(&mut self, _window: &mut Window, cx: &mut App) -> Option<usize> {
+        self.view
+            .read_with(cx, |view, _| {
+                view.tab_rename
+                    .as_ref()
+                    .map(|state| state.name.encode_utf16().count())
+            })
+            .log_err()
+            .flatten()
+    }
+
+    fn apple_press_and_hold_enabled(&mut self) -> bool {
+        false
+    }
+
+    fn prefers_ime_for_printable_keys(&mut self, _window: &mut Window, _cx: &mut App) -> bool {
+        true
+    }
+}
+
+fn replace_tab_rename_text(
+    state: &mut TabRenameState,
+    replacement_range: Option<Range<usize>>,
+    text: &str,
+    new_selected_range: Option<Range<usize>>,
+    mark_text: bool,
+) {
+    let current_text = state.name.clone();
+    let range = replacement_range
+        .or_else(|| state.marked_range.clone())
+        .unwrap_or_else(|| state.selection.clone());
+    let range_start = range.start.min(current_text.encode_utf16().count());
+    let (updated_text, cursor) = replace_utf16_range(&current_text, range, text);
+    state.name = updated_text;
+    state.marked_range = mark_text
+        .then_some(range_start..cursor)
+        .filter(|range| !range.is_empty());
+    let inserted_length = text.encode_utf16().count();
+    state.selection = new_selected_range
+        .map(|range| {
+            let start = range.start.min(inserted_length);
+            let end = range.end.min(inserted_length).max(start);
+            range_start + start..range_start + end
+        })
+        .unwrap_or(cursor..cursor);
+    state.anchor = state.selection.start;
+    state.cursor = state.selection.end;
 }
 
 #[derive(Clone)]
@@ -243,6 +536,7 @@ impl TerminalWindowView {
             active_tab_index: 0,
             context_menu: None,
             context_navigation_target: None,
+            tab_rename: None,
             titlebar_mouse_down: std::cell::Cell::new(false),
             tab_bar_scroll_handle: ScrollHandle::new(),
             tab_bar_has_overflow: false,
@@ -1222,6 +1516,251 @@ impl TerminalWindowView {
         self.context_menu = Some((context_menu, position, subscription));
     }
 
+    fn begin_tab_rename(&mut self, tab_index: usize, cx: &mut Context<Self>) -> FocusHandle {
+        let Some(tab) = self.tabs.get(tab_index) else {
+            return cx.focus_handle();
+        };
+        let panes = tab.panes();
+        let name = tab.title(cx);
+        let cursor = name.encode_utf16().count();
+        let focus_handle = cx.focus_handle();
+        self.tab_rename = Some(TabRenameState {
+            panes,
+            name,
+            selection: 0..cursor,
+            anchor: 0,
+            cursor,
+            marked_range: None,
+            focus_handle: focus_handle.clone(),
+        });
+        cx.notify();
+        focus_handle
+    }
+
+    fn commit_tab_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rename) = self.tab_rename.take() else {
+            return;
+        };
+        let name = rename.name;
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| rename.panes.iter().any(|pane| tab.contains_pane(pane)))
+        {
+            tab.set_title_override(name);
+        }
+        self.focus_pane(window, cx);
+        cx.notify();
+    }
+
+    fn cancel_tab_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab_rename.take().is_some() {
+            self.focus_pane(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn tab_rename_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tab_rename.is_none() {
+            return;
+        }
+        let key = event.keystroke.key.as_str();
+        let secondary = event.keystroke.modifiers.secondary();
+        let shift = event.keystroke.modifiers.shift;
+        let handled = match key {
+            "escape" => {
+                self.cancel_tab_rename(window, cx);
+                true
+            }
+            "enter" => {
+                self.commit_tab_rename(window, cx);
+                true
+            }
+            "left" => {
+                self.move_tab_rename_cursor(true, shift, cx);
+                true
+            }
+            "right" => {
+                self.move_tab_rename_cursor(false, shift, cx);
+                true
+            }
+            "home" => {
+                self.move_tab_rename_to_boundary(true, shift, cx);
+                true
+            }
+            "end" => {
+                self.move_tab_rename_to_boundary(false, shift, cx);
+                true
+            }
+            "backspace" => {
+                self.delete_tab_rename_text(true, cx);
+                true
+            }
+            "delete" => {
+                self.delete_tab_rename_text(false, cx);
+                true
+            }
+            "a" if secondary => {
+                self.select_all_tab_rename_text(cx);
+                true
+            }
+            "c" if secondary => {
+                self.copy_tab_rename_text(cx);
+                true
+            }
+            "x" if secondary => {
+                self.cut_tab_rename_text(cx);
+                true
+            }
+            "v" if secondary => {
+                self.paste_tab_rename_text(cx);
+                true
+            }
+            _ => false,
+        };
+        if handled {
+            cx.stop_propagation();
+        }
+    }
+
+    fn move_tab_rename_cursor(
+        &mut self,
+        move_left: bool,
+        extend_selection: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.tab_rename.as_mut() else {
+            return;
+        };
+        let target = if !extend_selection && !state.selection.is_empty() {
+            if move_left {
+                state.selection.start
+            } else {
+                state.selection.end
+            }
+        } else if move_left {
+            previous_utf16_boundary(&state.name, state.cursor)
+        } else {
+            next_utf16_boundary(&state.name, state.cursor)
+        };
+        Self::update_tab_rename_selection(state, target, extend_selection);
+        cx.notify();
+    }
+
+    fn move_tab_rename_to_boundary(
+        &mut self,
+        move_to_start: bool,
+        extend_selection: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.tab_rename.as_mut() else {
+            return;
+        };
+        let target = if move_to_start {
+            0
+        } else {
+            state.name.encode_utf16().count()
+        };
+        Self::update_tab_rename_selection(state, target, extend_selection);
+        cx.notify();
+    }
+
+    fn update_tab_rename_selection(
+        state: &mut TabRenameState,
+        cursor: usize,
+        extend_selection: bool,
+    ) {
+        let cursor = cursor.min(state.name.encode_utf16().count());
+        if extend_selection {
+            state.cursor = cursor;
+            state.selection = if state.anchor <= cursor {
+                state.anchor..cursor
+            } else {
+                cursor..state.anchor
+            };
+        } else {
+            state.anchor = cursor;
+            state.cursor = cursor;
+            state.selection = cursor..cursor;
+        }
+        state.marked_range = None;
+    }
+
+    fn delete_tab_rename_text(&mut self, backwards: bool, cx: &mut Context<Self>) {
+        let Some(state) = self.tab_rename.as_mut() else {
+            return;
+        };
+        state.marked_range = None;
+        if state.selection.is_empty() {
+            let boundary = if backwards {
+                previous_utf16_boundary(&state.name, state.cursor)
+            } else {
+                next_utf16_boundary(&state.name, state.cursor)
+            };
+            if boundary == state.cursor {
+                return;
+            }
+            state.selection = if backwards {
+                boundary..state.cursor
+            } else {
+                state.cursor..boundary
+            };
+        }
+        replace_tab_rename_text(state, None, "", None, false);
+        cx.notify();
+    }
+
+    fn select_all_tab_rename_text(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.tab_rename.as_mut() else {
+            return;
+        };
+        let length = state.name.encode_utf16().count();
+        state.selection = 0..length;
+        state.anchor = 0;
+        state.cursor = length;
+        state.marked_range = None;
+        cx.notify();
+    }
+
+    fn copy_tab_rename_text(&self, cx: &mut App) {
+        if let Some(state) = self.tab_rename.as_ref()
+            && !state.selection.is_empty()
+        {
+            let text = substring_utf16(&state.name, state.selection.clone());
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    fn cut_tab_rename_text(&mut self, cx: &mut Context<Self>) {
+        if self
+            .tab_rename
+            .as_ref()
+            .is_some_and(|state| !state.selection.is_empty())
+        {
+            self.copy_tab_rename_text(cx);
+            self.delete_tab_rename_text(false, cx);
+        }
+    }
+
+    fn paste_tab_rename_text(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .map(|text| text.replace(['\n', '\r'], " "))
+        else {
+            return;
+        };
+        if let Some(state) = self.tab_rename.as_mut() {
+            replace_tab_rename_text(state, None, &text, None, false);
+            cx.notify();
+        }
+    }
+
     /// Right-click menu over the terminal surface (mirrors Zed's terminal
     /// context menu minus the workspace/assistant entries).
     fn deploy_terminal_context_menu(
@@ -1302,8 +1841,19 @@ impl TerminalWindowView {
             return;
         };
         let focus_handle = tab.read(cx).focus_handle.clone();
-        self.show_context_menu(position, window, cx, |menu, _, _| {
+        let tab_index = self.active_tab_index;
+        let view = cx.weak_entity();
+        self.show_context_menu(position, window, cx, move |menu, _, _| {
             menu.context(focus_handle)
+                .entry("Rename Tab", None, move |window, cx| {
+                    if let Some(focus_handle) = view
+                        .update(cx, |this, cx| this.begin_tab_rename(tab_index, cx))
+                        .log_err()
+                    {
+                        window.focus(&focus_handle, cx);
+                    }
+                })
+                .separator()
                 .action("Close", Box::new(CloseTab))
                 .action("Close Others", Box::new(CloseOtherTabs))
                 .action("Close Left", Box::new(CloseLeft))
@@ -1511,9 +2061,8 @@ impl TerminalWindowView {
             .into_any_element()
     }
 
-    /// The tab bar's tab columns, one per open tab. Each tab's title comes
-    /// from its focused pane (a tab is a pane group; the focused pane gives
-    /// its title).
+    /// The tab title follows the focused pane unless the user has renamed it,
+    /// in which case the custom title stays fixed.
     fn render_tab_children(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let tab_count = self.tabs.len();
         let source_window = cx.entity_id();
@@ -1524,10 +2073,7 @@ impl TerminalWindowView {
             .map(|(idx, tab)| {
                 let has_bell = tab.has_bell(cx);
                 let pane = tab.focused_tab();
-                let full_title = pane
-                    .as_ref()
-                    .map(|pane| pane.read(cx).title(cx))
-                    .unwrap_or_else(|| "Terminal".to_string());
+                let full_title = tab.title(cx);
                 let title = util::truncate_and_trailoff(&full_title, TAB_TITLE_MAX_CHARS);
                 let dragged_tab = pane.map(|pane| DraggedTerminalTab {
                     source_window,
@@ -1647,8 +2193,177 @@ impl TerminalWindowView {
                 .size(LabelSize::Small),
         )
     }
+
+    fn render_tab_rename_dialog(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let state = self.tab_rename.as_ref()?;
+        let name = state.name.clone();
+        let selection = state.selection.clone();
+        let focus_handle = state.focus_handle.clone();
+        let input_focused = focus_handle.is_focused(window);
+        let view = cx.weak_entity();
+        let dialog = div()
+            .id("rename-tab-dialog")
+            .key_context("TabRename")
+            .w(px(360.))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .bg(cx.theme().colors().elevated_surface_background)
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .rounded_lg()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
+            )
+            .child(Label::new("Rename Tab").size(LabelSize::Large))
+            .child(
+                div()
+                    .id("rename-tab-name-input")
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .w_full()
+                    .h(px(36.))
+                    .px_2()
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .bg(cx.theme().colors().background)
+                    .track_focus(&focus_handle)
+                    .on_key_down(cx.listener(Self::tab_rename_key_down))
+                    .child(render_tab_rename_input_content(
+                        &name,
+                        &selection,
+                        input_focused,
+                        cx,
+                    ))
+                    .child(TabRenameInput { view, focus_handle }),
+            )
+            .child(
+                Label::new("Enter to rename · Esc to cancel")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("rename-tab-cancel", "Cancel")
+                            .style(ButtonStyle::Outlined)
+                            .label_size(LabelSize::Small)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.cancel_tab_rename(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("rename-tab-confirm", "Rename")
+                            .style(ButtonStyle::Filled)
+                            .label_size(LabelSize::Small)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.commit_tab_rename(window, cx);
+                            })),
+                    ),
+            );
+        Some(
+            deferred(
+                div()
+                    .id("rename-tab-overlay")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(gpui::black().opacity(0.4))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                            this.cancel_tab_rename(window, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_key_down(cx.listener(Self::tab_rename_key_down))
+                    .child(dialog),
+            )
+            .with_priority(2)
+            .into_any_element(),
+        )
+    }
 }
 
+fn render_tab_rename_input_content(
+    name: &str,
+    selection: &Range<usize>,
+    focused: bool,
+    cx: &App,
+) -> AnyElement {
+    let text_length = name.encode_utf16().count();
+    let selection_start = selection.start.min(text_length);
+    let selection_end = selection.end.min(text_length).max(selection_start);
+    let mut content = div()
+        .flex()
+        .items_center()
+        .min_w_0()
+        .flex_grow_1()
+        .overflow_hidden();
+    let caret = || {
+        div()
+            .flex_none()
+            .w(px(1.))
+            .h(px(16.))
+            .bg(cx.theme().colors().text)
+    };
+
+    if name.is_empty() {
+        if focused {
+            content = content.child(caret());
+        }
+        return content
+            .child(
+                Label::new("Tab name")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .into_any_element();
+    }
+
+    if selection_start == selection_end {
+        content = content.child(Label::new(substring_utf16(name, 0..selection_start)));
+        if focused {
+            content = content.child(caret());
+        }
+        content = content.child(Label::new(substring_utf16(
+            name,
+            selection_start..text_length,
+        )));
+    } else {
+        content = content
+            .child(Label::new(substring_utf16(name, 0..selection_start)))
+            .child(
+                div()
+                    .bg(cx.theme().colors().ghost_element_selected)
+                    .child(Label::new(substring_utf16(
+                        name,
+                        selection_start..selection_end,
+                    ))),
+            )
+            .child(Label::new(substring_utf16(
+                name,
+                selection_end..text_length,
+            )));
+    }
+    content.into_any_element()
+}
 fn render_terminal_pane(
     terminal: Entity<Terminal>,
     tab: Entity<TerminalTab>,
@@ -2006,7 +2721,11 @@ impl Render for TerminalWindowView {
                     )
                     .with_priority(1)
                 }))
+                .children(self.render_tab_rename_dialog(window, cx))
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if this.tab_rename.is_some() {
+                        return;
+                    }
                     // Keys that no keymap binding consumed (Enter, Tab, arrows,
                     // Ctrl+C, ...) are translated to ANSI and sent to the pty,
                     // mirroring Zed's `TerminalView::key_down`. Targets the pane
@@ -2241,6 +2960,7 @@ mod tests {
                 active_tab_index,
                 context_menu: None,
                 context_navigation_target: None,
+                tab_rename: None,
                 titlebar_mouse_down: std::cell::Cell::new(false),
                 tab_bar_scroll_handle: ScrollHandle::new(),
                 tab_bar_has_overflow: false,
@@ -2251,6 +2971,23 @@ mod tests {
                 _subscriptions: vec![settings_subscription],
             }
         })
+    }
+
+    #[gpui::test]
+    fn fixed_tab_title_overrides_generated_title_until_cleared(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        cx.update(|cx| {
+            let settings = TerminalSettings::get_global(cx).clone();
+            let pane = new_test_pane(&settings, 50_002, cx);
+            let mut tab = WindowTab::new(pane);
+            let generated_title = tab.title(cx);
+
+            tab.set_title_override("Pinned".to_string());
+            assert_eq!(tab.title(cx), "Pinned");
+
+            tab.set_title_override("  ".to_string());
+            assert_eq!(tab.title(cx), generated_title);
+        });
     }
 
     fn pane_entity_ids(window_view: &Entity<TerminalWindowView>, cx: &App) -> Vec<gpui::EntityId> {
@@ -2321,6 +3058,7 @@ mod tests {
                     split_root: Some(split_root),
                     active_pane_tab: Some(second_pane),
                     maximized_pane_tab: None,
+                    title_override: None,
                 }],
                 0,
                 cx,
@@ -2829,6 +3567,7 @@ mod tests {
             split_root: Some(split_root),
             active_pane_tab: Some(active_pane),
             maximized_pane_tab: None,
+            title_override: None,
         });
         let active_tab_index = tabs.len() - 1;
 
@@ -3289,6 +4028,7 @@ mod tests {
             split_root: Some(split_root),
             active_pane_tab: Some(first),
             maximized_pane_tab: None,
+            title_override: None,
         }];
 
         cx.add_window_view(move |_, cx| {
@@ -3302,6 +4042,7 @@ mod tests {
                 active_tab_index: 0,
                 context_menu: None,
                 context_navigation_target: None,
+                tab_rename: None,
                 titlebar_mouse_down: std::cell::Cell::new(false),
                 tab_bar_scroll_handle: ScrollHandle::new(),
                 tab_bar_has_overflow: false,
@@ -3446,6 +4187,7 @@ mod tests {
                 active_tab_index: 0,
                 context_menu: None,
                 context_navigation_target: None,
+                tab_rename: None,
                 titlebar_mouse_down: std::cell::Cell::new(false),
                 tab_bar_scroll_handle: ScrollHandle::new(),
                 tab_bar_has_overflow: false,
