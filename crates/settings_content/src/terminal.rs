@@ -231,6 +231,11 @@ pub struct TransferSettingsContent {
     ///
     /// Default: 30
     pub idle_timeout_secs: Option<u64>,
+    /// Seconds to keep a finished transfer notification visible. Set to 0
+    /// to keep it visible until manually dismissed.
+    ///
+    /// Default: 10
+    pub notification_timeout_secs: Option<u64>,
     /// Provider ids in adjudication order when several detectors match the
     /// same bytes. Unknown ids are ignored.
     ///

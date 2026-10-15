@@ -560,6 +560,7 @@ manifest 声明驱动，settings 里以 provider id 为 key 的开放表承载�
       "confirm_before_download": true,
       "picker_timeout_secs": 60,     // §5.5.4
       "idle_timeout_secs": 30,       // §5.5.4
+      "notification_timeout_secs": 10, // 传输结束后的提示保留秒数；0 表示不自动关闭
       "priority": ["trzsz", "zmodem"] // 多家同时 match 的裁决顺序；helper id 也允许出现；未知 id 忽略
     }
   }

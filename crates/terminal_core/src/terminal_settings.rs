@@ -70,6 +70,7 @@ pub struct TransferSettings {
     pub confirm_before_download: bool,
     pub picker_timeout_secs: u64,
     pub idle_timeout_secs: u64,
+    pub notification_timeout_secs: u64,
     pub priority: Vec<String>,
     pub providers: HashMap<String, serde_json::Value>,
 }
@@ -89,6 +90,7 @@ impl From<TransferSettingsContent> for TransferSettings {
             confirm_before_download: content.confirm_before_download.unwrap_or(true),
             picker_timeout_secs: content.picker_timeout_secs.unwrap_or(60),
             idle_timeout_secs: content.idle_timeout_secs.unwrap_or(30),
+            notification_timeout_secs: content.notification_timeout_secs.unwrap_or(10),
             priority: content
                 .priority
                 .unwrap_or_else(|| vec!["trzsz".to_string(), "zmodem".to_string()]),

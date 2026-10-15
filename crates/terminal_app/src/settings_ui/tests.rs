@@ -2164,7 +2164,7 @@ fn invalid_structured_shell_text_is_rejected_before_persistence(
 }
 
 #[test]
-fn file_transfer_settings_patch_updates_only_download_options() -> anyhow::Result<()> {
+fn file_transfer_settings_patch_preserves_protocol_options() -> anyhow::Result<()> {
     let defaults: settings::SettingsContent =
         settings::parse_json_with_comments(&settings::default_settings())?;
     let mut draft = settings_page_draft_from_settings(
@@ -2177,12 +2177,14 @@ fn file_transfer_settings_patch_updates_only_download_options() -> anyhow::Resul
         .get_or_insert_with(Default::default);
     transfer.download_dir = Some(PathBuf::from("/tmp/received files"));
     transfer.confirm_before_download = false;
+    transfer.notification_timeout_secs = 0;
 
     let patch = CapturedPatch::Save(Box::new(CapturedSavePatch {
         draft,
         dirty_settings: vec![
             DirtySetting::DownloadDirectory,
             DirtySetting::ConfirmBeforeDownload,
+            DirtySetting::TransferNotificationTimeout,
         ],
         shell: None,
         environment: None,
@@ -2211,6 +2213,7 @@ fn file_transfer_settings_patch_updates_only_download_options() -> anyhow::Resul
         Some("/tmp/received files")
     );
     assert_eq!(transfer.confirm_before_download, Some(false));
+    assert_eq!(transfer.notification_timeout_secs, Some(0));
     assert_eq!(transfer.max_file_size_mb, Some(512));
     Ok(())
 }

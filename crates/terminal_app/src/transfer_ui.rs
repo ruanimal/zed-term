@@ -3,9 +3,11 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
-    App, Context, Entity, IntoElement, ParentElement, RenderOnce, Styled, Window, div, relative,
+    App, Context, Entity, IntoElement, ParentElement, RenderOnce, Styled, Task, Window, div,
+    relative,
 };
 use settings::Settings as _;
 use terminal_core::terminal_settings::{TerminalSettings, TransferSettings};
@@ -154,6 +156,7 @@ pub struct TransferUiState {
     active: Option<ActiveTransfer>,
     finished: Option<FinishedTransfer>,
     hint: Option<String>,
+    dismiss_task: Option<Task<()>>,
 }
 
 impl TransferUiState {
@@ -166,6 +169,7 @@ impl TransferUiState {
     /// active session is not affected: it is owned by the driver, and the
     /// button cancels it instead of dismissing the overlay.
     pub(crate) fn dismiss(&mut self) {
+        self.dismiss_task = None;
         self.finished = None;
         self.hint = None;
     }
@@ -176,12 +180,19 @@ impl TransferUiState {
         terminal: &Entity<Terminal>,
         cx: &mut Context<crate::terminal::TerminalTab>,
     ) {
+        let finished = matches!(
+            &event,
+            TransferUiEvent::Completed { .. }
+                | TransferUiEvent::Failed { .. }
+                | TransferUiEvent::Cancelled
+        );
         match event {
             TransferUiEvent::Detected {
                 provider_id: provider,
                 direction,
                 remote_names,
             } => {
+                self.dismiss_task = None;
                 log::info!(
                     "transfer detected: provider={} direction={:?} names={remote_names:?}",
                     provider,
@@ -244,6 +255,32 @@ impl TransferUiState {
                 self.hint = Some("Transfer in progress — press Esc to cancel".into());
             }
         }
+        if finished {
+            self.schedule_dismiss(cx);
+        }
+    }
+
+    fn schedule_dismiss(&mut self, cx: &mut Context<crate::terminal::TerminalTab>) {
+        self.dismiss_task = None;
+        let timeout_secs = TerminalSettings::get_global(cx)
+            .transfer
+            .as_ref()
+            .map_or(10, |settings| settings.notification_timeout_secs);
+        if timeout_secs == 0 {
+            return;
+        }
+        let timer = cx
+            .background_executor()
+            .timer(Duration::from_secs(timeout_secs));
+        self.dismiss_task = Some(cx.spawn(async move |this, cx| {
+            timer.await;
+            if let Err(error) = this.update(cx, |this, cx| {
+                this.transfer_ui.dismiss();
+                cx.notify();
+            }) {
+                log::debug!("transfer notification was closed: {error}");
+            }
+        }));
     }
 
     /// A session-side cancellation. A dialog that failed to open has already
@@ -289,6 +326,7 @@ impl TransferUiState {
                         });
                         this.transfer_ui
                             .fail(format!("无法打开文件选择器: {error}"));
+                        this.transfer_ui.schedule_dismiss(cx);
                         cx.notify();
                     }) {
                         log::debug!("transfer file picker error UI was closed: {update_error}");
@@ -349,6 +387,7 @@ impl TransferUiState {
                         });
                         this.transfer_ui
                             .fail(format!("无法打开目录选择器: {error}"));
+                        this.transfer_ui.schedule_dismiss(cx);
                         cx.notify();
                     }) {
                         log::debug!(

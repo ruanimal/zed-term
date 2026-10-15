@@ -1095,6 +1095,107 @@ mod tests {
         assert!(!cx.did_prompt_for_paths());
     }
 
+    fn transfer_event(
+        pane: &Entity<TerminalTab>,
+        event: terminal_core::TransferUiEvent,
+        cx: &mut gpui::TestAppContext,
+    ) {
+        pane.update(cx, |pane, cx| {
+            let terminal = pane.terminal.clone();
+            pane.transfer_ui.handle(event, &terminal, cx);
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn transfer_notification_closes_after_default_timeout(cx: &mut gpui::TestAppContext) {
+        let pane = pane_with_output(cx, "");
+        transfer_event(
+            &pane,
+            terminal_core::TransferUiEvent::Completed { paths: vec![] },
+            cx,
+        );
+        cx.background_executor.advance_clock(Duration::from_secs(9));
+        cx.run_until_parked();
+        assert!(!pane.read_with(cx, |pane, _| pane.transfer_ui.is_empty()));
+        cx.background_executor.advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| pane.transfer_ui.is_empty()));
+    }
+
+    #[gpui::test]
+    fn transfer_notification_respects_custom_and_disabled_timeout(cx: &mut gpui::TestAppContext) {
+        let pane = pane_with_output(cx, "");
+        for timeout in [2, 0] {
+            cx.update(|cx| {
+                SettingsStore::update_global(cx, |store, cx| {
+                    store.update_user_settings(cx, |content| {
+                        content
+                            .terminal
+                            .get_or_insert_default()
+                            .transfer
+                            .get_or_insert_default()
+                            .notification_timeout_secs = Some(timeout);
+                    });
+                });
+            });
+            for event in [
+                terminal_core::TransferUiEvent::Completed { paths: vec![] },
+                terminal_core::TransferUiEvent::Failed {
+                    reason: "test failure".into(),
+                },
+                terminal_core::TransferUiEvent::Cancelled,
+            ] {
+                transfer_event(&pane, event, cx);
+                cx.background_executor.advance_clock(Duration::from_secs(1));
+                cx.run_until_parked();
+                assert!(!pane.read_with(cx, |pane, _| pane.transfer_ui.is_empty()));
+                cx.background_executor
+                    .advance_clock(Duration::from_secs(60));
+                cx.run_until_parked();
+                assert_eq!(
+                    pane.read_with(cx, |pane, _| pane.transfer_ui.is_empty()),
+                    timeout != 0
+                );
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn old_transfer_timeout_does_not_close_a_new_transfer(cx: &mut gpui::TestAppContext) {
+        let pane = pane_with_output(cx, "");
+        transfer_event(
+            &pane,
+            terminal_core::TransferUiEvent::Completed { paths: vec![] },
+            cx,
+        );
+        cx.background_executor.advance_clock(Duration::from_secs(5));
+        cx.run_until_parked();
+        transfer_event(
+            &pane,
+            terminal_core::TransferUiEvent::Detected {
+                provider_id: "trzsz".into(),
+                direction: Some(terminal_core::Direction::Download),
+                remote_names: vec![],
+            },
+            cx,
+        );
+        cx.background_executor.advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(!pane.read_with(cx, |pane, _| pane.transfer_ui.is_empty()));
+        transfer_event(
+            &pane,
+            terminal_core::TransferUiEvent::Completed { paths: vec![] },
+            cx,
+        );
+        cx.background_executor.advance_clock(Duration::from_secs(4));
+        cx.run_until_parked();
+        assert!(!pane.read_with(cx, |pane, _| pane.transfer_ui.is_empty()));
+        cx.background_executor.advance_clock(Duration::from_secs(6));
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| pane.transfer_ui.is_empty()));
+    }
+
     #[gpui::test]
     async fn blink_changed_resets_phase_on_existing_pane(cx: &mut gpui::TestAppContext) {
         let pane = cx.update(|cx| {

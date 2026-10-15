@@ -1123,6 +1123,32 @@ impl Render for SettingsPage {
                     }
                 },
             ))
+            .child(self.number_row(
+                cx,
+                "Transfer notification timeout",
+                "Seconds before a finished transfer notification closes. Set to 0 to keep it open.",
+                format!("{} s", transfer_settings.notification_timeout_secs),
+                {
+                    let page = page.clone();
+                    move |cx, delta| {
+                        page.update(cx, |this, cx| {
+                            this.update_draft(
+                                DirtySetting::TransferNotificationTimeout,
+                                |settings| {
+                                    let transfer = settings.transfer.get_or_insert_with(Default::default);
+                                    transfer.notification_timeout_secs = if delta < 0.0 {
+                                        transfer.notification_timeout_secs.saturating_sub(1)
+                                    } else {
+                                        transfer.notification_timeout_secs.saturating_add(1)
+                                    };
+                                },
+                                cx,
+                            );
+                        })
+                        .log_err();
+                    }
+                },
+            ))
             .child(self.section_header("Shell and environment", cx))
             .child(self.render_shell_form(window, cx))
             .child(self.row(

@@ -151,6 +151,7 @@ enum DirtySetting {
     WorkingDirectory,
     DownloadDirectory,
     ConfirmBeforeDownload,
+    TransferNotificationTimeout,
     ScrollMultiplier,
     MaxScrollHistoryLines,
     Scrollbar,
@@ -502,6 +503,19 @@ impl CapturedPatch {
                                     .is_none_or(|transfer| transfer.confirm_before_download),
                             );
                         }
+                        DirtySetting::TransferNotificationTimeout => {
+                            terminal
+                                .transfer
+                                .get_or_insert_with(Default::default)
+                                .notification_timeout_secs = Some(
+                                patch
+                                    .draft
+                                    .draft_settings
+                                    .transfer
+                                    .as_ref()
+                                    .map_or(10, |transfer| transfer.notification_timeout_secs),
+                            );
+                        }
                         DirtySetting::ScrollMultiplier => {
                             terminal.scroll_multiplier =
                                 Some(patch.draft.draft_settings.scroll_multiplier);
@@ -654,6 +668,16 @@ impl SettingsPage {
                             .transfer
                             .get_or_insert_with(Default::default)
                             .confirm_before_download = confirm_before_download;
+                    }
+                    DirtySetting::TransferNotificationTimeout => {
+                        preview_settings
+                            .transfer
+                            .get_or_insert_with(Default::default)
+                            .notification_timeout_secs = self
+                            .draft_settings
+                            .transfer
+                            .as_ref()
+                            .map_or(10, |transfer| transfer.notification_timeout_secs);
                     }
                     DirtySetting::ScrollMultiplier => {
                         preview_settings.scroll_multiplier = self.draft_settings.scroll_multiplier;
@@ -840,6 +864,16 @@ impl SettingsPage {
                     .transfer
                     .get_or_insert_with(Default::default)
                     .confirm_before_download = confirm_before_download;
+            }
+            DirtySetting::TransferNotificationTimeout => {
+                self.draft_settings
+                    .transfer
+                    .get_or_insert_with(Default::default)
+                    .notification_timeout_secs = source
+                    .draft_settings
+                    .transfer
+                    .as_ref()
+                    .map_or(10, |transfer| transfer.notification_timeout_secs);
             }
             DirtySetting::ScrollMultiplier => {
                 self.draft_settings.scroll_multiplier = source.draft_settings.scroll_multiplier;
