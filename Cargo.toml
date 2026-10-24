@@ -506,6 +506,8 @@ features = [
 ]
 
 [patch.crates-io]
+# Fix block 0.1.6's uninhabited extern static without changing its API.
+block = { git = "https://github.com/Dicklesworthstone/rust-block", rev = "7c33ca4aabc0486fc14ea5bd897307c7563aadea" }
 # GPUI's property tests must share our async-closure-capable proptest snapshot.
 proptest = { git = "https://github.com/proptest-rs/proptest", rev = "3dca198a8fef1b32e3a66f1e1897c955b4dc5b5b" }
 # Unify `tree_sitter_language::LanguageFn` between crates.io grammar crates and

@@ -788,8 +788,7 @@ dependencies = [
 [[package]]
 name = "block"
 version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a"
+source = "git+https://github.com/Dicklesworthstone/rust-block?rev=7c33ca4aabc0486fc14ea5bd897307c7563aadea#7c33ca4aabc0486fc14ea5bd897307c7563aadea"
 
 [[package]]
 name = "block-buffer"
