@@ -751,13 +751,7 @@ pub(crate) fn is_context_menu_navigation_target(target: &MaybeNavigationTarget) 
         MaybeNavigationTarget::Url(_) => true,
         MaybeNavigationTarget::PathLike(target) => {
             let parsed = PathWithPosition::parse_str(&target.maybe_path);
-            let path_text = parsed.path.to_string_lossy();
-            parsed.row.is_some()
-                || path_text
-                    .chars()
-                    .any(|character| matches!(character, '/' | '\\' | '.'))
-                || resolve_path_like_target(&target.maybe_path, target.working_directory.as_deref())
-                    .is_some()
+            parsed.path.is_absolute()
         }
     }
 }
@@ -916,23 +910,61 @@ mod tests {
     }
 
     #[test]
-    fn context_menu_navigation_targets_must_look_like_links() {
+    fn context_menu_navigation_targets_require_absolute_paths_or_uris() {
         let target = |maybe_path: &str| {
             MaybeNavigationTarget::PathLike(PathLikeTarget {
                 maybe_path: maybe_path.to_string(),
-                working_directory: None,
+                working_directory: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
             })
         };
 
-        assert!(is_context_menu_navigation_target(
-            &MaybeNavigationTarget::Url("https://zed.dev/".to_string())
-        ));
-        assert!(is_context_menu_navigation_target(&target("src/main.rs")));
-        assert!(is_context_menu_navigation_target(&target(
-            "Cargo.toml:12:3"
-        )));
-        assert!(!is_context_menu_navigation_target(&target("ttys013")));
-        assert!(!is_context_menu_navigation_target(&target("Last")));
+        for uri in [
+            "https://zed.dev/",
+            "http://localhost:8080/",
+            "file:///tmp/example.txt",
+            "ssh://user@example.com/",
+            "mailto:user@example.com",
+            "zed://file/tmp/example.txt",
+        ] {
+            assert!(is_context_menu_navigation_target(
+                &MaybeNavigationTarget::Url(uri.to_string())
+            ));
+        }
+
+        let absolute_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("missing directory/example.rs")
+            .to_string_lossy()
+            .into_owned();
+        for path in [
+            absolute_path.clone(),
+            format!("{absolute_path}:12:3"),
+            format!("{absolute_path}(12,3)"),
+        ] {
+            assert!(is_context_menu_navigation_target(&target(&path)), "{path}");
+        }
+
+        for text in [
+            "ttys013",
+            "Last",
+            "v1.2.3",
+            "example.com",
+            "127.0.0.1",
+            "12:34",
+            ".",
+            "..",
+            "src",
+            "Cargo.toml",
+            "Cargo.toml:12:3",
+            "Cargo.toml(12,3)",
+            "src/main.rs",
+            "src\\main.rs",
+            "./src/main.rs",
+            "../src/main.rs",
+            "~/src/main.rs",
+            "--option=value",
+        ] {
+            assert!(!is_context_menu_navigation_target(&target(text)), "{text}");
+        }
     }
 
     #[test]
