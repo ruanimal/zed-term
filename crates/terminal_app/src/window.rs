@@ -32,7 +32,6 @@ use terminal_core::{
 };
 use theme::ActiveTheme as _;
 use ui::scrollbars::{ScrollbarVisibility, ShowScrollbar};
-use ui::utils::TRAFFIC_LIGHT_PADDING;
 use ui::{
     Button, ButtonCommon as _, ButtonSize, ButtonStyle, Clickable as _, Color, ContextMenu,
     Disableable as _, DynamicSpacing, IconButton, IconButtonShape, IconName, IconSize, Indicator,
@@ -2295,7 +2294,15 @@ impl TerminalWindowView {
             .flex_row()
             .flex_none()
             .when(is_server_decorations, |this| {
-                this.pl(px(TRAFFIC_LIGHT_PADDING))
+                this.child(
+                    div()
+                        .w(window_chrome::TITLE_BAR_TRAFFIC_LIGHT_WIDTH)
+                        .h_full()
+                        .flex_none()
+                        .border_b_1()
+                        .border_r_1()
+                        .border_color(cx.theme().colors().border),
+                )
             })
             .bg(titlebar_background)
             .on_mouse_down(

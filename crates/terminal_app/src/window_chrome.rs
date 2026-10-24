@@ -11,6 +11,7 @@ use ui::prelude::*;
 use ui::{IconButton, IconButtonShape, IconName, IconSize};
 
 pub(crate) const TITLE_BAR_HEIGHT: Pixels = px(28.);
+pub(crate) const TITLE_BAR_TRAFFIC_LIGHT_WIDTH: Pixels = px(71.);
 pub(crate) const TITLE_BAR_TRAFFIC_LIGHT_X: Pixels = px(9.);
 pub(crate) const TITLE_BAR_TRAFFIC_LIGHT_Y: Pixels = px(7.);
 
