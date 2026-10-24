@@ -1502,7 +1502,7 @@ impl SettingsPage {
             return;
         };
 
-        let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
+        let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(cx.background_executor().clone()));
         let completion = SettingsStore::update_global(cx, |store, _| {
             store.update_settings_file_with_completion(fs, move |content, _| {
                 captured_patch.apply(content);

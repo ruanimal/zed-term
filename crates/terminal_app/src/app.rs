@@ -169,7 +169,7 @@ fn load_embedded_themes(cx: &mut App) {
 
 /// Loads user themes from ZedTerm's isolated themes directory.
 fn load_user_themes_in_background(cx: &mut App) {
-    let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
+    let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(cx.background_executor().clone()));
     cx.spawn(async move |cx| {
         let themes_dir = paths::themes_dir().clone();
         if !fs.is_dir(&themes_dir).await {
@@ -239,7 +239,7 @@ fn load_extension_themes_in_background(cx: &mut App) {
 
 /// Watches the ZedTerm user settings file and applies changes live.
 fn watch_user_settings(cx: &mut App) {
-    let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
+    let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(cx.background_executor().clone()));
     SettingsStore::update_global(cx, |store, cx| {
         store.watch_settings_files(fs, cx, |settings_file, result, cx| {
             if matches!(settings_file, settings::SettingsFile::User)
@@ -553,7 +553,7 @@ pub fn reload_keymaps(user_keymap_contents: &str, cx: &mut App) {
 /// Loads `keymap.json` from disk, falling back to the initial template when the
 /// file does not exist yet.
 pub fn load_user_keymap(cx: &mut App) {
-    let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
+    let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(cx.background_executor().clone()));
     cx.spawn(async move |cx| {
         let contents = match keymap::load_user_keymap(&fs).await {
             Ok(contents) => contents,
@@ -570,7 +570,7 @@ pub fn load_user_keymap(cx: &mut App) {
 /// Rewatches `keymap.json` so edits made outside ZedTerm take effect, and keeps
 /// the settings page's keymap tab in sync.
 fn watch_keymap_file(cx: &mut App) {
-    let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
+    let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(cx.background_executor().clone()));
     let (mut receiver, _task) =
         settings::watch_config_file(cx.background_executor(), fs, paths::keymap_file().clone());
     cx.spawn(async move |cx| {

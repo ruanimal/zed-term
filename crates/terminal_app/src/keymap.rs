@@ -964,7 +964,7 @@ impl KeymapTab {
         self.status = Some(("Saving keybinding…".into(), true));
         cx.notify();
 
-        let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
+        let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(cx.background_executor().clone()));
         let keyboard_mapper = cx.keyboard_mapper().clone();
         let deprecated_aliases = cx.deprecated_actions_to_preferred_actions().clone();
 
@@ -1001,7 +1001,7 @@ impl KeymapTab {
         self.status = Some((progress_message.into(), true));
         cx.notify();
 
-        let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
+        let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(cx.background_executor().clone()));
         let keyboard_mapper = cx.keyboard_mapper().clone();
         let deprecated_aliases = cx.deprecated_actions_to_preferred_actions().clone();
 
@@ -1033,7 +1033,7 @@ impl KeymapTab {
         self.status = Some(("Resetting keymap…".into(), true));
         cx.notify();
 
-        let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
+        let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(cx.background_executor().clone()));
         let contents = settings::initial_keymap_content().to_string();
         let reset_contents = contents.clone();
         let completion = cx.spawn(async move |page, cx| {
