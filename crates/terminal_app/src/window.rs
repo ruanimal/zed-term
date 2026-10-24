@@ -142,6 +142,7 @@ struct PaneSubscriptions {
 
 struct TabMoveDestination {
     window: WindowHandle<TerminalWindowView>,
+    title: String,
     position: Option<gpui::Point<Pixels>>,
 }
 
@@ -1139,17 +1140,20 @@ impl TerminalWindowView {
             .filter_map(|handle| handle.downcast::<Self>())
             .filter(|handle| handle.window_id() != source_window)
             .filter_map(|handle| {
-                let position = if positions_available {
-                    Some(
-                        gpui::AnyWindowHandle::from(handle)
-                            .update(cx, |_, window, _| window.bounds().origin)
-                            .log_err()?,
-                    )
-                } else {
-                    None
-                };
+                let (title, position) = handle
+                    .update(cx, |view, window, cx| {
+                        let title = view
+                            .tabs
+                            .get(view.active_tab_index)
+                            .map(|tab| tab.title(cx))
+                            .unwrap_or_else(|| "Terminal".to_string());
+                        let position = positions_available.then(|| window.bounds().origin);
+                        (title, position)
+                    })
+                    .log_err()?;
                 Some(TabMoveDestination {
                     window: handle,
+                    title,
                     position,
                 })
             })
@@ -2222,14 +2226,15 @@ impl TerminalWindowView {
                     for (index, destination) in target_windows.iter().enumerate() {
                         let source = view.clone();
                         let pane = pane.clone();
+                        let title = util::truncate_and_trailoff(&destination.title, 40);
                         let label = match destination.position {
                             Some(position) => format!(
-                                "Window {} ({:.0}, {:.0})",
+                                "Window {} ({:.0}, {:.0}): {title}",
                                 index + 1,
                                 position.x.as_f32(),
                                 position.y.as_f32(),
                             ),
-                            None => format!("Window {} (position unavailable)", index + 1),
+                            None => format!("Window {}: {title}", index + 1),
                         };
                         let destination = destination.window;
                         menu = menu.entry(label, None, move |window, cx| {

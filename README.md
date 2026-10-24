@@ -16,9 +16,11 @@ macOS is the primary platform. Linux builds and deb packaging are also supported
 - Terminal settings, keymap editing, and theme extension management
 
 Right-click a terminal tab and open **Move Tab to Window**, then choose
-**New Window** or an existing window. On macOS and X11, entries show the window's
-top-left coordinates in logical pixels, such as **Window 1 (120, 80)**, and sort
-from top to bottom, then left to right. Wayland entries show **position unavailable**.
+**New Window** or an existing window. Entries include the active tab's title,
+such as **Window 1: rlj — ssh pve**. On macOS and X11, entries also show the
+window's top-left coordinates in logical pixels, such as
+**Window 1 (120, 80): rlj — ssh pve**, and sort from top to bottom, then left to
+right. Wayland entries omit coordinates and keep a stable order.
 The entire tab moves with its split panes and running sessions; moving the last
 tab closes the source window.
 
