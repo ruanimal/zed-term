@@ -1,34 +1,23 @@
 # ZedTerm
 
+**English** | [简体中文](README.zh-CN.md)
+
 ZedTerm is a standalone terminal application forked from [Zed](https://github.com/zed-industries/zed). It uses the published `gpui-pre` framework snapshots and retains its own UI, theme, settings, and terminal implementation without depending on editor features.
 
 The fork has since diverged and does not track upstream, so a fix here is free to leave Zed's behavior behind. Formats users share with a Zed installation — `keymap.json`, the themes and extensions layout, the data directory — stay compatible on purpose. See [`.rules`](.rules) for what this means when changing code.
 
 macOS is the primary platform. Linux builds and deb packaging are also supported.
 
+![ZedTerm screenshot](docs/screenshot.png)
+
 ## Features
 
 - PTY and shell support with Alacritty terminal parsing
 - Scrolling, search, selection, clipboard, and bell notifications
-- Multiple windows, tabs, and split panes
+- Multiple windows, tabs, split panes, and moving tabs between windows
 - Pane zoom, focus switching, and tab reordering
 - URL, OSC 8, and path link support
-- Terminal settings, keymap editing, and theme extension management
-
-Right-click a terminal tab and open **Move Tab to Window**, then choose
-**New Window** or an existing window. Entries include the active tab's title,
-such as **Window 1: rlj — ssh pve**. On macOS and X11, entries also show the
-window's top-left coordinates in logical pixels, such as
-**Window 1 (120, 80): rlj — ssh pve**, and sort from top to bottom, then left to
-right. Wayland entries omit coordinates and keep a stable order.
-The entire tab moves with its split panes and running sessions; moving the last
-tab closes the source window.
-
-In Settings → Terminal → Shell and environment, **Open from file manager**
-controls whether a directory opens in a new window (the default) or a new tab in
-the most recently active terminal window. If no terminal window is open, ZedTerm
-creates one. The equivalent `settings.json` option is
-`"terminal": { "file_manager_open_mode": "new_tab" }` (or `"new_window"`).
+- Terminal settings, keymap editing, theme extension management, and file manager integration
 
 ## Project Structure
 
