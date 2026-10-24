@@ -55,7 +55,8 @@ use crate::window_chrome;
 use crate::{
     ActivateNextPane, ActivatePreviousPane, CloseAll, CloseLeft, CloseOtherTabs, ClosePane,
     CloseRight, CloseTab, CopyLink, NewTab, NewWindow, NextTab, OpenLink, OpenSettings,
-    PreviousTab, SendKeystroke, SendText, SplitDown, SplitLeft, SplitRight, SplitUp, ToggleZoom,
+    PreviousTab, SendKeystroke, SendText, SplitDown, SplitLeft, SplitRight, SplitUp,
+    ToggleFullScreen, ToggleZoom,
 };
 
 /// Fixed content width for every tab so the tab bar does not reflow while
@@ -2262,6 +2263,7 @@ impl TerminalWindowView {
         let titlebar_height = window_chrome::TITLE_BAR_HEIGHT;
         let titlebar_background = cx.theme().colors().tab_bar_background;
         let is_server_decorations = matches!(window.window_decorations(), Decorations::Server);
+        let is_fullscreen = window.is_fullscreen();
         let close_window = cx.listener(|this, _: &ClickEvent, window, cx| {
             this.close_all(&CloseAll, window, cx);
         });
@@ -2273,6 +2275,9 @@ impl TerminalWindowView {
         } else {
             tab_bar.start_child(left_controls).end_child(right_controls)
         };
+        let tab_bar = tab_bar.when(is_fullscreen, |tab_bar| {
+            tab_bar.end_child(self.render_exit_fullscreen_button(cx))
+        });
         div()
             .id("title-bar")
             .on_drop(
@@ -2293,7 +2298,7 @@ impl TerminalWindowView {
             .flex()
             .flex_row()
             .flex_none()
-            .when(is_server_decorations, |this| {
+            .when(is_server_decorations && !is_fullscreen, |this| {
                 this.child(
                     div()
                         .w(window_chrome::TITLE_BAR_TRAFFIC_LIGHT_WIDTH)
@@ -2337,6 +2342,29 @@ impl TerminalWindowView {
                     .h_full()
                     .child(tab_bar),
             )
+    }
+
+    fn render_exit_fullscreen_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .debug_selector(|| "exit-fullscreen".to_string())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                IconButton::new("exit-fullscreen", IconName::Minimize)
+                    .icon_size(IconSize::XSmall)
+                    .aria_label("Exit Full Screen")
+                    .tooltip(Tooltip::for_action_title(
+                        "Exit Full Screen",
+                        &ToggleFullScreen,
+                    ))
+                    .on_click(cx.listener(|_, _, window, cx| {
+                        cx.stop_propagation();
+                        if window.is_fullscreen() {
+                            window.toggle_fullscreen();
+                            window.refresh();
+                        }
+                    })),
+            )
+            .into_any_element()
     }
 
     fn scroll_tab_bar(&mut self, direction: TabBarScrollDirection, cx: &mut Context<Self>) {
@@ -3017,6 +3045,10 @@ impl Render for TerminalWindowView {
                 .on_action(cx.listener(Self::previous_tab))
                 .on_action(cx.listener(Self::new_window))
                 .on_action(cx.listener(Self::open_settings))
+                .on_action(|_: &ToggleFullScreen, window, _| {
+                    window.toggle_fullscreen();
+                    window.refresh();
+                })
                 .when(in_split_layout, |this| {
                     this.on_action(cx.listener(Self::activate_next_pane))
                         .on_action(cx.listener(Self::activate_previous_pane))
@@ -3457,6 +3489,131 @@ mod tests {
                 _subscriptions: vec![settings_subscription],
             }
         })
+    }
+
+    #[gpui::test]
+    fn native_fullscreen_updates_titlebar_layout(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        let handle = cx.update(|cx| {
+            let settings = TerminalSettings::get_global(cx).clone();
+            let pane = new_test_pane(&settings, 50_003, cx);
+            tab_drag_window(vec![WindowTab::new(pane)], gpui::Point::default(), cx)
+        });
+        cx.run_until_parked();
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        for fullscreen in [false, true, false] {
+            visual.update(|window, cx| {
+                if window.is_fullscreen() != fullscreen {
+                    window.toggle_fullscreen();
+                }
+                window.draw(cx).clear(cx);
+            });
+            let tab_bounds = visual
+                .debug_bounds("TAB-0")
+                .expect("first tab should render");
+            assert_eq!(
+                tab_bounds.origin.x,
+                if fullscreen {
+                    px(0.)
+                } else {
+                    window_chrome::TITLE_BAR_TRAFFIC_LIGHT_WIDTH
+                },
+                "the traffic-light spacer should only exist outside fullscreen"
+            );
+            assert_eq!(visual.debug_bounds("exit-fullscreen").is_some(), fullscreen);
+        }
+    }
+
+    #[gpui::test]
+    fn fullscreen_exit_button_remains_visible_when_tabs_overflow(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        let handle = cx.update(|cx| {
+            let settings = TerminalSettings::get_global(cx).clone();
+            let tabs = (0..12)
+                .map(|index| WindowTab::new(new_test_pane(&settings, 50_010 + index, cx)))
+                .collect();
+            tab_drag_window(tabs, gpui::Point::default(), cx)
+        });
+        cx.run_until_parked();
+        let view = cx.update(|cx| handle.entity(cx).expect("window view"));
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        visual.update(|window, cx| {
+            window.toggle_fullscreen();
+            window.draw(cx).clear(cx);
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            assert!(view.read(cx).tab_bar_has_overflow);
+            window.draw(cx).clear(cx);
+        });
+        let button = visual
+            .debug_bounds("exit-fullscreen")
+            .expect("exit button should render");
+        visual.update(|window, _| {
+            assert!(
+                Bounds::new(gpui::Point::default(), window.viewport_size())
+                    .contains(&button.center())
+            );
+        });
+        visual.simulate_mouse_down(
+            button.center(),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        visual.update(|_, cx| {
+            assert!(!view.read(cx).titlebar_mouse_down.get());
+        });
+        visual.simulate_mouse_up(
+            button.center(),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        visual.run_until_parked();
+        visual.update(|window, _| assert!(!window.is_fullscreen()));
+        assert!(visual.debug_bounds("exit-fullscreen").is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn fullscreen_shortcut_works_with_terminal_and_search_focused(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        let (handle, pane) = cx.update(|cx| {
+            crate::bind_default_keys(cx);
+            let settings = TerminalSettings::get_global(cx).clone();
+            let pane = new_test_pane(&settings, 50_004, cx);
+            let handle = tab_drag_window(
+                vec![WindowTab::new(pane.clone())],
+                gpui::Point::default(),
+                cx,
+            );
+            (handle, pane)
+        });
+        cx.run_until_parked();
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        visual.update(|window, cx| {
+            window.toggle_fullscreen();
+            window.draw(cx).clear(cx);
+        });
+        visual.simulate_keystrokes("escape");
+        visual.update(|window, _| assert!(window.is_fullscreen()));
+        visual.simulate_keystrokes("ctrl-cmd-f");
+        visual.run_until_parked();
+        visual.update(|window, _| assert!(!window.is_fullscreen()));
+        visual.simulate_keystrokes("ctrl-cmd-f");
+        visual.run_until_parked();
+        visual.update(|window, _| assert!(window.is_fullscreen()));
+        pane.update_in(&mut visual, |pane, window, cx| {
+            pane.toggle_search(window, cx)
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| assert!(pane.read(cx).search_focus_handle.is_focused(window)));
+        visual.simulate_keystrokes("ctrl-cmd-f");
+        visual.run_until_parked();
+        visual.update(|window, cx| {
+            assert!(!window.is_fullscreen());
+            assert!(pane.read(cx).search_active);
+        });
     }
 
     #[gpui::test]

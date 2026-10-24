@@ -52,6 +52,8 @@ actions!(
         PreviousTab,
         NewWindow,
         OpenSettings,
+        /// Toggles the window's native fullscreen mode.
+        ToggleFullScreen,
         /// Splits the focused pane to the right (new terminal).
         SplitRight,
         /// Splits the focused pane downward (new terminal).
@@ -511,6 +513,12 @@ pub fn bind_default_keys(cx: &mut App) {
         KeyBinding::new("cmd-alt-right", ActivateNextPane, Some("TerminalWindow")),
         KeyBinding::new("shift-escape", ToggleZoom, Some("TerminalWindow")),
     ];
+    #[cfg(target_os = "macos")]
+    bindings.push(KeyBinding::new(
+        "ctrl-cmd-f",
+        ToggleFullScreen,
+        Some("TerminalWindow"),
+    ));
     // The keystroke recorder in the settings page's keymap tab looks these up in
     // its own context, mirroring Zed's `keystroke_input` bindings. Without them
     // recording could be started but never stopped.
