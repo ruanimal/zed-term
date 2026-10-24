@@ -122,6 +122,7 @@ pub struct TerminalWindowView {
     tab_rename: Option<TabRenameState>,
     /// Left-button state for the titlebar strip drag gesture.
     titlebar_mouse_down: std::cell::Cell<bool>,
+    tab_drag: Option<WeakEntity<DraggedTerminalTab>>,
     /// Tracks the tab bar's horizontal scroll so an activated tab can be
     /// scrolled back into view when the tabs overflow.
     tab_bar_scroll_handle: ScrollHandle,
@@ -493,6 +494,8 @@ fn replace_tab_rename_text(
 struct DraggedTerminalTab {
     source_window: gpui::EntityId,
     source_view: WeakEntity<TerminalWindowView>,
+    source_handle: WindowHandle<TerminalWindowView>,
+    hovered_window: std::rc::Rc<std::cell::Cell<Option<gpui::AnyWindowHandle>>>,
     pane: Entity<TerminalTab>,
     title: String,
     is_active: bool,
@@ -556,6 +559,7 @@ impl TerminalWindowView {
             context_navigation_target: None,
             tab_rename: None,
             titlebar_mouse_down: std::cell::Cell::new(false),
+            tab_drag: None,
             tab_bar_scroll_handle: ScrollHandle::new(),
             tab_bar_has_overflow: false,
             tab_bar_can_scroll_left: false,
@@ -863,6 +867,18 @@ impl TerminalWindowView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
+        self.move_tab_to_window_at(pane, destination, None, None, window, cx)
+    }
+
+    fn move_tab_to_window_at(
+        &mut self,
+        pane: &Entity<TerminalTab>,
+        destination: Option<WindowHandle<Self>>,
+        before_pane: Option<&Entity<TerminalTab>>,
+        new_window_bounds: Option<Bounds<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
         if destination.is_some_and(|destination| {
             destination.window_id() == window.window_handle().window_id()
         }) {
@@ -881,7 +897,15 @@ impl TerminalWindowView {
         let is_new_window = destination.is_none();
         let destination = match destination {
             Some(destination) => destination,
-            None => crate::open_empty_terminal_window(cx)?,
+            None => match new_window_bounds {
+                Some(bounds) => crate::create_terminal_window(
+                    bounds,
+                    window.display(cx).map(|display| display.id()),
+                    cx,
+                    Self::new_empty,
+                )?,
+                None => crate::open_empty_terminal_window(cx)?,
+            },
         };
 
         // Keep the source intact until the destination accepts the live entities;
@@ -896,9 +920,12 @@ impl TerminalWindowView {
                     .map(|subscriptions| subscriptions.event_subscription);
                 target.observe_tab_with_subscription(pane, event_subscription, cx);
             }
-            target.tabs.push(tab);
+            let insertion_index = before_pane
+                .and_then(|pane| target.tabs.iter().position(|tab| tab.contains_pane(pane)))
+                .unwrap_or(target.tabs.len());
+            target.tabs.insert(insertion_index, tab);
             target.terminal_error = None;
-            target.activate_tab(target.tabs.len() - 1, window, cx);
+            target.activate_tab(insertion_index, window, cx);
             window.activate_window();
         }) {
             if is_new_window {
@@ -931,6 +958,160 @@ impl TerminalWindowView {
         Ok(())
     }
 
+    fn drop_tab(
+        dragged: &DraggedTerminalTab,
+        before_pane: Option<Entity<TerminalTab>>,
+        window: &Window,
+        cx: &mut App,
+    ) {
+        if cx.compositor_name() == "Wayland" {
+            return;
+        }
+        let destination = window.window_handle().downcast::<Self>();
+        let dragged = dragged.clone();
+        // The target view and window are borrowed by event dispatch. Move only after
+        // they are released, using the source window for its close/focus semantics.
+        cx.defer(move |cx| {
+            dragged
+                .source_handle
+                .update(cx, |source, window, cx| {
+                    if !source
+                        .tabs
+                        .iter()
+                        .any(|tab| tab.contains_pane(&dragged.pane))
+                    {
+                        return;
+                    }
+                    if let Err(error) = source.move_tab_to_window_at(
+                        &dragged.pane,
+                        destination,
+                        before_pane.as_ref(),
+                        None,
+                        window,
+                        cx,
+                    ) {
+                        source.report_tab_move_error(error, cx);
+                    }
+                })
+                .log_err();
+        });
+    }
+
+    fn report_tab_move_error(&mut self, error: anyhow::Error, cx: &mut Context<Self>) {
+        log::error!("Could not move terminal tab: {error:#}");
+        self.terminal_error = Some(format!("Could not move terminal tab: {error:#}"));
+        cx.notify();
+    }
+
+    fn window_under_tab_drag(
+        position: gpui::Point<Pixels>,
+        source: &Window,
+        cx: &mut App,
+    ) -> Option<(gpui::AnyWindowHandle, gpui::Point<Pixels>)> {
+        if cx.compositor_name() == "Wayland" {
+            return None;
+        }
+        let screen_position = source.bounds().origin + position;
+        let source_display = source.display(cx).map(|display| display.id());
+        for handle in cx.window_stack().unwrap_or_else(|| cx.windows()) {
+            if handle == source.window_handle() {
+                continue;
+            }
+            if let Some(position) = handle
+                .update(cx, |_, window, cx| {
+                    // macOS exposes display-local bounds, so comparing different
+                    // displays would pick windows at unrelated physical positions.
+                    if cfg!(target_os = "macos")
+                        && window.display(cx).map(|display| display.id()) != source_display
+                    {
+                        return None;
+                    }
+                    window
+                        .bounds()
+                        .contains(&screen_position)
+                        .then_some(screen_position - window.bounds().origin)
+                })
+                .log_err()
+                .flatten()
+            {
+                return Some((handle, position));
+            }
+        }
+        None
+    }
+
+    fn finish_tab_drag_outside(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if cx.compositor_name() == "Wayland"
+            || !cx.has_active_drag()
+            || Bounds::new(gpui::Point::default(), window.viewport_size()).contains(&event.position)
+        {
+            return;
+        }
+        let Some(dragged) = self
+            .tab_drag
+            .take()
+            .and_then(|drag| drag.read_with(cx, |drag, _| drag.clone()).ok())
+        else {
+            return;
+        };
+        if !self.tabs.iter().any(|tab| tab.contains_pane(&dragged.pane)) {
+            cx.stop_active_drag(window);
+            cx.refresh_windows();
+            return;
+        }
+        if let Some((target, position)) = Self::window_under_tab_drag(event.position, window, cx) {
+            let mut event = event.clone();
+            event.position = position;
+            target
+                .update(cx, |_, window, cx| {
+                    // Release can arrive without a preceding move at this position.
+                    // Update hit testing and input modality before resolving the drop.
+                    window.dispatch_event(
+                        gpui::PlatformInput::MouseMove(MouseMoveEvent {
+                            position,
+                            pressed_button: Some(MouseButton::Left),
+                            modifiers: event.modifiers,
+                        }),
+                        cx,
+                    );
+                    window.dispatch_event(gpui::PlatformInput::MouseUp(event), cx);
+                })
+                .log_err();
+            cx.stop_active_drag(window);
+            cx.refresh_windows();
+            return;
+        }
+        cx.stop_active_drag(window);
+        cx.refresh_windows();
+        let mut bounds = Bounds::new(
+            window.bounds().origin + event.position - gpui::point(px(60.), px(16.)),
+            window.viewport_size(),
+        );
+        if cfg!(target_os = "macos")
+            && let Some(display) = window.display(cx)
+        {
+            let visible = display.visible_bounds();
+            bounds.origin.x = bounds.origin.x.clamp(
+                visible.left(),
+                (visible.right() - bounds.size.width).max(visible.left()),
+            );
+            bounds.origin.y = bounds.origin.y.clamp(
+                visible.top(),
+                (visible.bottom() - bounds.size.height).max(visible.top()),
+            );
+        }
+        if let Err(error) =
+            self.move_tab_to_window_at(&dragged.pane, None, None, Some(bounds), window, cx)
+        {
+            self.report_tab_move_error(error, cx);
+        }
+    }
+
     fn request_tab_move(
         source: &WeakEntity<Self>,
         pane: &Entity<TerminalTab>,
@@ -941,9 +1122,7 @@ impl TerminalWindowView {
         source
             .update(cx, |this, cx| {
                 if let Err(error) = this.move_tab_to_window(pane, destination, window, cx) {
-                    log::error!("Could not move terminal tab: {error:#}");
-                    this.terminal_error = Some(format!("Could not move terminal tab: {error:#}"));
-                    cx.notify();
+                    this.report_tab_move_error(error, cx);
                 }
             })
             .log_err();
@@ -2092,6 +2271,20 @@ impl TerminalWindowView {
         };
         div()
             .id("title-bar")
+            .on_drop(
+                cx.listener(|this, dragged: &DraggedTerminalTab, window, cx| {
+                    if dragged.source_window == cx.entity_id() {
+                        if let Some(pane) = this.tabs.last().and_then(WindowTab::focused_tab) {
+                            this.reorder_tab(dragged, &pane, cx);
+                        }
+                    } else {
+                        Self::drop_tab(dragged, None, window, cx);
+                    }
+                }),
+            )
+            .drag_over::<DraggedTerminalTab>(|style, _, _, cx| {
+                style.bg(cx.theme().colors().drop_target_background)
+            })
             .h(titlebar_height)
             .flex()
             .flex_row()
@@ -2224,7 +2417,7 @@ impl TerminalWindowView {
                 // In split layout the tab bar shows a single synthetic tab
                 // that follows the focused pane; split panes do not become
                 // separate tabs (per product decision).
-                self.render_tab_children(cx),
+                self.render_tab_children(window, cx),
             );
         let new_tab_button = self.render_new_tab_button(cx);
         if self.tab_bar_has_overflow {
@@ -2269,7 +2462,7 @@ impl TerminalWindowView {
 
     /// The tab title follows the focused pane unless the user has renamed it,
     /// in which case the custom title stays fixed.
-    fn render_tab_children(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_tab_children(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let tab_count = self.tabs.len();
         let source_window = cx.entity_id();
         let source_view = cx.weak_entity();
@@ -2281,13 +2474,17 @@ impl TerminalWindowView {
                 let pane = tab.focused_tab();
                 let full_title = tab.title(cx);
                 let title = util::truncate_and_trailoff(&full_title, TAB_TITLE_MAX_CHARS);
-                let dragged_tab = pane.map(|pane| DraggedTerminalTab {
-                    source_window,
-                    source_view: source_view.clone(),
-                    pane,
-                    title: title.clone(),
-                    is_active: idx == self.active_tab_index,
-                });
+                let dragged_tab =
+                    pane.zip(window.window_handle().downcast())
+                        .map(|(pane, source_handle)| DraggedTerminalTab {
+                            source_window,
+                            source_view: source_view.clone(),
+                            source_handle,
+                            hovered_window: Default::default(),
+                            pane,
+                            title: title.clone(),
+                            is_active: idx == self.active_tab_index,
+                        });
                 let position = if idx == 0 {
                     TabPosition::First
                 } else if idx == tab_count - 1 {
@@ -2357,9 +2554,15 @@ impl TerminalWindowView {
                     .when_some(dragged_tab, |this, dragged_tab| {
                         let target_pane = dragged_tab.pane.clone();
                         let drag_over_target_pane = target_pane.clone();
-                        let source_window = dragged_tab.source_window;
                         this.on_drag(dragged_tab, |dragged_tab, _, _, cx| {
-                            cx.new(|_| dragged_tab.clone())
+                            let preview = cx.new(|_| dragged_tab.clone());
+                            dragged_tab
+                                .source_view
+                                .update(cx, |view, _| {
+                                    view.tab_drag = Some(preview.downgrade());
+                                })
+                                .log_err();
+                            preview
                         })
                         .drag_over::<DraggedTerminalTab>(move |style, dragged_tab, _window, cx| {
                             let style = style
@@ -2369,19 +2572,22 @@ impl TerminalWindowView {
                             match dragged_tab.ordering_relative_to(&drag_over_target_pane, cx) {
                                 Some(Ordering::Less) => style.border_l_2(),
                                 Some(Ordering::Greater) => style.border_r_2(),
-                                Some(Ordering::Equal) | None => style,
+                                Some(Ordering::Equal) => style,
+                                None => style.border_l_2(),
                             }
                         })
-                        .can_drop(move |value, _window, _cx| {
-                            value
-                                .downcast_ref::<DraggedTerminalTab>()
-                                .is_some_and(|dragged_tab| {
-                                    dragged_tab.source_window == source_window
-                                })
-                        })
                         .on_drop(cx.listener(
-                            move |this, dragged_tab: &DraggedTerminalTab, _window, cx| {
-                                this.reorder_tab(dragged_tab, &target_pane, cx);
+                            move |this, dragged_tab: &DraggedTerminalTab, window, cx| {
+                                if dragged_tab.source_window == cx.entity_id() {
+                                    this.reorder_tab(dragged_tab, &target_pane, cx);
+                                } else {
+                                    Self::drop_tab(
+                                        dragged_tab,
+                                        Some(target_pane.clone()),
+                                        window,
+                                        cx,
+                                    );
+                                }
                             },
                         ))
                     })
@@ -2809,6 +3015,65 @@ impl Render for TerminalWindowView {
                 .on_action(cx.listener(Self::split_up))
                 .on_action(cx.listener(Self::split_down))
                 .on_action(cx.listener(Self::toggle_zoom))
+                .on_drop(cx.listener(|_, dragged: &DraggedTerminalTab, window, cx| {
+                    if dragged.source_window != cx.entity_id() {
+                        Self::drop_tab(dragged, None, window, cx);
+                    }
+                }))
+                .on_drag_move::<DraggedTerminalTab>(cx.listener(
+                    |_, event: &gpui::DragMoveEvent<DraggedTerminalTab>, window, cx| {
+                        let dragged = event.drag(cx).clone();
+                        if dragged.source_window != cx.entity_id() {
+                            return;
+                        }
+                        let target = (!Bounds::new(gpui::Point::default(), window.viewport_size())
+                            .contains(&event.event.position))
+                        .then(|| Self::window_under_tab_drag(event.event.position, window, cx))
+                        .flatten();
+                        let screen_position = window.bounds().origin + event.event.position;
+                        let previous = dragged
+                            .hovered_window
+                            .replace(target.map(|(handle, _)| handle));
+                        if let Some(previous) = previous
+                            .filter(|previous| Some(*previous) != target.map(|(handle, _)| handle))
+                        {
+                            previous
+                                .update(cx, |_, window, cx| {
+                                    window.dispatch_event(
+                                        gpui::PlatformInput::MouseMove(MouseMoveEvent {
+                                            position: screen_position - window.bounds().origin,
+                                            ..event.event.clone()
+                                        }),
+                                        cx,
+                                    );
+                                })
+                                .log_err();
+                        }
+                        if let Some((target, position)) = target {
+                            let mut event = event.event.clone();
+                            event.position = position;
+                            target
+                                .update(cx, |_, window, cx| {
+                                    window
+                                        .dispatch_event(gpui::PlatformInput::MouseMove(event), cx);
+                                })
+                                .log_err();
+                        }
+                    },
+                ))
+                .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape"
+                        && this
+                            .tab_drag
+                            .as_ref()
+                            .is_some_and(|drag| drag.upgrade().is_some())
+                        && cx.stop_active_drag(window)
+                    {
+                        this.tab_drag = None;
+                        cx.refresh_windows();
+                        cx.stop_propagation();
+                    }
+                }))
                 .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                     // Titlebar drag gesture first (it owns the flag-based latch).
                     if this.titlebar_mouse_down.get() {
@@ -2854,8 +3119,9 @@ impl Render for TerminalWindowView {
                 )
                 .on_mouse_up_out(
                     MouseButton::Left,
-                    cx.listener(|_, _: &MouseUpEvent, _window, _cx| {
+                    cx.listener(|this, event: &MouseUpEvent, window, cx| {
                         split::take_drag_anchor();
+                        this.finish_tab_drag_outside(event, window, cx);
                     }),
                 )
                 .on_mouse_exit(cx.listener(|_, _: &MouseExitEvent, _window, _cx| {
@@ -3168,6 +3434,7 @@ mod tests {
                 context_navigation_target: None,
                 tab_rename: None,
                 titlebar_mouse_down: std::cell::Cell::new(false),
+                tab_drag: None,
                 tab_bar_scroll_handle: ScrollHandle::new(),
                 tab_bar_has_overflow: false,
                 tab_bar_can_scroll_left: false,
@@ -3244,6 +3511,378 @@ mod tests {
             });
             cx.run_until_parked();
         }
+    }
+
+    fn tab_drag_window(
+        tabs: Vec<WindowTab>,
+        origin: gpui::Point<Pixels>,
+        cx: &mut App,
+    ) -> WindowHandle<TerminalWindowView> {
+        let handle = cx
+            .open_window(
+                crate::window_options(Bounds::new(origin, gpui::size(px(700.), px(450.)))),
+                |_, cx| cx.new(TerminalWindowView::new_empty),
+            )
+            .expect("window should open");
+        handle
+            .update(cx, |view, window, cx| {
+                for tab in &tabs {
+                    for pane in tab.panes() {
+                        view.observe_tab(&pane, cx);
+                    }
+                }
+                view.tabs = tabs;
+                view.activate_tab(0, window, cx);
+            })
+            .expect("window should exist");
+        handle
+    }
+
+    fn start_tab_drag(
+        handle: WindowHandle<TerminalWindowView>,
+        selector: &'static str,
+        cx: &mut gpui::TestAppContext,
+    ) -> gpui::VisualTestContext {
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .expect("window should draw");
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        let position = visual.debug_bounds(selector).expect("tab bounds").center();
+        visual.simulate_mouse_down(position, MouseButton::Left, gpui::Modifiers::default());
+        visual.simulate_mouse_move(
+            position + gpui::point(px(5.), px(0.)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.update(|cx| assert!(cx.has_active_drag(), "tab should start dragging"));
+        visual
+    }
+
+    #[gpui::test]
+    fn tab_drag_crosses_windows_at_pointer_insertion_and_preserves_session(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test_theme(cx);
+        let (source, target, moving, target_pane, snapshot) = cx.update(|cx| {
+            let settings = TerminalSettings::get_global(cx).clone();
+            let moving = new_test_pane(&settings, 56_001, cx);
+            let target_pane = new_test_pane(&settings, 56_002, cx);
+            let source = tab_drag_window(
+                vec![WindowTab::new(moving.clone())],
+                gpui::point(px(0.), px(0.)),
+                cx,
+            );
+            let target = tab_drag_window(
+                vec![WindowTab::new(target_pane.clone())],
+                gpui::point(px(1000.), px(0.)),
+                cx,
+            );
+            let snapshot = pane_invariant_snapshots(std::slice::from_ref(&moving), cx);
+            (source, target, moving, target_pane, snapshot)
+        });
+        cx.run_until_parked();
+        cx.update_window(target.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .expect("target should draw");
+        let mut target_visual = gpui::VisualTestContext::from_window(target.into(), cx);
+        let position = target_visual
+            .debug_bounds("TAB-0")
+            .expect("target tab")
+            .center()
+            + gpui::point(px(1000.), px(0.));
+        let mut source_visual = start_tab_drag(source, "TAB-0", cx);
+        source_visual.simulate_mouse_move(position, MouseButton::Left, gpui::Modifiers::default());
+        source_visual.simulate_mouse_move(
+            gpui::point(px(900.), px(600.)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.update_window(target.into(), |_, window, _| {
+            assert_eq!(window.mouse_position(), gpui::point(px(-100.), px(600.)));
+        })
+        .expect("leaving the target updates its real pointer position");
+        source_visual.simulate_mouse_move(position, MouseButton::Left, gpui::Modifiers::default());
+        source_visual.simulate_mouse_up(position, MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                source.entity(cx).is_err(),
+                "last tab closes its source window"
+            );
+            target
+                .update(cx, |view, window, cx| {
+                    assert_eq!(view.tabs.len(), 2);
+                    assert_eq!(
+                        view.tabs.first().and_then(WindowTab::focused_tab),
+                        Some(moving.clone())
+                    );
+                    assert_eq!(
+                        view.tabs.last().and_then(WindowTab::focused_tab),
+                        Some(target_pane)
+                    );
+                    assert_eq!(view.active_tab_index, 0);
+                    assert!(moving.read(cx).focus_handle.is_focused(window));
+                })
+                .expect("target should exist");
+            assert_eq!(
+                pane_invariant_snapshots(std::slice::from_ref(&moving), cx),
+                snapshot
+            );
+            moving.update(cx, |_, cx| cx.emit(TerminalTabEvent::CloseTerminal));
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            target
+                .update(cx, |view, _, _| assert_eq!(view.tabs.len(), 1))
+                .expect("target survives pane exit")
+        });
+    }
+
+    #[gpui::test]
+    fn tab_drag_release_routes_final_position_to_a_keyboard_target(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        let (source, target, moving) = cx.update(|cx| {
+            let settings = TerminalSettings::get_global(cx).clone();
+            let moving = new_test_pane(&settings, 61_001, cx);
+            let target_pane = new_test_pane(&settings, 61_002, cx);
+            let source = tab_drag_window(
+                vec![WindowTab::new(moving.clone())],
+                gpui::point(px(0.), px(0.)),
+                cx,
+            );
+            let target = tab_drag_window(
+                vec![WindowTab::new(target_pane)],
+                gpui::point(px(1000.), px(0.)),
+                cx,
+            );
+            (source, target, moving)
+        });
+        cx.run_until_parked();
+        let mut target_visual = gpui::VisualTestContext::from_window(target.into(), cx);
+        target_visual.simulate_keystrokes("left");
+        let mut visual = start_tab_drag(source, "TAB-0", cx);
+        visual.simulate_mouse_up(
+            gpui::point(px(1100.), px(200.)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.update(|cx| {
+            assert!(
+                source.entity(cx).is_err(),
+                "release at the target must move the last tab"
+            );
+            target
+                .update(cx, |view, _, _| {
+                    assert_eq!(view.tabs.len(), 2);
+                    assert_eq!(view.active_tab(), Some(moving));
+                })
+                .expect("target should receive the dragged tab");
+        });
+    }
+
+    #[gpui::test]
+    fn tab_drag_to_window_content_appends_the_complete_split(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        let (source, target, first, second, snapshot) = cx.update(|cx| {
+            let settings = TerminalSettings::get_global(cx).clone();
+            let first = new_test_pane(&settings, 59_001, cx);
+            let second = new_test_pane(&settings, 59_002, cx);
+            first.update(cx, |pane, _| {
+                pane.search_active = true;
+                pane.search_query = "running work".into();
+            });
+            let mut root = SplitNode::leaf(first.clone());
+            assert!(root.split(&first, second.clone(), SplitDirection::Down));
+            let moving = WindowTab {
+                split_root: Some(root),
+                active_pane_tab: Some(second.clone()),
+                maximized_pane_tab: Some(second.clone()),
+                title_override: Some("Split session".into()),
+            };
+            let remaining = new_test_pane(&settings, 59_003, cx);
+            let target_pane = new_test_pane(&settings, 59_004, cx);
+            let source = tab_drag_window(
+                vec![moving, WindowTab::new(remaining)],
+                gpui::point(px(0.), px(0.)),
+                cx,
+            );
+            let target = tab_drag_window(
+                vec![WindowTab::new(target_pane)],
+                gpui::point(px(1000.), px(0.)),
+                cx,
+            );
+            let snapshot = pane_invariant_snapshots(&[first.clone(), second.clone()], cx);
+            (source, target, first, second, snapshot)
+        });
+        cx.run_until_parked();
+        let mut visual = start_tab_drag(source, "TAB-0", cx);
+        let position = gpui::point(px(1100.), px(200.));
+        visual.simulate_mouse_move(position, MouseButton::Left, gpui::Modifiers::default());
+        visual.simulate_mouse_up(position, MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|cx| {
+            source
+                .update(cx, |view, _, _| assert_eq!(view.tabs.len(), 1))
+                .expect("source keeps its other tab");
+            target
+                .update(cx, |view, window, cx| {
+                    assert_eq!(view.tabs.len(), 2);
+                    assert_eq!(view.active_tab_index, 1);
+                    let moved = view.tabs.last().expect("appended split tab");
+                    assert_eq!(moved.panes(), vec![first.clone(), second.clone()]);
+                    assert_eq!(moved.title(cx), "Split session");
+                    assert_eq!(moved.maximized_pane_tab, Some(second.clone()));
+                    assert!(second.read(cx).focus_handle.is_focused(window));
+                })
+                .expect("target should receive split");
+            assert_eq!(
+                pane_invariant_snapshots(&[first.clone(), second.clone()], cx),
+                snapshot
+            );
+            assert_eq!(first.read(cx).search_query, "running work");
+        });
+    }
+
+    #[gpui::test]
+    fn tab_drag_outside_opens_window_at_release_without_launching_shell(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test_theme(cx);
+        let (source, moving) = cx.update(|cx| {
+            cx.set_global(TestTerminalLaunchFailure {
+                reason: LAUNCH_FAILURE_REASON.into(),
+            });
+            let settings = TerminalSettings::get_global(cx).clone();
+            let moving = new_test_pane(&settings, 57_001, cx);
+            let source = tab_drag_window(
+                vec![WindowTab::new(moving.clone())],
+                gpui::point(px(0.), px(0.)),
+                cx,
+            );
+            (source, moving)
+        });
+        cx.run_until_parked();
+        let mut visual = start_tab_drag(source, "TAB-0", cx);
+        let position = gpui::point(px(900.), px(600.));
+        visual.simulate_mouse_move(position, MouseButton::Left, gpui::Modifiers::default());
+        visual.simulate_mouse_up(position, MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(source.entity(cx).is_err());
+            assert_eq!(cx.windows().len(), 1);
+            let target = cx
+                .windows()
+                .into_iter()
+                .next()
+                .expect("new window")
+                .downcast::<TerminalWindowView>()
+                .expect("terminal window");
+            target
+                .update(cx, |view, window, _cx| {
+                    assert_eq!(view.active_tab(), Some(moving.clone()));
+                    assert!(view.terminal_error.is_none());
+                    assert_eq!(window.bounds().origin, gpui::point(px(840.), px(584.)));
+                })
+                .expect("new window should exist");
+        });
+    }
+
+    #[gpui::test]
+    fn tab_drag_escape_cancels_before_focused_search_handles_it(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        let (source, pane) = cx.update(|cx| {
+            let settings = TerminalSettings::get_global(cx).clone();
+            let pane = new_test_pane(&settings, 60_001, cx);
+            let source = tab_drag_window(
+                vec![WindowTab::new(pane.clone())],
+                gpui::point(px(0.), px(0.)),
+                cx,
+            );
+            source
+                .update(cx, |_, window, cx| {
+                    pane.update(cx, |pane, cx| pane.toggle_search(window, cx));
+                })
+                .expect("search should open");
+            (source, pane)
+        });
+        cx.run_until_parked();
+        let mut visual = start_tab_drag(source, "TAB-0", cx);
+        visual.simulate_keystrokes("escape");
+        cx.update(|cx| {
+            assert!(
+                !cx.has_active_drag(),
+                "Escape must cancel the drag even with search focused"
+            );
+            assert!(
+                pane.read(cx).search_active,
+                "cancelling the drag must not close search"
+            );
+        });
+        visual.simulate_mouse_up(
+            gpui::point(px(900.), px(600.)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.update(|cx| {
+            assert_eq!(cx.windows().len(), 1);
+            assert!(source.entity(cx).is_ok());
+        });
+    }
+
+    #[gpui::test]
+    fn tab_drag_reorders_and_escape_or_closed_tab_cancels(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        let (source, first, second) = cx.update(|cx| {
+            let settings = TerminalSettings::get_global(cx).clone();
+            let first = new_test_pane(&settings, 58_001, cx);
+            let second = new_test_pane(&settings, 58_002, cx);
+            let source = tab_drag_window(
+                vec![
+                    WindowTab::new(first.clone()),
+                    WindowTab::new(second.clone()),
+                ],
+                gpui::point(px(0.), px(0.)),
+                cx,
+            );
+            (source, first, second)
+        });
+        cx.run_until_parked();
+        let mut visual = start_tab_drag(source, "TAB-0", cx);
+        let position = visual.debug_bounds("TAB-1").expect("second tab").center();
+        visual.simulate_mouse_move(position, MouseButton::Left, gpui::Modifiers::default());
+        visual.simulate_mouse_up(position, MouseButton::Left, gpui::Modifiers::default());
+        cx.update(|cx| {
+            source
+                .update(cx, |view, _, _| {
+                    assert_eq!(
+                        view.tabs.first().and_then(WindowTab::focused_tab),
+                        Some(second)
+                    );
+                    assert_eq!(view.active_tab(), Some(first.clone()));
+                })
+                .expect("source should survive")
+        });
+        let mut visual = start_tab_drag(source, "TAB-1", cx);
+        visual.simulate_keystrokes("escape");
+        visual.simulate_mouse_up(
+            gpui::point(px(900.), px(600.)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.update(|cx| assert_eq!(cx.windows().len(), 1));
+        let mut visual = start_tab_drag(source, "TAB-1", cx);
+        cx.update(|cx| first.update(cx, |_, cx| cx.emit(TerminalTabEvent::CloseTerminal)));
+        cx.run_until_parked();
+        visual.simulate_mouse_up(
+            gpui::point(px(900.), px(600.)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.update(|cx| {
+            assert_eq!(cx.windows().len(), 1);
+            source
+                .update(cx, |view, _, _| assert_eq!(view.tabs.len(), 1))
+                .expect("source should survive");
+            assert!(!cx.has_active_drag());
+        });
     }
 
     #[gpui::test]
@@ -4753,6 +5392,7 @@ mod tests {
                 context_navigation_target: None,
                 tab_rename: None,
                 titlebar_mouse_down: std::cell::Cell::new(false),
+                tab_drag: None,
                 tab_bar_scroll_handle: ScrollHandle::new(),
                 tab_bar_has_overflow: false,
                 tab_bar_can_scroll_left: false,
@@ -4899,6 +5539,7 @@ mod tests {
                 context_navigation_target: None,
                 tab_rename: None,
                 titlebar_mouse_down: std::cell::Cell::new(false),
+                tab_drag: None,
                 tab_bar_scroll_handle: ScrollHandle::new(),
                 tab_bar_has_overflow: false,
                 tab_bar_can_scroll_left: false,

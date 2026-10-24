@@ -328,7 +328,7 @@ fn open_window_with_bounds(
     initial_directory: Option<std::path::PathBuf>,
     cx: &mut App,
 ) {
-    create_terminal_window(bounds, cx, |cx| {
+    create_terminal_window(bounds, None, cx, |cx| {
         window::TerminalWindowView::new(cx, initial_directory)
     })
     .log_err();
@@ -343,15 +343,18 @@ pub(crate) fn open_empty_terminal_window(
         size(settings.default_width, settings.default_height),
         cx,
     );
-    create_terminal_window(bounds, cx, window::TerminalWindowView::new_empty)
+    create_terminal_window(bounds, None, cx, window::TerminalWindowView::new_empty)
 }
 
 fn create_terminal_window(
     bounds: gpui::Bounds<gpui::Pixels>,
+    display_id: Option<gpui::DisplayId>,
     cx: &mut App,
     build: impl FnOnce(&mut gpui::Context<window::TerminalWindowView>) -> window::TerminalWindowView,
 ) -> anyhow::Result<gpui::WindowHandle<window::TerminalWindowView>> {
-    let handle = cx.open_window(window_options(bounds), |window, cx| {
+    let mut options = window_options(bounds);
+    options.display_id = display_id;
+    let handle = cx.open_window(options, |window, cx| {
         let view = cx.new(|cx| {
             cx.observe_window_activation(window, |_, window, cx| {
                 if window.is_window_active() {
