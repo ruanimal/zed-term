@@ -17,6 +17,7 @@ macOS is the primary platform. Linux builds and deb packaging are also supported
 - Multiple windows, tabs, split panes, and moving tabs between windows
 - Pane zoom, focus switching, and tab reordering
 - URL, OSC 8, and path link support
+- File uploads and downloads via [trzsz](https://trzsz.github.io/) and ZMODEM
 - Terminal settings, keymap editing, theme extension management, and file manager integration
 
 ## Project Structure
