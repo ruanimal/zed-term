@@ -591,6 +591,25 @@ impl PlaySoundWhenAgentDone {
     }
 }
 
+#[derive(
+    Clone, Copy, Default, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema, MergeFrom,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Speed {
+    #[default]
+    Standard,
+    Fast,
+}
+
+impl Speed {
+    pub fn toggle(self) -> Self {
+        match self {
+            Speed::Standard => Speed::Fast,
+            Speed::Fast => Speed::Standard,
+        }
+    }
+}
+
 #[with_fallible_options]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq)]
 pub struct LanguageModelSelection {
@@ -599,7 +618,7 @@ pub struct LanguageModelSelection {
     #[serde(default)]
     pub enable_thinking: bool,
     pub effort: Option<String>,
-    pub speed: Option<language_model_core::Speed>,
+    pub speed: Option<Speed>,
 }
 
 #[with_fallible_options]
@@ -1049,6 +1068,103 @@ impl std::fmt::Display for ToolPermissionMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speed_variants_roundtrip_default_and_toggle() {
+        for (speed, value) in [(Speed::Standard, "standard"), (Speed::Fast, "fast")] {
+            assert_eq!(
+                serde_json::to_value(speed).expect("serialize speed"),
+                serde_json::json!(value)
+            );
+            assert_eq!(
+                serde_json::from_value::<Speed>(serde_json::json!(value)).expect("parse speed"),
+                speed
+            );
+            assert_ne!(speed.toggle(), speed);
+            assert_eq!(speed.toggle().toggle(), speed);
+        }
+        assert_eq!(Speed::default(), Speed::Standard);
+        assert!(serde_json::from_value::<Speed>(serde_json::json!("Fast")).is_err());
+        assert!(serde_json::from_value::<Speed>(serde_json::json!(null)).is_err());
+    }
+
+    #[test]
+    fn speed_schema_preserves_contract() {
+        assert_eq!(Speed::schema_name(), "Speed");
+        let schema = Speed::json_schema(&mut schemars::SchemaGenerator::default());
+        assert_eq!(
+            serde_json::to_value(schema).expect("serialize speed schema"),
+            serde_json::json!({
+                "type": "string", "enum": ["standard", "fast"]
+            })
+        );
+        let schema = serde_json::to_value(schemars::schema_for!(LanguageModelSelection))
+            .expect("selection schema");
+        assert_eq!(
+            schema["properties"]["speed"]["anyOf"][0]["$ref"],
+            "#/$defs/Speed"
+        );
+    }
+
+    #[test]
+    fn speed_configuration_roundtrip_and_default() {
+        for speed in ["standard", "fast"] {
+            let value = serde_json::json!({
+                "provider": "anthropic", "model": "custom", "enable_thinking": true,
+                "effort": "high", "speed": speed
+            });
+            let selection: LanguageModelSelection =
+                serde_json::from_value(value.clone()).expect("parse selection");
+            assert_eq!(
+                selection.speed,
+                Some(if speed == "fast" {
+                    Speed::Fast
+                } else {
+                    Speed::Standard
+                })
+            );
+            assert_eq!(
+                serde_json::to_value(selection).expect("serialize selection"),
+                value
+            );
+        }
+        for value in [
+            serde_json::json!({"provider": "anthropic", "model": "custom"}),
+            serde_json::json!({"provider": "anthropic", "model": "custom", "speed": null}),
+        ] {
+            let selection: LanguageModelSelection =
+                serde_json::from_value(value).expect("parse absent speed");
+            assert_eq!(selection.speed, None);
+            assert!(!selection.enable_thinking);
+            assert_eq!(selection.effort, None);
+            assert!(
+                serde_json::to_value(selection)
+                    .expect("serialize absent speed")
+                    .get("speed")
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn speed_configuration_optional_merge_overwrites_only_some() {
+        use crate::merge_from::MergeFrom as _;
+
+        let mut selection: LanguageModelSelection = serde_json::from_value(serde_json::json!({
+            "provider": "anthropic", "model": "custom"
+        }))
+        .expect("parse selection");
+        let mut overlay = selection.clone();
+        overlay.speed = Some(Speed::Fast);
+        selection.merge_from(&overlay);
+        assert_eq!(selection.speed, Some(Speed::Fast));
+        overlay.speed = Some(Speed::Standard);
+        selection.merge_from(&overlay);
+        assert_eq!(selection.speed, Some(Speed::Standard));
+        overlay.speed = None;
+        selection.merge_from(&overlay);
+        assert_eq!(selection.speed, Some(Speed::Standard));
+    }
 
     #[test]
     fn agent_config_option_value_serializes_value_id_as_string() {

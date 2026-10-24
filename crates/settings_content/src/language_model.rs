@@ -1,6 +1,5 @@
 use crate::merge_from::MergeFrom;
 use collections::HashMap;
-use language_model_core::ReasoningEffort;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings_macros::{MergeFrom, with_fallible_options};
@@ -394,7 +393,61 @@ pub struct OpenAiAvailableModel {
     pub capabilities: OpenAiModelCapabilities,
 }
 
-pub use language_model_core::ReasoningEffort as OpenAiReasoningEffort;
+/// Settings-layer–free reasoning-effort enum.
+///
+/// Mirrors the shape of `settings_content::OpenAiReasoningEffort` but lives
+/// here so that crates below the settings layer can reference it.
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, strum::EnumString,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub const OPENAI_COMPATIBLE_SELECTABLE: [Self; 6] = [
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Minimal => "Minimal",
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+            Self::XHigh => "Extra High",
+            Self::Max => "Max",
+        }
+    }
+
+    pub fn value(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+pub use ReasoningEffort as OpenAiReasoningEffort;
 
 impl MergeFrom for OpenAiReasoningEffort {
     fn merge_from(&mut self, other: &Self) {
@@ -630,10 +683,265 @@ pub struct LanguageModelCacheConfiguration {
     pub min_total_token: u64,
 }
 
-pub use language_model_core::ModelMode;
+/// Settings-layer–free model mode enum.
+///
+/// Mirrors the shape of `settings_content::ModelMode` but lives here so that
+/// crates below the settings layer can reference it.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ModelMode {
+    #[default]
+    Default,
+    Thinking {
+        budget_tokens: Option<u32>,
+    },
+    Adaptive,
+}
 
 impl MergeFrom for ModelMode {
     fn merge_from(&mut self, other: &Self) {
         *self = *other;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reasoning_effort_variants_roundtrip_and_helpers() {
+        for (effort, value, label) in [
+            (ReasoningEffort::None, "none", "None"),
+            (ReasoningEffort::Minimal, "minimal", "Minimal"),
+            (ReasoningEffort::Low, "low", "Low"),
+            (ReasoningEffort::Medium, "medium", "Medium"),
+            (ReasoningEffort::High, "high", "High"),
+            (ReasoningEffort::XHigh, "xhigh", "Extra High"),
+            (ReasoningEffort::Max, "max", "Max"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(effort).expect("serialize effort"),
+                json!(value)
+            );
+            assert_eq!(
+                serde_json::from_value::<ReasoningEffort>(json!(value)).expect("parse effort"),
+                effort
+            );
+            assert_eq!(
+                value
+                    .parse::<ReasoningEffort>()
+                    .expect("parse effort string"),
+                effort
+            );
+            assert_eq!(effort.value(), value);
+            assert_eq!(effort.label(), label);
+        }
+        assert_eq!(
+            ReasoningEffort::OPENAI_COMPATIBLE_SELECTABLE,
+            [
+                ReasoningEffort::Minimal,
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+                ReasoningEffort::Max,
+            ]
+        );
+        assert!(serde_json::from_value::<ReasoningEffort>(json!(null)).is_err());
+        assert!(serde_json::from_value::<ReasoningEffort>(json!("XHigh")).is_err());
+    }
+
+    #[test]
+    fn reasoning_effort_schema_preserves_contract() {
+        assert_eq!(ReasoningEffort::schema_name(), "ReasoningEffort");
+        assert_eq!(OpenAiReasoningEffort::schema_name(), "ReasoningEffort");
+        let schema = ReasoningEffort::json_schema(&mut schemars::SchemaGenerator::default());
+        assert_eq!(
+            serde_json::to_value(schema).expect("serialize effort schema"),
+            json!({
+                "description": "Settings-layer–free reasoning-effort enum.\n\nMirrors the shape of `settings_content::OpenAiReasoningEffort` but lives\nhere so that crates below the settings layer can reference it.",
+                "type": "string",
+                "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+            })
+        );
+        let schema = serde_json::to_value(schemars::schema_for!(OpenAiAvailableModel))
+            .expect("model schema");
+        assert_eq!(
+            schema["properties"]["reasoning_effort"]["anyOf"][0]["$ref"],
+            "#/$defs/ReasoningEffort"
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_configuration_roundtrip_and_optional_merge() {
+        let mut model: OpenAiAvailableModel = serde_json::from_value(json!({
+            "name": "custom", "max_tokens": 100
+        }))
+        .expect("parse default effort");
+        assert_eq!(model.reasoning_effort, None);
+        assert!(
+            serde_json::to_value(&model)
+                .expect("serialize model")
+                .get("reasoning_effort")
+                .is_none()
+        );
+        let mut overlay = model.clone();
+        overlay.reasoning_effort = Some(ReasoningEffort::High);
+        model.merge_from(&overlay);
+        assert_eq!(model.reasoning_effort, Some(ReasoningEffort::High));
+        overlay.reasoning_effort = Some(ReasoningEffort::None);
+        model.merge_from(&overlay);
+        assert_eq!(model.reasoning_effort, Some(ReasoningEffort::None));
+        overlay.reasoning_effort = None;
+        model.merge_from(&overlay);
+        assert_eq!(model.reasoning_effort, Some(ReasoningEffort::None));
+
+        let settings: AllLanguageModelSettingsContent = serde_json::from_value(json!({
+            "openai": {"available_models": [{"name": "custom", "max_tokens": 100, "reasoning_effort": "none"}]},
+            "openai_compatible": {"custom": {"api_url": "http://localhost", "available_models": [
+                {"name": "custom", "max_tokens": 100, "reasoning_effort": "xhigh"}
+            ]}},
+            "opencode": {"available_models": [{"name": "custom", "max_tokens": 100,
+                "reasoning_effort_levels": ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+            }]}
+        })).expect("parse reasoning settings");
+        let serialized = serde_json::to_value(&settings).expect("serialize reasoning settings");
+        assert_eq!(
+            serialized["openai"]["available_models"][0]["reasoning_effort"],
+            "none"
+        );
+        assert_eq!(
+            serialized["openai_compatible"]["custom"]["available_models"][0]["reasoning_effort"],
+            "xhigh"
+        );
+        assert_eq!(
+            serialized["opencode"]["available_models"][0]["reasoning_effort_levels"],
+            json!(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+        );
+        assert_eq!(
+            serde_json::from_value::<AllLanguageModelSettingsContent>(serialized)
+                .expect("reparse reasoning settings"),
+            settings
+        );
+    }
+
+    #[test]
+    fn model_mode_variants_roundtrip_and_default() {
+        for (mode, value) in [
+            (ModelMode::Default, json!({"type": "default"})),
+            (
+                ModelMode::Thinking {
+                    budget_tokens: None,
+                },
+                json!({"type": "thinking", "budget_tokens": null}),
+            ),
+            (
+                ModelMode::Thinking {
+                    budget_tokens: Some(0),
+                },
+                json!({"type": "thinking", "budget_tokens": 0}),
+            ),
+            (
+                ModelMode::Thinking {
+                    budget_tokens: Some(u32::MAX),
+                },
+                json!({"type": "thinking", "budget_tokens": u32::MAX}),
+            ),
+            (ModelMode::Adaptive, json!({"type": "adaptive"})),
+        ] {
+            assert_eq!(serde_json::to_value(mode).expect("serialize mode"), value);
+            assert_eq!(
+                serde_json::from_value::<ModelMode>(value).expect("parse mode"),
+                mode
+            );
+        }
+        assert_eq!(ModelMode::default(), ModelMode::Default);
+        assert_eq!(
+            serde_json::from_value::<ModelMode>(json!({"type": "thinking"}))
+                .expect("parse absent budget"),
+            ModelMode::Thinking {
+                budget_tokens: None
+            }
+        );
+        for invalid in [
+            json!({}),
+            json!("default"),
+            json!({"type": "Thinking"}),
+            json!({"type": "thinking", "budget_tokens": -1}),
+            json!({"type": "thinking", "budget_tokens": u64::from(u32::MAX) + 1}),
+        ] {
+            assert!(serde_json::from_value::<ModelMode>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn model_mode_schema_preserves_contract() {
+        assert_eq!(ModelMode::schema_name(), "ModelMode");
+        let schema = ModelMode::json_schema(&mut schemars::SchemaGenerator::default());
+        assert_eq!(
+            serde_json::to_value(schema).expect("serialize mode schema"),
+            json!({
+                "description": "Settings-layer–free model mode enum.\n\nMirrors the shape of `settings_content::ModelMode` but lives here so that\ncrates below the settings layer can reference it.",
+                "oneOf": [
+                    {"type": "object", "properties": {"type": {"type": "string", "const": "default"}}, "required": ["type"]},
+                    {"type": "object", "properties": {
+                        "budget_tokens": {"type": ["integer", "null"], "format": "uint32", "minimum": 0},
+                        "type": {"type": "string", "const": "thinking"}
+                    }, "required": ["type"]},
+                    {"type": "object", "properties": {"type": {"type": "string", "const": "adaptive"}}, "required": ["type"]}
+                ]
+            })
+        );
+        let schema = serde_json::to_value(schemars::schema_for!(AnthropicAvailableModel))
+            .expect("model schema");
+        assert_eq!(
+            schema["properties"]["mode"]["anyOf"][0]["$ref"],
+            "#/$defs/ModelMode"
+        );
+    }
+
+    #[test]
+    fn model_mode_configuration_roundtrip_and_optional_merge() {
+        let mut model: AnthropicAvailableModel = serde_json::from_value(json!({
+            "name": "custom", "max_tokens": 100
+        }))
+        .expect("parse default mode");
+        assert_eq!(model.mode, None);
+        assert!(
+            serde_json::to_value(&model)
+                .expect("serialize model")
+                .get("mode")
+                .is_none()
+        );
+        let mut overlay = model.clone();
+        overlay.mode = Some(ModelMode::Thinking {
+            budget_tokens: Some(1024),
+        });
+        model.merge_from(&overlay);
+        assert_eq!(model.mode, overlay.mode);
+        overlay.mode = Some(ModelMode::Thinking {
+            budget_tokens: None,
+        });
+        model.merge_from(&overlay);
+        assert_eq!(
+            model.mode,
+            Some(ModelMode::Thinking {
+                budget_tokens: None
+            })
+        );
+        overlay.mode = Some(ModelMode::Adaptive);
+        model.merge_from(&overlay);
+        assert_eq!(model.mode, Some(ModelMode::Adaptive));
+        overlay.mode = None;
+        model.merge_from(&overlay);
+        assert_eq!(model.mode, Some(ModelMode::Adaptive));
+        let serialized = serde_json::to_value(&model).expect("serialize model mode");
+        assert_eq!(serialized["mode"], json!({"type": "adaptive"}));
+        assert_eq!(
+            serde_json::from_value::<AnthropicAvailableModel>(serialized)
+                .expect("reparse model mode"),
+            model
+        );
     }
 }

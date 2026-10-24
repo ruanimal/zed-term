@@ -1789,11 +1789,6 @@ mod tests {
 
     #[gpui::test]
     fn test_default_settings_release_channel_overrides(cx: &mut App) {
-        // The test deals with overrides and should ignore the other set-ups (Preview and Stable runs)
-        if *release_channel::RELEASE_CHANNEL != release_channel::ReleaseChannel::Dev {
-            return;
-        }
-
         let mut defaults: serde_json::Value =
             crate::parse_json_with_comments(&default_settings()).unwrap();
         let root = defaults
@@ -1801,6 +1796,8 @@ mod tests {
             .expect("default settings must be a JSON object");
         root.insert("dev".into(), serde_json::json!({ "auto_update": false }));
         root.insert("stable".into(), serde_json::json!({ "auto_update": true }));
+        root.insert("nightly".into(), serde_json::json!({ "auto_update": true }));
+        root.insert("preview".into(), serde_json::json!({ "auto_update": true }));
         let defaults_with_overrides = serde_json::to_string(&defaults).unwrap();
 
         let mut store = SettingsStore::new(cx, &defaults_with_overrides);
@@ -1811,6 +1808,41 @@ mod tests {
             &AutoUpdateSetting { auto_update: false },
             "dev override from default settings should apply",
         );
+
+        store
+            .set_user_settings(
+                r#"{
+                "auto_update": true,
+                "dev": { "auto_update": false },
+                "stable": { "auto_update": true },
+                "nightly": { "auto_update": true },
+                "preview": { "auto_update": true }
+            }"#,
+                cx,
+            )
+            .expect("valid user channel overrides");
+        assert!(!store.get::<AutoUpdateSetting>(None).auto_update);
+
+        store
+            .set_user_settings(
+                r#"{
+                "auto_update": true,
+                "stable": { "auto_update": false },
+                "nightly": { "auto_update": false },
+                "preview": { "auto_update": false }
+            }"#,
+                cx,
+            )
+            .expect("valid non-dev user channel overrides");
+        assert!(store.get::<AutoUpdateSetting>(None).auto_update);
+
+        let root = defaults.as_object_mut().expect("default settings object");
+        root.remove("dev");
+        root.insert("auto_update".into(), serde_json::json!(false));
+        let defaults_without_dev = serde_json::to_string(&defaults).expect("valid defaults");
+        let mut store = SettingsStore::new(cx, &defaults_without_dev);
+        store.register_setting::<AutoUpdateSetting>();
+        assert!(!store.get::<AutoUpdateSetting>(None).auto_update);
     }
 
     #[gpui::test]

@@ -33,9 +33,7 @@ use std::mem::MaybeUninit;
 use async_tar::Archive;
 use futures::{AsyncRead, Stream, StreamExt, future::BoxFuture};
 use is_executable::IsExecutable;
-use rope::Rope;
 use serde::{Deserialize, Serialize};
-use smol::io::AsyncWriteExt;
 #[cfg(feature = "test-support")]
 use std::path::Component;
 use std::{
@@ -46,7 +44,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tempfile::TempDir;
-use text::LineEnding;
 
 #[cfg(feature = "test-support")]
 use collections::{BTreeMap, btree_map};
@@ -123,7 +120,6 @@ pub trait Fs: Send + Sync {
     }
     async fn load_bytes(&self, path: &Path) -> Result<Vec<u8>>;
     async fn atomic_write(&self, path: PathBuf, text: String) -> Result<()>;
-    async fn save(&self, path: &Path, text: &Rope, line_ending: LineEnding) -> Result<()>;
     async fn write(&self, path: &Path, content: &[u8]) -> Result<()>;
     async fn canonicalize(&self, path: &Path) -> Result<PathBuf>;
     async fn is_file(&self, path: &Path) -> bool;
@@ -317,18 +313,6 @@ impl MTime {
     /// Temporary method to split out the behavior changes from introduction of this newtype.
     pub fn bad_is_greater_than(self, other: MTime) -> bool {
         self.0 > other.0
-    }
-}
-
-impl From<proto::Timestamp> for MTime {
-    fn from(timestamp: proto::Timestamp) -> Self {
-        MTime(timestamp.into())
-    }
-}
-
-impl From<MTime> for proto::Timestamp {
-    fn from(mtime: MTime) -> Self {
-        mtime.0.into()
     }
 }
 
@@ -890,24 +874,6 @@ impl Fs for RealFs {
             anyhow::Ok(())
         })
         .await?;
-        Ok(())
-    }
-
-    async fn save(&self, path: &Path, text: &Rope, line_ending: LineEnding) -> Result<()> {
-        let buffer_size = text.summary().len.min(10 * 1024);
-        if let Some(path) = path.parent() {
-            self.create_dir(path)
-                .await
-                .with_context(|| format!("Failed to create directory at {:?}", path))?;
-        }
-        let file = smol::fs::File::create(path)
-            .await
-            .with_context(|| format!("Failed to create file at {:?}", path))?;
-        let mut writer = smol::io::BufWriter::with_capacity(buffer_size, file);
-        for chunk in text::chunks_with_line_ending(text, line_ending) {
-            writer.write_all(chunk.as_bytes()).await?;
-        }
-        writer.flush().await?;
         Ok(())
     }
 
@@ -2388,17 +2354,6 @@ impl Fs for FakeFs {
             self.create_dir(path).await?;
         }
         self.write_file_internal(path, data.into_bytes(), true)?;
-        Ok(())
-    }
-
-    async fn save(&self, path: &Path, text: &Rope, line_ending: LineEnding) -> Result<()> {
-        self.simulate_random_delay().await;
-        let path = normalize_path(path);
-        let content = text::chunks_with_line_ending(text, line_ending).collect::<String>();
-        if let Some(path) = path.parent() {
-            self.create_dir(path).await?;
-        }
-        self.write_file_internal(path, content.into_bytes(), false)?;
         Ok(())
     }
 

@@ -2272,6 +2272,127 @@ fn reset_terminal_overrides_preserves_theme_and_non_terminal_settings() -> anyho
     Ok(())
 }
 
+#[gpui::test]
+fn settings_edits_preserve_ai_and_override_jsonc(cx: &mut App) {
+    let result = (|| -> anyhow::Result<()> {
+        let original = r#"{
+  "terminal": {"font_size": 13.0},
+  "theme": "One Dark",
+  // preserved AI and override settings
+  "agent": {
+    "default_model": {"provider": "openai", "model": "gpt-5", "speed": "fast"},
+    "future_agent_option": {"enabled": true}
+  },
+  "language_models": {
+    "openai": {
+      "available_models": [{"name": "gpt-5", "max_tokens": 128000, "reasoning_effort": "high"}]
+    },
+    "anthropic_compatible": {
+      "custom": {
+        "api_url": "https://example.invalid",
+        "available_models": [{
+          "name": "custom-model", "max_tokens": 64000,
+          "mode": {"type": "thinking", "budget_tokens": 1024}
+        }]
+      }
+    }
+  },
+  "future_root_option": {"value": [1, 2, 3]},
+  "dev": {"terminal": {"scroll_multiplier": 2.0}},
+  "nightly": {"theme": "Nightly Theme"},
+  "preview": {"theme": "Preview Theme"},
+  "stable": {"theme": "Stable Theme"},
+  "linux": {"terminal": {"font_size": 14.0}},
+  "macos": {"terminal": {"font_size": 15.0}},
+  "windows": {"terminal": {"font_size": 16.0}},
+  "profiles": {
+    "custom": {"base": "user", "settings": {
+      "terminal": {"font_size": 17.0}, "theme": "Profile Theme"
+    }}
+  }
+}
+"#;
+        let preserved_suffix = original
+            .split_once("  // preserved AI and override settings")
+            .map(|(_, suffix)| suffix)
+            .expect("fixture has a preserved suffix");
+        let original_value: serde_json::Value = settings::parse_json_with_comments(original)?;
+        let original_content: settings::UserSettingsContent =
+            settings::parse_json_with_comments(original)?;
+        let defaults: settings::SettingsContent =
+            settings::parse_json_with_comments(&settings::default_settings())?;
+        let store = SettingsStore::test(cx);
+
+        for dirty_setting in [
+            DirtySetting::FontSize,
+            DirtySetting::Theme,
+            DirtySetting::ResetTerminalDefaults,
+        ] {
+            let mut draft = settings_page_draft_from_settings(
+                TerminalSettings::from_settings(&defaults),
+                "One Light".to_string(),
+            );
+            draft.draft_settings.font_size = Some(gpui::px(22.0));
+            let patch = CapturedPatch::Save(Box::new(CapturedSavePatch {
+                draft,
+                dirty_settings: vec![dirty_setting],
+                shell: None,
+                environment: None,
+                working_directory: None,
+                appearance: theme::Appearance::Dark,
+            }));
+            let updated =
+                store.new_text_for_update(original.to_string(), |content| patch.apply(content))?;
+            let updated_value: serde_json::Value = settings::parse_json_with_comments(&updated)?;
+            let updated_content: settings::UserSettingsContent =
+                settings::parse_json_with_comments(&updated)?;
+            let mut expected = original_value.clone();
+            let expected_object = expected.as_object_mut().expect("fixture root object");
+            match dirty_setting {
+                DirtySetting::FontSize => {
+                    expected_object
+                        .insert("terminal".into(), serde_json::json!({"font_size": 22.0}));
+                }
+                DirtySetting::Theme => {
+                    expected_object.insert("theme".into(), serde_json::json!("One Light"));
+                }
+                DirtySetting::ResetTerminalDefaults => {
+                    expected_object.remove("terminal");
+                }
+                _ => unreachable!("only the three configured patches are tested"),
+            }
+            assert_eq!(
+                updated_value, expected,
+                "unexpected edits for {dirty_setting:?}"
+            );
+            assert!(
+                updated.ends_with(preserved_suffix),
+                "preserved JSONC changed for {dirty_setting:?}"
+            );
+            assert!(updated.contains("// preserved AI and override settings"));
+            assert_eq!(
+                updated_content.content.agent,
+                original_content.content.agent
+            );
+            assert_eq!(
+                updated_content.content.language_models,
+                original_content.content.language_models
+            );
+            assert_eq!(
+                updated_content.release_channel_overrides,
+                original_content.release_channel_overrides
+            );
+            assert_eq!(
+                updated_content.platform_overrides,
+                original_content.platform_overrides
+            );
+            assert_eq!(updated_content.profiles, original_content.profiles);
+        }
+        Ok(())
+    })();
+    result.expect("terminal, theme and reset edits preserve unrelated JSONC");
+}
+
 /// Feature: terminal-settings-completion, Property 11: Reset removes only terminal overrides
 /// **Validates: Requirements 5.2, 5.3, 5.4, 5.5, 8.6, 8.7**
 #[gpui::property_test(config = proptest::test_runner::Config {

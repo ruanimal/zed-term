@@ -70,8 +70,7 @@ impl UserSettingsContentExt for UserSettingsContent {
     }
 
     fn for_release_channel(&self) -> Option<&SettingsContent> {
-        self.release_channel_overrides
-            .get_by_key(release_channel::RELEASE_CHANNEL.dev_name())
+        self.release_channel_overrides.get_by_key("dev")
     }
 
     fn for_os(&self) -> Option<&SettingsContent> {

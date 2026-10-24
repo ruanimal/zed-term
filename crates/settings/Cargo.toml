@@ -26,7 +26,6 @@ inventory.workspace = true
 log.workspace = true
 migrator.workspace = true
 paths.workspace = true
-release_channel.workspace = true
 rust-embed.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -37,11 +36,11 @@ settings_json.workspace = true
 settings_macros.workspace = true
 smallvec.workspace = true
 util.workspace = true
-zlog.workspace = true
 
 [dev-dependencies]
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
+zlog.workspace = true
 
 indoc.workspace = true
 pretty_assertions.workspace = true
