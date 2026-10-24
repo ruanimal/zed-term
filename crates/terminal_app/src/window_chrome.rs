@@ -19,14 +19,14 @@ pub(crate) fn render_window_controls<F>(
     window: &Window,
     cx: &mut App,
     on_close: F,
-) -> (AnyElement, AnyElement)
+) -> (Option<AnyElement>, Option<AnyElement>)
 where
     F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
         if !matches!(window.window_decorations(), Decorations::Client { .. }) {
-            return (div().into_any_element(), div().into_any_element());
+            return (None, None);
         }
 
         let controls = window.window_controls();
@@ -50,7 +50,7 @@ where
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     {
         let _ = (window, cx, on_close);
-        (div().into_any_element(), div().into_any_element())
+        (None, None)
     }
 }
 
@@ -82,11 +82,11 @@ fn render_button_side<F>(
     is_maximized: bool,
     controls: WindowControls,
     close_handler: &mut Option<F>,
-) -> AnyElement
+) -> Option<AnyElement>
 where
     F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 {
-    let buttons = buttons
+    let mut buttons = buttons
         .into_iter()
         .flatten()
         .filter(|button| match button {
@@ -94,21 +94,25 @@ where
             WindowButton::Maximize => controls.maximize,
             WindowButton::Close => true,
         })
-        .map(|button| {
-            let close_handler = if matches!(button, WindowButton::Close) {
-                close_handler.take()
-            } else {
-                None
-            };
-            render_window_button(button, is_maximized, close_handler)
-        });
+        .peekable();
+    buttons.peek()?;
+    let buttons = buttons.map(|button| {
+        let close_handler = if matches!(button, WindowButton::Close) {
+            close_handler.take()
+        } else {
+            None
+        };
+        render_window_button(button, is_maximized, close_handler)
+    });
 
-    h_flex()
-        .h(TITLE_BAR_HEIGHT - px(1.))
-        .flex_none()
-        .items_center()
-        .children(buttons)
-        .into_any_element()
+    Some(
+        h_flex()
+            .h(TITLE_BAR_HEIGHT - px(1.))
+            .flex_none()
+            .items_center()
+            .children(buttons)
+            .into_any_element(),
+    )
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -340,4 +344,63 @@ fn resize_edge(
         return Some(ResizeEdge::Right);
     }
     None
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_button_sides_do_not_reserve_space() {
+        let mut close_handler = Some(|_: &ClickEvent, _: &mut Window, _: &mut App| {});
+        assert!(
+            render_button_side(
+                [None; 3],
+                false,
+                WindowControls::default(),
+                &mut close_handler,
+            )
+            .is_none()
+        );
+        assert!(
+            render_button_side(
+                [
+                    Some(WindowButton::Minimize),
+                    Some(WindowButton::Maximize),
+                    None
+                ],
+                false,
+                WindowControls {
+                    minimize: false,
+                    maximize: false,
+                    ..WindowControls::default()
+                },
+                &mut close_handler,
+            )
+            .is_none()
+        );
+        assert!(close_handler.is_some());
+    }
+
+    #[test]
+    fn button_sides_follow_the_desktop_layout() {
+        for layout in [
+            WindowButtonLayout::linux_default(),
+            WindowButtonLayout::parse("close,maximize,minimize:").expect("valid left-side layout"),
+            WindowButtonLayout::parse("close:minimize,maximize").expect("valid split layout"),
+        ] {
+            let mut close_handler = Some(|_: &ClickEvent, _: &mut Window, _: &mut App| {});
+            for buttons in [layout.left, layout.right] {
+                let has_buttons = buttons.iter().any(Option::is_some);
+                let side = render_button_side(
+                    buttons,
+                    false,
+                    WindowControls::default(),
+                    &mut close_handler,
+                );
+                assert_eq!(side.is_some(), has_buttons);
+            }
+            assert!(close_handler.is_none());
+        }
+    }
 }

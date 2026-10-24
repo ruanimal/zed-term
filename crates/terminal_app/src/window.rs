@@ -2270,11 +2270,9 @@ impl TerminalWindowView {
         let (left_controls, right_controls) =
             window_chrome::render_window_controls(window, cx, close_window);
         let tab_bar = self.render_tab_bar(window, cx);
-        let tab_bar = if is_server_decorations {
-            tab_bar
-        } else {
-            tab_bar.start_child(left_controls).end_child(right_controls)
-        };
+        let tab_bar = tab_bar
+            .start_children(left_controls)
+            .end_children(right_controls);
         let tab_bar = tab_bar.when(is_fullscreen, |tab_bar| {
             tab_bar.end_child(self.render_exit_fullscreen_button(cx))
         });

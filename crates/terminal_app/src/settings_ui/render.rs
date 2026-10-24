@@ -1496,11 +1496,9 @@ impl SettingsPage {
             .child(self.render_settings_tab(SettingsTab::About, cx))
             .end_child(save_discard);
 
-        let tab_bar = if is_server_decorations {
-            tab_bar
-        } else {
-            tab_bar.start_child(left_controls).end_child(right_controls)
-        };
+        let tab_bar = tab_bar
+            .start_children(left_controls)
+            .end_children(right_controls);
 
         div()
             .id("settings-title-bar")
