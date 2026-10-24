@@ -7614,6 +7614,7 @@ dependencies = [
  "libc",
  "log",
  "md-5",
+ "net",
  "parking_lot",
  "paths",
  "proptest",

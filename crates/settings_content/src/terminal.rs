@@ -70,6 +70,10 @@ pub struct ProjectTerminalSettingsContent {
 pub struct TerminalSettingsContent {
     #[serde(flatten)]
     pub project: ProjectTerminalSettingsContent,
+    /// Where ZedTerm opens directories requested by a file manager.
+    ///
+    /// Default: new_window
+    pub file_manager_open_mode: Option<FileManagerOpenMode>,
     /// Sets the terminal's font size.
     ///
     /// If this option is not included,
@@ -197,6 +201,16 @@ pub struct TerminalSettingsContent {
     ///
     /// See `docs/TRANSFER_EXTENSION.md` §8.
     pub transfer: Option<TransferSettingsContent>,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FileManagerOpenMode {
+    #[default]
+    NewWindow,
+    NewTab,
 }
 
 /// Host-level file transfer settings (§8.1). Provider-specific configuration

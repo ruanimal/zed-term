@@ -15,6 +15,12 @@ macOS is the primary platform. Linux builds and deb packaging are also supported
 - URL, OSC 8, and path link support
 - Terminal settings, keymap editing, and theme extension management
 
+In Settings → Terminal → Shell and environment, **Open from file manager**
+controls whether a directory opens in a new window (the default) or a new tab in
+the most recently active terminal window. If no terminal window is open, ZedTerm
+creates one. The equivalent `settings.json` option is
+`"terminal": { "file_manager_open_mode": "new_tab" }` (or `"new_window"`).
+
 ## Project Structure
 
 - `crates/terminal_core` — Terminal state, PTY handling, parsing, scrolling, and search

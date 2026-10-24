@@ -255,13 +255,59 @@ fn watch_user_settings(cx: &mut App) {
 /// Opens a fresh window with its own tab set. Activates the window shortly
 /// after opening so the macOS display link (which drives redraws) starts.
 pub fn open_new_window(cx: &mut App) {
+    open_new_window_in(None, cx);
+}
+
+fn open_new_window_in(initial_directory: Option<std::path::PathBuf>, cx: &mut App) {
     let settings = TerminalSettings::get_global(cx);
     let bounds = gpui::Bounds::centered(
         None,
         size(settings.default_width, settings.default_height),
         cx,
     );
-    open_window_with_bounds(bounds, None, cx)
+    open_window_with_bounds(bounds, initial_directory, cx)
+}
+
+#[derive(Default)]
+struct RecentTerminalWindows(Vec<gpui::AnyWindowHandle>);
+
+impl gpui::Global for RecentTerminalWindows {}
+
+fn remember_terminal_window(handle: gpui::AnyWindowHandle, cx: &mut App) {
+    let windows = cx.windows();
+    let recent = &mut cx.default_global::<RecentTerminalWindows>().0;
+    recent.retain(|previous| *previous != handle && windows.contains(previous));
+    recent.push(handle);
+}
+
+pub fn open_external_directory(initial_directory: Option<std::path::PathBuf>, cx: &mut App) {
+    if initial_directory.is_some()
+        && TerminalSettings::get_global(cx).file_manager_open_mode
+            == settings::FileManagerOpenMode::NewTab
+    {
+        let windows = cx.windows();
+        let existing_window = cx
+            .active_window()
+            .into_iter()
+            .chain(
+                cx.try_global::<RecentTerminalWindows>()
+                    .into_iter()
+                    .flat_map(|recent| recent.0.iter().rev().copied()),
+            )
+            .chain(windows.iter().copied())
+            .filter(|handle| windows.contains(handle))
+            .find_map(|handle| handle.downcast::<window::TerminalWindowView>());
+        if let Some(handle) = existing_window {
+            handle
+                .update(cx, |view, window, cx| {
+                    view.spawn_new_tab(cx, initial_directory);
+                    window.activate_window();
+                })
+                .log_err();
+            return;
+        }
+    }
+    open_new_window_in(initial_directory, cx);
 }
 
 /// Opens a new terminal window when macOS reopens the app without an existing one.
@@ -284,7 +330,16 @@ fn open_window_with_bounds(
 ) {
     let handle = cx
         .open_window(window_options(bounds), |window, cx| {
-            let view = cx.new(|cx| window::TerminalWindowView::new(cx, initial_directory));
+            let view = cx.new(|cx| {
+                cx.observe_window_activation(window, |_, window, cx| {
+                    if window.is_window_active() {
+                        remember_terminal_window(window.window_handle(), cx);
+                    }
+                })
+                .detach();
+                window::TerminalWindowView::new(cx, initial_directory)
+            });
+            remember_terminal_window(window.window_handle(), cx);
             view.read(cx).focus_handle.clone().focus(window, cx);
             view
         })

@@ -13,6 +13,8 @@ use anyhow::{Context as _, Result, bail};
 use gpui::Application;
 use util::paths::{PathStyle, UrlExt as _};
 
+mod open_listener;
+
 struct LaunchOptions {
     user_data_dir: Option<PathBuf>,
     initial_directory: Option<PathBuf>,
@@ -104,7 +106,7 @@ fn parse_initial_directory(argument: OsString) -> Result<PathBuf> {
     if !metadata.is_dir() {
         bail!("initial path is not a directory: {directory:?}");
     }
-    Ok(directory)
+    std::path::absolute(directory).context("could not resolve initial directory")
 }
 
 fn init_paths() -> Result<()> {
@@ -140,10 +142,18 @@ fn main() -> Result<()> {
     let restart_arguments = launch_options.restart_arguments();
     let initial_directory = launch_options.initial_directory;
     init_paths()?;
+    let Some(listener) =
+        open_listener::OpenListener::bind_or_forward(initial_directory.as_deref())?
+    else {
+        return Ok(());
+    };
     let app = build_application()?.with_restart_arguments(restart_arguments);
     #[cfg(target_os = "macos")]
     app.on_reopen(terminal_app::reopen_window_if_needed);
-    app.run(move |cx| terminal_app::run(cx, initial_directory));
+    app.run(move |cx| {
+        terminal_app::run(cx, initial_directory);
+        listener.listen(cx);
+    });
     Ok(())
 }
 

@@ -132,6 +132,7 @@ enum EditableField {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum DirtySetting {
     Theme,
+    FileManagerOpenMode,
     ResetTerminalDefaults,
     FontFamily,
     FontSize,
@@ -409,6 +410,10 @@ impl CapturedPatch {
                 for setting in &patch.dirty_settings {
                     match setting {
                         DirtySetting::Theme | DirtySetting::ResetTerminalDefaults => {}
+                        DirtySetting::FileManagerOpenMode => {
+                            terminal.file_manager_open_mode =
+                                Some(patch.draft.draft_settings.file_manager_open_mode);
+                        }
                         DirtySetting::FontFamily => {
                             terminal.font_family =
                                 (!patch.draft.font_family.is_empty()).then(|| {
@@ -603,6 +608,10 @@ impl SettingsPage {
         } else {
             for setting in &self.dirty_settings {
                 match setting {
+                    DirtySetting::FileManagerOpenMode => {
+                        preview_settings.file_manager_open_mode =
+                            self.draft_settings.file_manager_open_mode;
+                    }
                     DirtySetting::Theme
                     | DirtySetting::ResetTerminalDefaults
                     | DirtySetting::FontFamily
@@ -798,6 +807,10 @@ impl SettingsPage {
 
     fn replay_field(&mut self, setting: DirtySetting, source: &SettingsPageDraft) {
         match setting {
+            DirtySetting::FileManagerOpenMode => {
+                self.draft_settings.file_manager_open_mode =
+                    source.draft_settings.file_manager_open_mode;
+            }
             DirtySetting::Theme => self.theme_name.clone_from(&source.theme_name),
             DirtySetting::ResetTerminalDefaults => {}
             DirtySetting::FontFamily => self.font_family.clone_from(&source.font_family),

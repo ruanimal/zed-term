@@ -1158,6 +1158,30 @@ impl Render for SettingsPage {
             ))
             .child(self.render_environment_editor(cx))
             .child(self.render_working_directory_form(window, cx))
+            .child(self.enum_row(
+                window,
+                cx,
+                "Open from file manager",
+                "Open directories in a new window or a new tab in the most recently active terminal window.",
+                match settings.file_manager_open_mode {
+                    settings::FileManagerOpenMode::NewWindow => "New window".to_string(),
+                    settings::FileManagerOpenMode::NewTab => "New tab".to_string(),
+                },
+                vec![
+                    draft_setting_option(
+                        "New window",
+                        page.clone(),
+                        DirtySetting::FileManagerOpenMode,
+                        |settings| settings.file_manager_open_mode = settings::FileManagerOpenMode::NewWindow,
+                    ),
+                    draft_setting_option(
+                        "New tab",
+                        page.clone(),
+                        DirtySetting::FileManagerOpenMode,
+                        |settings| settings.file_manager_open_mode = settings::FileManagerOpenMode::NewTab,
+                    ),
+                ],
+            ))
             .child(self.section_header("Input and scroll", cx))
             .child(self.number_row(
                 cx,

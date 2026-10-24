@@ -10,6 +10,7 @@ struct FakeDirectoryAccess {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SupportedSetting {
+    FileManagerOpenMode,
     CursorBlinking,
     FontFamily,
     FontWeight,
@@ -31,7 +32,8 @@ enum SupportedSetting {
 }
 
 impl SupportedSetting {
-    const ALL: [Self; 18] = [
+    const ALL: [Self; 19] = [
+        Self::FileManagerOpenMode,
         Self::CursorBlinking,
         Self::FontFamily,
         Self::FontWeight,
@@ -54,6 +56,7 @@ impl SupportedSetting {
 
     fn dirty_setting(self) -> DirtySetting {
         match self {
+            Self::FileManagerOpenMode => DirtySetting::FileManagerOpenMode,
             Self::CursorBlinking => DirtySetting::Blinking,
             Self::FontFamily => DirtySetting::FontFamily,
             Self::FontWeight => DirtySetting::FontWeight,
@@ -77,6 +80,7 @@ impl SupportedSetting {
 
     fn json_key(self) -> &'static str {
         match self {
+            Self::FileManagerOpenMode => "file_manager_open_mode",
             Self::CursorBlinking => "blinking",
             Self::FontFamily => "font_family",
             Self::FontWeight => "font_weight",
@@ -101,10 +105,17 @@ impl SupportedSetting {
 
 #[derive(Debug)]
 struct SupportedSettingsPatch {
-    seeds: [u8; 18],
+    seeds: [u8; 19],
 }
 
 impl SupportedSettingsPatch {
+    fn file_manager_open_mode(&self) -> settings::FileManagerOpenMode {
+        if self.seeds[18].is_multiple_of(2) {
+            settings::FileManagerOpenMode::NewWindow
+        } else {
+            settings::FileManagerOpenMode::NewTab
+        }
+    }
     fn blinking(&self) -> settings::TerminalBlink {
         match self.seeds[0] % 3 {
             0 => settings::TerminalBlink::Off,
@@ -281,6 +292,11 @@ fn apply_supported_control(
     cx: &mut Context<SettingsPage>,
 ) {
     match setting {
+        SupportedSetting::FileManagerOpenMode => page.update_draft(
+            DirtySetting::FileManagerOpenMode,
+            |settings| settings.file_manager_open_mode = patch.file_manager_open_mode(),
+            cx,
+        ),
         SupportedSetting::CursorBlinking => page.update_draft(
             DirtySetting::Blinking,
             |settings| settings.blinking = patch.blinking(),
@@ -437,6 +453,20 @@ fn assert_supported_setting_round_trip(
     let launch = context.launch;
     let expected_working_directory = context.expected_working_directory;
     match setting {
+        SupportedSetting::FileManagerOpenMode => {
+            assert_eq!(
+                terminal.file_manager_open_mode,
+                Some(patch.file_manager_open_mode())
+            );
+            assert_eq!(
+                effective.file_manager_open_mode,
+                patch.file_manager_open_mode()
+            );
+            assert_eq!(
+                reloaded.draft_settings.file_manager_open_mode,
+                patch.file_manager_open_mode()
+            );
+        }
         SupportedSetting::CursorBlinking => {
             assert_eq!(terminal.blinking, Some(patch.blinking()));
             assert_eq!(effective.blinking, patch.blinking());
@@ -650,7 +680,7 @@ fn assert_supported_setting_round_trip(
     })]
 fn supported_setting_persistence_is_isolated_and_round_trippable(
     cx: &mut gpui::TestAppContext,
-    seeds: [u8; 18],
+    seeds: [u8; 19],
 ) {
     let patch = SupportedSettingsPatch { seeds };
     cx.update(|cx| {

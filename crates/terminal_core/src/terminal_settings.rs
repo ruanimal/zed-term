@@ -22,6 +22,7 @@ pub const DEFAULT_TERMINAL_FONT_SIZE: f32 = 15.0;
 pub struct TerminalSettings {
     pub shell: Shell,
     pub working_directory: WorkingDirectory,
+    pub file_manager_open_mode: settings::FileManagerOpenMode,
     pub font_size: Option<Pixels>, // todo(settings_refactor) can be non-optional...
     pub font_family: Option<FontFamilyName>,
     pub font_fallbacks: Option<FontFallbacks>,
@@ -132,6 +133,7 @@ impl settings::Settings for TerminalSettings {
         TerminalSettings {
             shell: settings_shell_to_terminal_shell(project_content.shell.unwrap()),
             working_directory: project_content.working_directory.unwrap(),
+            file_manager_open_mode: user_content.file_manager_open_mode.unwrap_or_default(),
             font_size: user_content.font_size.map(|s| s.into_gpui()),
             font_family: user_content.font_family,
             font_fallbacks: user_content.font_fallbacks.map(|fallbacks| {

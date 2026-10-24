@@ -640,7 +640,11 @@ impl TerminalWindowView {
         })
     }
 
-    fn spawn_new_tab(&mut self, cx: &mut Context<Self>, initial_directory: Option<PathBuf>) {
+    pub(crate) fn spawn_new_tab(
+        &mut self,
+        cx: &mut Context<Self>,
+        initial_directory: Option<PathBuf>,
+    ) {
         let initial_directory =
             initial_directory.or_else(|| self.initial_directory_for_new_tab(cx));
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
@@ -2997,6 +3001,116 @@ mod tests {
             .into_iter()
             .map(|pane| pane.entity_id())
             .collect()
+    }
+
+    #[gpui::test]
+    fn file_manager_requests_follow_window_preference(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        let (first, second) = cx.update(|cx| {
+            cx.set_global(TestTerminalLaunchFailure {
+                reason: LAUNCH_FAILURE_REASON.to_string(),
+            });
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content
+                        .terminal
+                        .get_or_insert_default()
+                        .file_manager_open_mode = Some(settings::FileManagerOpenMode::NewTab);
+                });
+            });
+            crate::open_new_window(cx);
+            let first = cx
+                .windows()
+                .into_iter()
+                .find_map(|handle| handle.downcast::<TerminalWindowView>())
+                .expect("first terminal window should exist");
+            crate::open_new_window(cx);
+            let second = cx
+                .windows()
+                .into_iter()
+                .filter_map(|handle| handle.downcast::<TerminalWindowView>())
+                .find(|handle| *handle != first)
+                .expect("second terminal window should exist");
+            (first, second)
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            for handle in [first, second] {
+                handle
+                    .update(cx, |view, _, _| view.terminal_error = None)
+                    .expect("terminal window should exist");
+            }
+            crate::settings_ui::open_settings_window(cx);
+            crate::open_external_directory(Some(std::env::temp_dir()), cx);
+            assert_eq!(cx.windows().len(), 3);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            first
+                .update(cx, |view, _, _| assert!(view.terminal_error.is_none()))
+                .expect("first window should be untouched");
+            second
+                .update(cx, |view, _, _| {
+                    assert_eq!(view.terminal_error.as_deref(), Some(VISIBLE_LAUNCH_FAILURE));
+                    view.terminal_error = None;
+                })
+                .expect("recent window should receive the tab request");
+            first
+                .update(cx, |_, window, _| window.activate_window())
+                .expect("first window should activate");
+            crate::open_external_directory(Some(std::env::temp_dir()), cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            first
+                .update(cx, |view, _, _| {
+                    assert_eq!(view.terminal_error.as_deref(), Some(VISIBLE_LAUNCH_FAILURE));
+                })
+                .expect("active window should receive the tab request");
+            second
+                .update(cx, |view, _, _| assert!(view.terminal_error.is_none()))
+                .expect("other window should be untouched");
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content
+                        .terminal
+                        .get_or_insert_default()
+                        .file_manager_open_mode = Some(settings::FileManagerOpenMode::NewWindow);
+                });
+            });
+            crate::open_external_directory(Some(std::env::temp_dir()), cx);
+            assert_eq!(cx.windows().len(), 4);
+        });
+    }
+
+    #[gpui::test]
+    fn file_manager_new_tab_creates_window_when_none_remain(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        cx.update(|cx| {
+            cx.set_global(TestTerminalLaunchFailure {
+                reason: LAUNCH_FAILURE_REASON.to_string(),
+            });
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content
+                        .terminal
+                        .get_or_insert_default()
+                        .file_manager_open_mode = Some(settings::FileManagerOpenMode::NewTab);
+                });
+            });
+            crate::open_new_window(cx);
+            for handle in cx.windows() {
+                handle
+                    .update(cx, |_, window, _| window.remove_window())
+                    .expect("window should close");
+            }
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(cx.windows().is_empty());
+            crate::open_external_directory(Some(std::env::temp_dir()), cx);
+            assert_eq!(cx.windows().len(), 1);
+        });
     }
 
     /// **Validates: Requirements 4.10, 8.10**
