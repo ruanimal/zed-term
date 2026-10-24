@@ -1658,6 +1658,28 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
 
+    fn action_for_keystroke<'a>(
+        section: &'a serde_json::Value,
+        entry_kind: &str,
+        keystroke: &str,
+    ) -> Option<&'a serde_json::Value> {
+        let expected = gpui::Keystroke::parse(keystroke).expect("test keystroke should be valid");
+        // Writes use the platform's modifier spelling, which can differ from the fixture.
+        section
+            .get(entry_kind)?
+            .as_object()?
+            .iter()
+            .find_map(|(source, action)| {
+                let actual: Vec<_> = source
+                    .split_whitespace()
+                    .map(|source| {
+                        gpui::Keystroke::parse(source).expect("keymap keystroke should be valid")
+                    })
+                    .collect();
+                (actual.as_slice() == std::slice::from_ref(&expected)).then_some(action)
+            })
+    }
+
     #[test]
     fn humanized_action_names_split_on_case_boundaries() {
         assert_eq!(
@@ -1917,11 +1939,9 @@ mod tests {
         let unbind = parsed
             .as_array()
             .and_then(|sections| {
-                sections.iter().find_map(|section| {
-                    section
-                        .get("unbind")
-                        .and_then(|unbind| unbind.get("cmd-delete"))
-                })
+                sections
+                    .iter()
+                    .find_map(|section| action_for_keystroke(section, "unbind", "cmd-delete"))
             })
             .cloned()
             .expect("the unbind entry should have been written");
@@ -1948,12 +1968,9 @@ mod tests {
             .expect("the restored keymap must stay valid JSONC");
         assert!(
             restored.as_array().is_some_and(|sections| {
-                sections.iter().all(|section| {
-                    section
-                        .get("unbind")
-                        .and_then(|unbind| unbind.get("cmd-delete"))
-                        .is_none()
-                })
+                sections
+                    .iter()
+                    .all(|section| action_for_keystroke(section, "unbind", "cmd-delete").is_none())
             }),
             "restoring should remove the matching unbind entry: {restored}"
         );
@@ -2015,21 +2032,15 @@ mod tests {
             .expect("the keymap must stay valid JSONC");
         let sections = parsed.as_array().expect("the keymap is a list of sections");
         assert!(
-            sections.iter().all(|section| {
-                section
-                    .get("bindings")
-                    .and_then(|bindings| bindings.get("cmd-t"))
-                    .is_none()
-            }),
+            sections
+                .iter()
+                .all(|section| action_for_keystroke(section, "bindings", "cmd-t").is_none()),
             "the user override should have been removed: {updated}"
         );
         assert!(
-            sections.iter().any(|section| {
-                section
-                    .get("unbind")
-                    .and_then(|unbind| unbind.get("cmd-t"))
-                    .is_some()
-            }),
+            sections
+                .iter()
+                .any(|section| action_for_keystroke(section, "unbind", "cmd-t").is_some()),
             "the default binding must not take the keystroke back: {updated}"
         );
     }
@@ -2053,6 +2064,8 @@ mod tests {
             tab.reload_bindings(cx);
 
             let user_row = |keystroke: &str| {
+                let expected =
+                    gpui::Keystroke::parse(keystroke).expect("test keystroke should be valid");
                 tab.bindings()
                     .iter()
                     .position(|binding| {
@@ -2060,7 +2073,8 @@ mod tests {
                             && binding.keystrokes().is_some_and(|keystrokes| {
                                 keystrokes
                                     .iter()
-                                    .any(|binding| binding.unparse() == keystroke)
+                                    .map(|binding| binding.inner())
+                                    .eq([&expected])
                             })
                     })
                     .expect("the user binding should be listed")
@@ -2258,22 +2272,14 @@ mod tests {
         let sections = parsed.as_array().expect("the keymap is a list of sections");
         assert!(
             sections.iter().any(|section| {
-                section
-                    .get("bindings")
-                    .and_then(|bindings| bindings.get("cmd-shift-t"))
-                    .is_some()
+                action_for_keystroke(section, "bindings", "cmd-shift-t").is_some()
             }),
             "the new keystroke should have been bound: {updated}"
         );
         assert_eq!(
             sections
                 .iter()
-                .filter(|section| {
-                    section
-                        .get("unbind")
-                        .and_then(|unbind| unbind.get("cmd-t"))
-                        .is_some()
-                })
+                .filter(|section| action_for_keystroke(section, "unbind", "cmd-t").is_some())
                 .count(),
             1,
             "the disabled keystroke should stay suppressed exactly once: {updated}"
