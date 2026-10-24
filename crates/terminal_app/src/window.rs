@@ -10,14 +10,15 @@ use std::{
     time::Duration,
 };
 
+use collections::HashMap;
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, ClickEvent, ClipboardItem, Context, Decorations,
     DismissEvent, Edges, Element, ElementId, Entity, FocusHandle, Focusable as _, GlobalElementId,
     InputHandler, InspectorElementId, InteractiveElement as _, IntoElement, KeyDownEvent, LayoutId,
     MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
     Pixels, Position, PromptLevel, Render, ScrollHandle, StatefulInteractiveElement as _, Style,
-    Styled as _, Subscription, UTF16Selection, WeakEntity, Window, anchored, deferred, div,
-    prelude::FluentBuilder, px,
+    Styled as _, Subscription, UTF16Selection, WeakEntity, Window, WindowHandle, anchored,
+    deferred, div, prelude::FluentBuilder, px,
 };
 use settings::Settings as _;
 use settings::settings_content::TerminalBell;
@@ -129,7 +130,18 @@ pub struct TerminalWindowView {
     tab_bar_can_scroll_right: bool,
     terminal_error: Option<String>,
     live_settings: LiveTerminalSettings,
+    pane_subscriptions: HashMap<gpui::EntityId, PaneSubscriptions>,
     _subscriptions: Vec<Subscription>,
+}
+
+struct PaneSubscriptions {
+    _observation: Subscription,
+    event_subscription: Subscription,
+}
+
+struct TabMoveDestination {
+    window: WindowHandle<TerminalWindowView>,
+    position: Option<gpui::Point<Pixels>>,
 }
 
 /// A single tab: a split-pane group plus which pane currently holds focus.
@@ -527,10 +539,16 @@ impl Render for DraggedTerminalTab {
 
 impl TerminalWindowView {
     pub fn new(cx: &mut Context<Self>, initial_directory: Option<PathBuf>) -> Self {
+        let mut view = Self::new_empty(cx);
+        view.spawn_new_tab(cx, initial_directory);
+        view
+    }
+
+    pub(crate) fn new_empty(cx: &mut Context<Self>) -> Self {
         let live_settings = LiveTerminalSettings::from_settings(TerminalSettings::get_global(cx));
         let settings_subscription =
             cx.observe_global::<settings::SettingsStore>(Self::settings_changed);
-        let mut view = Self {
+        let view = Self {
             focus_handle: cx.focus_handle(),
             tabs: Vec::new(),
             active_tab_index: 0,
@@ -544,9 +562,9 @@ impl TerminalWindowView {
             tab_bar_can_scroll_right: false,
             terminal_error: None,
             live_settings,
+            pane_subscriptions: HashMap::default(),
             _subscriptions: vec![settings_subscription],
         };
-        view.spawn_new_tab(cx, initial_directory);
 
         // The macOS display link only redraws while invalidated. Shell output now
         // repaints through the observe chain (Terminal -> TerminalTab ->
@@ -707,19 +725,24 @@ impl TerminalWindowView {
     /// whole tab) can be torn down. Must run on the foreground thread after the
     /// tab exists.
     fn observe_tab(&mut self, tab: &Entity<TerminalTab>, cx: &mut Context<Self>) {
-        self._subscriptions.push(cx.observe(tab, |this, _, cx| {
+        self.observe_tab_with_subscription(tab, None, cx);
+    }
+
+    fn observe_tab_with_subscription(
+        &mut self,
+        tab: &Entity<TerminalTab>,
+        event_subscription: Option<Subscription>,
+        cx: &mut Context<Self>,
+    ) {
+        let observation = cx.observe(tab, |this, _, cx| {
             this.active_tab_index = this.active_tab_index.min(this.tabs.len().saturating_sub(1));
             cx.notify();
-        }));
-        self._subscriptions
-            .push(cx.subscribe(tab, |_this, pane, event, cx| {
-                // The callback runs while `TerminalWindowView` is already
-                // being updated, so defer window-level handling to avoid a
-                // double lease. Resolve the window by its root entity rather
-                // than using the active window, because a background terminal
-                // window may be the source of the event.
+        });
+        let event_subscription = event_subscription.unwrap_or_else(|| {
+            App::subscribe(cx, tab, |pane, event: &TerminalTabEvent, cx| {
+                // Resolve the current owner after pending updates because the pane
+                // may move between event emission and handling.
                 let event = *event;
-                let source = cx.entity();
                 let pane = pane.clone();
                 cx.defer(move |cx| {
                     for any_window in cx.windows() {
@@ -729,7 +752,12 @@ impl TerminalWindowView {
                         let Ok(window_entity) = window_handle.entity(cx) else {
                             continue;
                         };
-                        if window_entity != source {
+                        if !window_entity
+                            .read(cx)
+                            .tabs
+                            .iter()
+                            .any(|tab| tab.contains_pane(&pane))
+                        {
                             continue;
                         }
                         window_handle
@@ -745,7 +773,15 @@ impl TerminalWindowView {
                         break;
                     }
                 });
-            }));
+            })
+        });
+        self.pane_subscriptions.insert(
+            tab.entity_id(),
+            PaneSubscriptions {
+                _observation: observation,
+                event_subscription,
+            },
+        );
     }
 
     fn handle_bell(&mut self, newly_notified: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -818,6 +854,136 @@ impl TerminalWindowView {
         self.tab_bar_scroll_handle
             .scroll_to_item(self.active_tab_index);
         cx.notify();
+    }
+
+    fn move_tab_to_window(
+        &mut self,
+        pane: &Entity<TerminalTab>,
+        destination: Option<WindowHandle<Self>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        if destination.is_some_and(|destination| {
+            destination.window_id() == window.window_handle().window_id()
+        }) {
+            return Ok(());
+        }
+        let Some((source_index, tab)) = self
+            .tabs
+            .iter()
+            .enumerate()
+            .find(|(_, tab)| tab.contains_pane(pane))
+            .map(|(index, tab)| (index, tab.clone()))
+        else {
+            anyhow::bail!("The terminal tab is no longer in this window");
+        };
+        let panes = tab.panes();
+        let is_new_window = destination.is_none();
+        let destination = match destination {
+            Some(destination) => destination,
+            None => crate::open_empty_terminal_window(cx)?,
+        };
+
+        // Keep the source intact until the destination accepts the live entities;
+        // a window selected from the menu may have closed in the meantime.
+        if let Err(error) = destination.update(cx, |target, window, cx| {
+            for pane in &panes {
+                // Carry the existing listener across so queued events cannot
+                // fall between cancellation and activation of subscriptions.
+                let event_subscription = self
+                    .pane_subscriptions
+                    .remove(&pane.entity_id())
+                    .map(|subscriptions| subscriptions.event_subscription);
+                target.observe_tab_with_subscription(pane, event_subscription, cx);
+            }
+            target.tabs.push(tab);
+            target.terminal_error = None;
+            target.activate_tab(target.tabs.len() - 1, window, cx);
+            window.activate_window();
+        }) {
+            if is_new_window {
+                destination
+                    .update(cx, |_, window, _| window.remove_window())
+                    .log_err();
+            }
+            return Err(error);
+        }
+
+        self.tabs.remove(source_index);
+        self.tab_rename = None;
+        self.terminal_error = None;
+        if self.tabs.is_empty() {
+            self.active_tab_index = 0;
+            window.remove_window();
+        } else {
+            let was_active = source_index == self.active_tab_index;
+            if source_index < self.active_tab_index {
+                self.active_tab_index -= 1;
+            }
+            self.active_tab_index = self.active_tab_index.min(self.tabs.len() - 1);
+            if was_active {
+                self.focus_pane(window, cx);
+            }
+            self.tab_bar_scroll_handle
+                .scroll_to_item(self.active_tab_index);
+        }
+        cx.notify();
+        Ok(())
+    }
+
+    fn request_tab_move(
+        source: &WeakEntity<Self>,
+        pane: &Entity<TerminalTab>,
+        destination: Option<WindowHandle<Self>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        source
+            .update(cx, |this, cx| {
+                if let Err(error) = this.move_tab_to_window(pane, destination, window, cx) {
+                    log::error!("Could not move terminal tab: {error:#}");
+                    this.terminal_error = Some(format!("Could not move terminal tab: {error:#}"));
+                    cx.notify();
+                }
+            })
+            .log_err();
+    }
+
+    fn tab_move_destinations(
+        source_window: gpui::WindowId,
+        cx: &mut App,
+    ) -> Vec<TabMoveDestination> {
+        let positions_available = cx.compositor_name() != "Wayland";
+        let mut destinations = cx
+            .windows()
+            .into_iter()
+            .filter_map(|handle| handle.downcast::<Self>())
+            .filter(|handle| handle.window_id() != source_window)
+            .filter_map(|handle| {
+                let position = if positions_available {
+                    Some(
+                        gpui::AnyWindowHandle::from(handle)
+                            .update(cx, |_, window, _| window.bounds().origin)
+                            .log_err()?,
+                    )
+                } else {
+                    None
+                };
+                Some(TabMoveDestination {
+                    window: handle,
+                    position,
+                })
+            })
+            .collect::<Vec<_>>();
+        destinations.sort_by_key(|destination| {
+            (
+                destination
+                    .position
+                    .map(|position| (position.y, position.x)),
+                destination.window.window_id().as_u64(),
+            )
+        });
+        destinations
     }
 
     /// Runs `f` against the active tab's focused pane. Actions like
@@ -1847,15 +2013,51 @@ impl TerminalWindowView {
         let focus_handle = tab.read(cx).focus_handle.clone();
         let tab_index = self.active_tab_index;
         let view = cx.weak_entity();
+        let rename_view = view.clone();
+        let pane = tab;
         self.show_context_menu(position, window, cx, move |menu, _, _| {
             menu.context(focus_handle)
                 .entry("Rename Tab", None, move |window, cx| {
-                    if let Some(focus_handle) = view
+                    if let Some(focus_handle) = rename_view
                         .update(cx, |this, cx| this.begin_tab_rename(tab_index, cx))
                         .log_err()
                     {
                         window.focus(&focus_handle, cx);
                     }
+                })
+                .separator()
+                .submenu("Move Tab to Window", move |menu, window, cx| {
+                    let target_windows =
+                        Self::tab_move_destinations(window.window_handle().window_id(), cx);
+                    let new_window_view = view.clone();
+                    let new_window_pane = pane.clone();
+                    let mut menu = menu.entry("New Window", None, move |window, cx| {
+                        Self::request_tab_move(
+                            &new_window_view,
+                            &new_window_pane,
+                            None,
+                            window,
+                            cx,
+                        );
+                    });
+                    for (index, destination) in target_windows.iter().enumerate() {
+                        let source = view.clone();
+                        let pane = pane.clone();
+                        let label = match destination.position {
+                            Some(position) => format!(
+                                "Window {} ({:.0}, {:.0})",
+                                index + 1,
+                                position.x.as_f32(),
+                                position.y.as_f32(),
+                            ),
+                            None => format!("Window {} (position unavailable)", index + 1),
+                        };
+                        let destination = destination.window;
+                        menu = menu.entry(label, None, move |window, cx| {
+                            Self::request_tab_move(&source, &pane, Some(destination), window, cx);
+                        });
+                    }
+                    menu
                 })
                 .separator()
                 .action("Close", Box::new(CloseTab))
@@ -2972,6 +3174,7 @@ mod tests {
                 tab_bar_can_scroll_right: false,
                 terminal_error: None,
                 live_settings,
+                pane_subscriptions: HashMap::default(),
                 _subscriptions: vec![settings_subscription],
             }
         })
@@ -3001,6 +3204,398 @@ mod tests {
             .into_iter()
             .map(|pane| pane.entity_id())
             .collect()
+    }
+
+    fn open_test_window_with_tabs(
+        tabs: Vec<WindowTab>,
+        active_tab_index: usize,
+        cx: &mut App,
+    ) -> WindowHandle<TerminalWindowView> {
+        let handle = crate::open_empty_terminal_window(cx).expect("window should open");
+        handle
+            .update(cx, |view, window, cx| {
+                for tab in &tabs {
+                    for pane in tab.panes() {
+                        view.observe_tab(&pane, cx);
+                    }
+                }
+                view.tabs = tabs;
+                view.activate_tab(active_tab_index, window, cx);
+            })
+            .expect("window should exist");
+        handle
+    }
+
+    fn dispatch_test_menu_actions(
+        source: WindowHandle<TerminalWindowView>,
+        actions: &[&str],
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for action in actions {
+            cx.update(|cx| {
+                gpui::AnyWindowHandle::from(source)
+                    .update(cx, |_, window, cx| {
+                        let action = cx
+                            .build_action(action, None)
+                            .expect("menu action should exist");
+                        window.dispatch_action(action, cx);
+                    })
+                    .expect("source should exist during menu action");
+            });
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
+    fn move_tab_preserves_split_session_and_rebinds_events(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        let (source, destination, first, second, before) = cx.update(|cx| {
+            let settings = TerminalSettings::get_global(cx).clone();
+            let remaining = new_test_pane(&settings, 51_000, cx);
+            let first = new_test_pane(&settings, 51_001, cx);
+            let second = new_test_pane(&settings, 51_002, cx);
+            first.update(cx, |pane, cx| {
+                pane.search_query = "preserved query".into();
+                pane.search_active = true;
+                pane.terminal.update(cx, |terminal, cx| {
+                    terminal.write_output(b"retained terminal output\r\n", cx);
+                });
+            });
+            let mut split_root = SplitNode::leaf(first.clone());
+            assert!(split_root.split(&first, second.clone(), SplitDirection::Right));
+            if let SplitNode::Axis { flexes, .. } = &mut split_root {
+                *flexes = vec![0.3, 0.7];
+            }
+            let source = open_test_window_with_tabs(
+                vec![
+                    WindowTab::new(remaining),
+                    WindowTab {
+                        split_root: Some(split_root),
+                        active_pane_tab: Some(second.clone()),
+                        maximized_pane_tab: Some(second.clone()),
+                        title_override: Some("Running work".into()),
+                    },
+                ],
+                1,
+                cx,
+            );
+            let destination_pane = new_test_pane(&settings, 51_003, cx);
+            let destination =
+                open_test_window_with_tabs(vec![WindowTab::new(destination_pane)], 0, cx);
+            let before = pane_invariant_snapshots(&[first.clone(), second.clone()], cx);
+            source
+                .update(cx, |view, window, cx| {
+                    view.move_tab_to_window(&second, Some(destination), window, cx)
+                        .expect("tab should move");
+                    assert_eq!(view.tabs.len(), 1);
+                    assert_eq!(view.active_tab_index, 0);
+                    assert_eq!(view.pane_subscriptions.len(), 1);
+                    assert!(
+                        view.active_tab()
+                            .expect("remaining tab")
+                            .read(cx)
+                            .focus_handle
+                            .is_focused(window)
+                    );
+                })
+                .expect("source should remain open");
+            destination
+                .update(cx, |view, window, cx| {
+                    assert_eq!(view.tabs.len(), 2);
+                    assert_eq!(view.active_tab_index, 1);
+                    assert_eq!(view.pane_subscriptions.len(), 3);
+                    let tab = view.tabs.last().expect("moved tab");
+                    assert_eq!(tab.title(cx), "Running work");
+                    assert_eq!(tab.focused_tab(), Some(second.clone()));
+                    assert_eq!(tab.maximized_pane_tab, Some(second.clone()));
+                    match tab.split_root.as_ref().expect("split layout") {
+                        SplitNode::Axis { flexes, .. } => assert_eq!(flexes, &[0.3, 0.7]),
+                        SplitNode::Leaf { .. } => panic!("split layout should survive"),
+                    }
+                    assert!(second.read(cx).focus_handle.is_focused(window));
+                })
+                .expect("destination should exist");
+            assert_eq!(first.read(cx).search_query, "preserved query");
+            assert!(first.read(cx).search_active);
+            (source, destination, first, second, before)
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                pane_invariant_snapshots(&[first.clone(), second.clone()], cx),
+                before
+            );
+            first.update(cx, |_, cx| cx.emit(TerminalTabEvent::CloseTerminal));
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            source
+                .update(cx, |view, _, _| assert_eq!(view.tabs.len(), 1))
+                .expect("source should remain open");
+            destination
+                .update(cx, |view, _, _| {
+                    let tab = view.tabs.last().expect("moved tab");
+                    assert_eq!(tab.panes(), vec![second.clone()]);
+                    assert!(tab.split_root.is_none());
+                })
+                .expect("destination should remain open");
+            second.update(cx, |_, cx| cx.emit(TerminalTabEvent::CloseTerminal));
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            destination
+                .update(cx, |view, _, _| assert_eq!(view.tabs.len(), 1))
+                .expect("destination's original tab should survive");
+        });
+    }
+
+    #[gpui::test]
+    fn tab_move_destinations_follow_screen_position(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        cx.update(|cx| {
+            let open_window = |position, cx: &mut App| {
+                cx.open_window(
+                    crate::window_options(Bounds::new(position, gpui::size(px(600.), px(400.)))),
+                    |_, cx| cx.new(TerminalWindowView::new_empty),
+                )
+                .expect("terminal window should open")
+            };
+            let source = open_window(gpui::point(px(-900.), px(-900.)), cx);
+            let lower = open_window(gpui::point(px(350.), px(200.)), cx);
+            let top_left = open_window(gpui::point(px(-50.), px(-100.)), cx);
+            let top_right = open_window(gpui::point(px(400.), px(-100.)), cx);
+            let overlapping = open_window(gpui::point(px(-50.), px(-100.)), cx);
+            let bottom_left = open_window(gpui::point(px(-600.), px(300.)), cx);
+            let destinations = source
+                .update(cx, |_, window, cx| {
+                    TerminalWindowView::tab_move_destinations(
+                        window.window_handle().window_id(),
+                        cx,
+                    )
+                })
+                .expect("source should exist");
+            assert_eq!(
+                destinations
+                    .iter()
+                    .map(|destination| destination.window)
+                    .collect::<Vec<_>>(),
+                vec![top_left, overlapping, top_right, lower, bottom_left],
+            );
+            assert_eq!(
+                destinations
+                    .iter()
+                    .map(|destination| destination.position)
+                    .collect::<Vec<_>>(),
+                vec![
+                    Some(gpui::point(px(-50.), px(-100.))),
+                    Some(gpui::point(px(-50.), px(-100.))),
+                    Some(gpui::point(px(400.), px(-100.))),
+                    Some(gpui::point(px(350.), px(200.))),
+                    Some(gpui::point(px(-600.), px(300.))),
+                ],
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn move_tab_from_context_menu_to_existing_window(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        let (source, destination, moving) = cx.update(|cx| {
+            let settings = TerminalSettings::get_global(cx).clone();
+            let remaining = new_test_pane(&settings, 55_000, cx);
+            let moving = new_test_pane(&settings, 55_001, cx);
+            let destination_pane = new_test_pane(&settings, 55_002, cx);
+            let source = open_test_window_with_tabs(
+                vec![WindowTab::new(remaining), WindowTab::new(moving.clone())],
+                1,
+                cx,
+            );
+            let destination =
+                open_test_window_with_tabs(vec![WindowTab::new(destination_pane)], 0, cx);
+            source
+                .update(cx, |view, window, cx| {
+                    view.deploy_tab_context_menu(gpui::point(px(30.), px(20.)), window, cx);
+                })
+                .expect("source menu should open");
+            (source, destination, moving)
+        });
+        cx.run_until_parked();
+        dispatch_test_menu_actions(
+            source,
+            &[
+                "menu::SelectFirst",
+                "menu::SelectNext",
+                "menu::Confirm",
+                "menu::SelectNext",
+                "menu::Confirm",
+            ],
+            cx,
+        );
+        cx.update(|cx| {
+            source
+                .update(cx, |view, _, _| {
+                    assert_eq!(view.tabs.len(), 1);
+                    assert!(view.context_menu.is_none());
+                })
+                .expect("source should keep its other tab");
+            destination
+                .update(cx, |view, window, cx| {
+                    assert_eq!(view.tabs.len(), 2);
+                    assert_eq!(view.active_tab(), Some(moving.clone()));
+                    assert!(moving.read(cx).focus_handle.is_focused(window));
+                })
+                .expect("destination should receive the selected tab");
+        });
+    }
+
+    #[gpui::test]
+    fn move_tab_to_new_window_closes_empty_source_without_launching_shell(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test_theme(cx);
+        let (source, pane) = cx.update(|cx| {
+            cx.set_global(TestTerminalLaunchFailure {
+                reason: LAUNCH_FAILURE_REASON.into(),
+            });
+            let settings = TerminalSettings::get_global(cx).clone();
+            let pane = new_test_pane(&settings, 52_000, cx);
+            let source = open_test_window_with_tabs(vec![WindowTab::new(pane.clone())], 0, cx);
+            source
+                .update(cx, |view, window, cx| {
+                    view.deploy_tab_context_menu(gpui::point(px(30.), px(20.)), window, cx);
+                })
+                .expect("source should exist during move");
+            (source, pane)
+        });
+        cx.run_until_parked();
+        dispatch_test_menu_actions(
+            source,
+            &[
+                "menu::SelectFirst",
+                "menu::SelectNext",
+                "menu::Confirm",
+                "menu::Confirm",
+            ],
+            cx,
+        );
+        cx.update(|cx| {
+            assert!(source.entity(cx).is_err());
+            assert_eq!(cx.windows().len(), 1);
+            let destination = cx
+                .windows()
+                .into_iter()
+                .find_map(|handle| handle.downcast::<TerminalWindowView>())
+                .expect("new terminal window");
+            destination
+                .update(cx, |view, window, cx| {
+                    assert_eq!(view.tabs.len(), 1);
+                    assert_eq!(view.active_tab(), Some(pane.clone()));
+                    assert!(
+                        view.terminal_error.is_none(),
+                        "moving must not launch another shell"
+                    );
+                    assert!(pane.read(cx).focus_handle.is_focused(window));
+                })
+                .expect("new window should exist");
+            pane.update(cx, |_, cx| cx.emit(TerminalTabEvent::CloseTerminal));
+        });
+        cx.run_until_parked();
+        cx.update(|cx| assert!(cx.windows().is_empty()));
+    }
+
+    #[gpui::test]
+    fn move_tab_to_closed_destination_keeps_source_and_reports_error(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test_theme(cx);
+        let (source, destination, pane) = cx.update(|cx| {
+            let settings = TerminalSettings::get_global(cx).clone();
+            let pane = new_test_pane(&settings, 53_000, cx);
+            let source = open_test_window_with_tabs(vec![WindowTab::new(pane.clone())], 0, cx);
+            let destination =
+                crate::open_empty_terminal_window(cx).expect("destination should open");
+            destination
+                .update(cx, |_, window, _| window.remove_window())
+                .expect("destination should close");
+            (source, destination, pane)
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let source_view = source.entity(cx).expect("source should exist").downgrade();
+            gpui::AnyWindowHandle::from(source)
+                .update(cx, |_, window, cx| {
+                    TerminalWindowView::request_tab_move(
+                        &source_view,
+                        &pane,
+                        Some(destination),
+                        window,
+                        cx,
+                    );
+                })
+                .expect("source should remain open");
+            source
+                .update(cx, |view, _, _| {
+                    assert_eq!(view.active_tab(), Some(pane));
+                    assert_eq!(view.pane_subscriptions.len(), 1);
+                    assert!(
+                        view.terminal_error
+                            .as_ref()
+                            .is_some_and(|error| error.starts_with("Could not move terminal tab:"))
+                    );
+                })
+                .expect("source should remain intact");
+        });
+    }
+
+    #[gpui::test]
+    fn move_tab_routes_already_queued_exit_to_current_owner(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        for (keep_source, defer_move) in
+            [(true, false), (true, true), (false, false), (false, true)]
+        {
+            let (source, destination) = cx.update(|cx| {
+                let settings = TerminalSettings::get_global(cx).clone();
+                let remaining = new_test_pane(&settings, 54_000, cx);
+                let moving = new_test_pane(&settings, 54_001, cx);
+                let destination_pane = new_test_pane(&settings, 54_002, cx);
+                let mut source_tabs = Vec::new();
+                if keep_source {
+                    source_tabs.push(WindowTab::new(remaining));
+                }
+                source_tabs.push(WindowTab::new(moving.clone()));
+                let source = open_test_window_with_tabs(source_tabs, usize::from(keep_source), cx);
+                let destination =
+                    open_test_window_with_tabs(vec![WindowTab::new(destination_pane)], 0, cx);
+                moving.update(cx, |_, cx| cx.emit(TerminalTabEvent::CloseTerminal));
+                let move_tab = move |cx: &mut App| {
+                    source
+                        .update(cx, |view, window, cx| {
+                            view.move_tab_to_window(&moving, Some(destination), window, cx)
+                                .expect("tab should move before the deferred exit");
+                        })
+                        .expect("source should exist");
+                };
+                if defer_move {
+                    cx.defer(move_tab);
+                } else {
+                    move_tab(cx);
+                }
+                (source, destination)
+            });
+            cx.run_until_parked();
+            cx.update(|cx| {
+                if keep_source {
+                    source
+                        .update(cx, |view, _, _| assert_eq!(view.tabs.len(), 1))
+                        .expect("source's original tab should survive");
+                } else {
+                    assert!(source.entity(cx).is_err(), "empty source should close");
+                }
+                destination
+                    .update(cx, |view, _, _| assert_eq!(view.tabs.len(), 1))
+                    .expect("destination's original tab should survive");
+            });
+        }
     }
 
     #[gpui::test]
@@ -4164,6 +4759,7 @@ mod tests {
                 tab_bar_can_scroll_right: false,
                 terminal_error: None,
                 live_settings,
+                pane_subscriptions: HashMap::default(),
                 _subscriptions: vec![settings_subscription],
             }
         })
@@ -4309,6 +4905,7 @@ mod tests {
                 tab_bar_can_scroll_right: false,
                 terminal_error: None,
                 live_settings,
+                pane_subscriptions: HashMap::default(),
                 _subscriptions: vec![settings_subscription],
             }
         });

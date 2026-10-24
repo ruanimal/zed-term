@@ -132,7 +132,11 @@
 
 ## 跨窗口 Tab 拖拽
 
-当前 tab 拖拽排序仅限同一窗口。可支持把完整 `WindowTab` 在 terminal-app 窗口之间移动，同时保留 terminal entity、split 树、zoom、bell 与焦点状态。
+**菜单移动已完成（2026-10-24）**：tab 右键菜单统一使用 `Move Tab to Window` 入口，子菜单第一项为 `New Window`，其后以 `Window 1`、`Window 2` 等列出已有目标窗口。完整 `WindowTab` 随 terminal entity、split 树、zoom、自定义标题、搜索与 bell 状态迁移，目标窗口获得焦点；源窗口最后一个 tab 移走后关闭。输出、响铃与退出事件跟随 pane 的当前归属窗口，目标窗口已关闭时保留原 tab 并显示错误。
+
+窗口列表在打开子菜单时刷新。macOS / X11 显示窗口左上角坐标（逻辑像素），按 Y、X 升序排序，同坐标时保持稳定顺序；Wayland 不提供真实屏幕坐标，显示 `position unavailable` 并保持稳定顺序。
+
+tab 拖拽排序仍仅限同一窗口；跨窗口拖放和拖出创建窗口待实现，可复用现有迁移逻辑。
 
 建议验收：源窗口和目标窗口状态一致；移动最后一个 tab 时窗口关闭语义正确；拖拽期间 pane 退出或 tab 关闭时安全取消。
 

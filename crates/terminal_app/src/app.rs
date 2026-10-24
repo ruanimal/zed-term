@@ -328,36 +328,56 @@ fn open_window_with_bounds(
     initial_directory: Option<std::path::PathBuf>,
     cx: &mut App,
 ) {
-    let handle = cx
-        .open_window(window_options(bounds), |window, cx| {
-            let view = cx.new(|cx| {
-                cx.observe_window_activation(window, |_, window, cx| {
-                    if window.is_window_active() {
-                        remember_terminal_window(window.window_handle(), cx);
-                    }
-                })
-                .detach();
-                window::TerminalWindowView::new(cx, initial_directory)
-            });
-            remember_terminal_window(window.window_handle(), cx);
-            view.read(cx).focus_handle.clone().focus(window, cx);
-            view
-        })
-        .log_err();
+    create_terminal_window(bounds, cx, |cx| {
+        window::TerminalWindowView::new(cx, initial_directory)
+    })
+    .log_err();
+}
 
-    if let Some(handle) = handle {
-        let task = cx.spawn(async move |cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(300))
-                .await;
-            handle
-                .update(cx, |_, window, _| {
-                    window.activate_window();
-                })
-                .log_err();
+pub(crate) fn open_empty_terminal_window(
+    cx: &mut App,
+) -> anyhow::Result<gpui::WindowHandle<window::TerminalWindowView>> {
+    let settings = TerminalSettings::get_global(cx);
+    let bounds = gpui::Bounds::centered(
+        None,
+        size(settings.default_width, settings.default_height),
+        cx,
+    );
+    create_terminal_window(bounds, cx, window::TerminalWindowView::new_empty)
+}
+
+fn create_terminal_window(
+    bounds: gpui::Bounds<gpui::Pixels>,
+    cx: &mut App,
+    build: impl FnOnce(&mut gpui::Context<window::TerminalWindowView>) -> window::TerminalWindowView,
+) -> anyhow::Result<gpui::WindowHandle<window::TerminalWindowView>> {
+    let handle = cx.open_window(window_options(bounds), |window, cx| {
+        let view = cx.new(|cx| {
+            cx.observe_window_activation(window, |_, window, cx| {
+                if window.is_window_active() {
+                    remember_terminal_window(window.window_handle(), cx);
+                }
+            })
+            .detach();
+            build(cx)
         });
-        task.detach();
-    }
+        remember_terminal_window(window.window_handle(), cx);
+        view.read(cx).focus_handle.clone().focus(window, cx);
+        view
+    })?;
+
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(Duration::from_millis(300))
+            .await;
+        handle
+            .update(cx, |_, window, _| {
+                window.activate_window();
+            })
+            .log_err();
+    })
+    .detach();
+    Ok(handle)
 }
 
 /// Bootstrap the application inside GPUI's launch callback: settings, theme

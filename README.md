@@ -15,6 +15,13 @@ macOS is the primary platform. Linux builds and deb packaging are also supported
 - URL, OSC 8, and path link support
 - Terminal settings, keymap editing, and theme extension management
 
+Right-click a terminal tab and open **Move Tab to Window**, then choose
+**New Window** or an existing window. On macOS and X11, entries show the window's
+top-left coordinates in logical pixels, such as **Window 1 (120, 80)**, and sort
+from top to bottom, then left to right. Wayland entries show **position unavailable**.
+The entire tab moves with its split panes and running sessions; moving the last
+tab closes the source window.
+
 In Settings → Terminal → Shell and environment, **Open from file manager**
 controls whether a directory opens in a new window (the default) or a new tab in
 the most recently active terminal window. If no terminal window is open, ZedTerm

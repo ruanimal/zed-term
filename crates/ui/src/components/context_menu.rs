@@ -2261,10 +2261,19 @@ impl Render for ContextMenu {
 
         let render_menu = |cx: &mut Context<Self>, window: &mut Window| {
             let bounds_cell = self.main_menu_observed_bounds.clone();
+            let menu_entity_id = cx.entity_id();
+            let submenu_needs_layout = matches!(
+                &self.submenu_state,
+                SubmenuState::Open(open_submenu) if open_submenu.offset.is_none()
+            );
             let menu_bounds_measure = canvas(
                 {
-                    move |bounds, _window, _cx| {
+                    move |bounds, _window, cx| {
                         bounds_cell.set(Some(bounds));
+                        // Submenu placement needs the bounds measured in this frame.
+                        if submenu_needs_layout {
+                            cx.defer(move |cx| cx.notify(menu_entity_id));
+                        }
                     }
                 },
                 |_bounds, _state, _window, _cx| {},
@@ -2443,6 +2452,38 @@ mod tests {
     use gpui::TestAppContext;
 
     use super::*;
+
+    #[gpui::test]
+    fn keyboard_submenu_finishes_layout_without_another_input(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let menu_window = cx.add_window(|window, cx| {
+            ContextMenu::new(window, cx, |menu, _, _| {
+                menu.submenu("Destination", |menu, _, _| {
+                    menu.entry("Other window", None, |_, _| {})
+                })
+            })
+        });
+        menu_window
+            .update(cx, |menu, window, cx| {
+                menu.select_first(&SelectFirst, window, cx);
+                menu.confirm(&menu::Confirm, window, cx);
+            })
+            .expect("menu window should exist");
+        cx.run_until_parked();
+        menu_window
+            .update(cx, |menu, window, cx| {
+                let SubmenuState::Open(submenu) = &menu.submenu_state else {
+                    panic!("submenu should be open");
+                };
+                assert!(submenu.offset.is_some(), "submenu should finish measuring");
+                assert!(submenu.entity.read(cx).focus_handle.is_focused(window));
+            })
+            .expect("menu window should remain open");
+    }
 
     #[gpui::test]
     fn can_navigate_back_over_headers(cx: &mut TestAppContext) {
