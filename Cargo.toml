@@ -9,18 +9,8 @@ members = [
     "crates/component",
     "crates/fs",
     "crates/git",
-    "crates/gpui",
-    "crates/gpui_apple",
-    "crates/gpui_linux",
-    "crates/gpui_macos",
-    "crates/gpui_macros",
-    "crates/gpui_platform",
     "crates/gpui_shared_string",
     "crates/gpui_util",
-    "crates/gpui_web",
-    "crates/gpui_wgpu",
-    "crates/gpui_windows",
-    "crates/http_client",
     "crates/icons",
     "crates/language_model_core",
     "crates/media",
@@ -30,8 +20,6 @@ members = [
     "crates/path",
     "crates/paths",
     "crates/proto",
-    "crates/refineable",
-    "crates/refineable/derive_refineable",
     "crates/reqwest_client",
     "crates/release_channel",
     "crates/rope",
@@ -77,21 +65,15 @@ clock = { path = "crates/clock" }
 cloud_llm_client = { path = "crates/cloud_llm_client" }
 collections = { path = "crates/collections", version = "0.1.0" }
 component = { path = "crates/component" }
-derive_refineable = { path = "crates/refineable/derive_refineable" }
 fs = { path = "crates/fs" }
 git = { path = "crates/git" }
-gpui = { path = "crates/gpui", default-features = false }
-gpui_apple = { path = "crates/gpui_apple" }
-gpui_linux = { path = "crates/gpui_linux", default-features = false }
-gpui_macos = { path = "crates/gpui_macos", default-features = false }
-gpui_macros = { path = "crates/gpui_macros" }
-gpui_platform = { path = "crates/gpui_platform", default-features = false }
+gpui = { package = "gpui-pre", version = "=0.3.1", default-features = false }
+# 0.3.1's macro helper is unconditionally compiled even when its inspector module is gated out.
+gpui_macros = { package = "gpui-pre-macros", version = "=0.3.1", features = ["inspector"] }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.1", default-features = false }
 gpui_shared_string = { path = "crates/gpui_shared_string" }
 gpui_util = { path = "crates/gpui_util" }
-gpui_web = { path = "crates/gpui_web" }
-gpui_wgpu = { path = "crates/gpui_wgpu" }
-gpui_windows = { path = "crates/gpui_windows", default-features = false }
-http_client = { path = "crates/http_client" }
+http_client = { package = "gpui-pre-http-client", version = "=0.3.1" }
 icons = { path = "crates/icons" }
 language_model_core = { path = "crates/language_model_core" }
 media = { path = "crates/media" }
@@ -102,7 +84,7 @@ path = { path = "crates/path" }
 paths = { path = "crates/paths" }
 perf = { path = "tooling/perf" }
 proto = { path = "crates/proto" }
-refineable = { path = "crates/refineable" }
+refineable = { package = "gpui-pre-refineable", version = "=0.3.1" }
 release_channel = { path = "crates/release_channel" }
 reqwest_client = { path = "crates/reqwest_client" }
 rope = { path = "crates/rope" }
@@ -590,6 +572,8 @@ features = [
 ]
 
 [patch.crates-io]
+# GPUI's property tests must share our async-closure-capable proptest snapshot.
+proptest = { git = "https://github.com/proptest-rs/proptest", rev = "3dca198a8fef1b32e3a66f1e1897c955b4dc5b5b" }
 # Unify `tree_sitter_language::LanguageFn` between crates.io grammar crates and
 # the git tree-sitter above; two instances of the crate would make grammar
 # constants type-incompatible with `tree_sitter::Language`.
@@ -624,8 +608,8 @@ debug = "full"
 
 [profile.dev.package]
 # proc-macros start
-gpui_macros = { opt-level = 3 }
-derive_refineable = { opt-level = 3 }
+gpui-pre-macros = { opt-level = 3 }
+gpui-pre-derive-refineable = { opt-level = 3 }
 settings_macros = { opt-level = 3 }
 ui_macros = { opt-level = 3 }
 util_macros = { opt-level = 3 }
@@ -647,7 +631,6 @@ assets = { codegen-units = 1 }
 collections = { codegen-units = 1 }
 menu = { codegen-units = 1 }
 paths = { codegen-units = 1 }
-refineable = { codegen-units = 1 }
 release_channel = { codegen-units = 1 }
 telemetry_events = { codegen-units = 1 }
 

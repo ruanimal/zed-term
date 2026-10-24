@@ -981,7 +981,3 @@ fn test_spawn_dedicated_detached_child_runs_after_root_completes() {
         "detached child must complete after the root, not be cancelled with it"
     );
 }
-
-// The production smoke test for `spawn_dedicated` lives in the `gpui` crate
-// alongside `PlatformScheduler`, which is the real production implementation
-// of the `Scheduler` trait. See `crates/gpui/src/platform_scheduler.rs`.
