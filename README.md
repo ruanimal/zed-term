@@ -20,6 +20,8 @@ macOS is the primary platform. Linux builds and deb packaging are also supported
 - File uploads and downloads via [trzsz](https://trzsz.github.io/) and ZMODEM
 - Terminal settings, keymap editing, theme extension management, and file manager integration
 
+See the [FAQ](docs/FAQ.md) for common questions and shell configuration tips.
+
 ## Project Structure
 
 - `crates/terminal_core` — Terminal state, PTY handling, parsing, scrolling, and search
