@@ -43,8 +43,8 @@ Run commands from the repository root:
 # Check the application
 cargo check --locked -p terminal_app
 
-# Run the application
-cargo run --locked -p terminal_app --bin terminal-app
+# Run a development instance with a separate data directory
+cargo run --locked -p terminal_app --bin terminal-app -- --user-data-dir /tmp/zedterm-dev
 
 # Run the tests of every crate you touched
 cargo test --locked -p terminal_app --lib
@@ -55,6 +55,13 @@ cargo test --locked -p settings --lib
 cargo fmt --all -- --check
 cargo clippy --locked -p terminal_app --all-targets -- --deny warnings
 ```
+
+ZedTerm allows one process per data directory. Without `--user-data-dir`, a running
+ZedTerm opens a new window and the newly built process exits successfully. That
+window belongs to the existing process and does not run your newly compiled code.
+Close the previous development instance before rerunning with the same directory.
+See the [FAQ](docs/FAQ.md#why-does-cargo-run-exit-immediately-when-launched-inside-zedterm)
+for details.
 
 For code changes, also run `git diff --check`. Changes affecting interaction behavior should be smoke-tested on macOS.
 

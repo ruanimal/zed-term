@@ -39,8 +39,8 @@ macOS 是主要支持的平台，同时也支持 Linux 构建和 deb 打包。
 # 检查应用
 cargo check --locked -p terminal_app
 
-# 运行应用
-cargo run --locked -p terminal_app --bin terminal-app
+# 使用独立数据目录运行开发实例
+cargo run --locked -p terminal_app --bin terminal-app -- --user-data-dir /tmp/zedterm-dev
 
 # 运行所有已修改 crate 的测试
 cargo test --locked -p terminal_app --lib
@@ -51,6 +51,12 @@ cargo test --locked -p settings --lib
 cargo fmt --all -- --check
 cargo clippy --locked -p terminal_app --all-targets -- --deny warnings
 ```
+
+ZedTerm 的每个数据目录只允许一个进程。不传 `--user-data-dir` 时，已经运行的
+ZedTerm 会打开一个新窗口，新编译的进程则正常退出。新窗口属于已有进程，
+运行的仍是旧代码。使用同一目录重新运行之前，
+请先关闭上一个开发实例。详细机制请参阅
+[FAQ](docs/FAQ.zh-CN.md#为什么在-zedterm-中执行-cargo-run-会立即退出)。
 
 修改代码后还应运行 `git diff --check`。影响交互行为的更改应在 macOS 上进行冒烟测试。
 
