@@ -52,7 +52,36 @@ Compare `git tag -l 'v*' | sort -V | tail -1` with the current Cargo version —
 they should match. The new version must be strictly greater. This project is
 pre-1.0, so patch for fixes, minor for features.
 
-### 3. Bump and commit
+### 3. Update the changelog
+
+Before bumping the version, update the root `CHANGELOG.md` for the version
+being released. Review every change since the latest release tag:
+
+```bash
+latest_tag=$(git describe --tags --abbrev=0)
+git log --oneline "$latest_tag..HEAD"
+git diff --stat "$latest_tag..HEAD"
+```
+
+Summarize user-visible features, fixes, and packaging or platform changes under
+a `## [X.Y.Z]` heading at the top of the released entries. Move any matching
+notes from `## [Unreleased]` into that version section, and leave
+`## [Unreleased]` ready for future work. Keep entries concise and omit internal
+maintenance that does not affect users. Do not rely on GitHub's generated
+release notes as a substitute for the checked-in changelog.
+
+Commit the changelog update separately before the release commit, for example:
+
+```bash
+git add CHANGELOG.md
+git commit -m 'docs: update changelog for vX.Y.Z'
+```
+
+The changelog commit is part of the release branch and tag, but the release
+commit itself must still contain only `crates/terminal_app/Cargo.toml` and
+`Cargo.lock` as specified above.
+
+### 4. Bump and commit
 
 Edit the single `version = "..."` line under `[package]` in
 `crates/terminal_app/Cargo.toml`, then refresh the lockfile. `Cargo.lock`
@@ -71,7 +100,7 @@ git add crates/terminal_app/Cargo.toml Cargo.lock
 git commit -m 'release: vX.Y.Z'
 ```
 
-### 4. Tag and push
+### 5. Tag and push
 
 ```bash
 git tag -a vX.Y.Z -m 'release: vX.Y.Z'
@@ -83,7 +112,7 @@ git push origin vX.Y.Z     # this push is what starts the release workflow
 mirror and does not build or publish anything — never push the tag there
 expecting a release.
 
-### 5. Confirm the run started, then hand off
+### 6. Confirm the run started, then hand off
 
 Do not wait for the build. The Linux job has a 45-minute timeout and each
 macOS job 60, and a full run routinely takes tens of minutes — blocking on it
