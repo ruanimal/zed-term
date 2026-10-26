@@ -1,5 +1,44 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
+    <linearGradient id="tile" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#303940"/>
+      <stop offset="0.48" stop-color="#20272D"/>
+      <stop offset="1" stop-color="#14191E"/>
+    </linearGradient>
+    <radialGradient id="surface-light" cx="0" cy="0" r="1" gradientTransform="translate(360 100) rotate(80) scale(720 880)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#B7D3E5" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#B7D3E5" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#D3E3EE" stop-opacity="0.38"/>
+      <stop offset="0.3" stop-color="#C3D4E0" stop-opacity="0.13"/>
+      <stop offset="0.65" stop-color="#738490" stop-opacity="0.07"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.45"/>
+    </linearGradient>
+    <linearGradient id="silver" x1="512" y1="324" x2="512" y2="700" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F3F7FA"/>
+      <stop offset="1" stop-color="#D6E0E7"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="512" y1="403" x2="512" y2="601" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9AEAFF"/>
+      <stop offset="1" stop-color="#62D1F0"/>
+    </linearGradient>
+    <filter id="tile-shadow" x="0" y="0" width="1024" height="1024" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="18"/>
+      <feOffset dy="18"/>
+      <feComponentTransfer>
+        <feFuncA type="linear" slope="0.22"/>
+      </feComponentTransfer>
+      <feBlend in="SourceGraphic"/>
+    </filter>
+    <filter id="symbol-shadow" x="240" y="300" width="544" height="432" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="3"/>
+      <feOffset dy="4"/>
+      <feComponentTransfer>
+        <feFuncA type="linear" slope="0.32"/>
+      </feComponentTransfer>
+      <feBlend in="SourceGraphic"/>
+    </filter>
     <pattern id="grain" width="32" height="32" patternUnits="userSpaceOnUse">
       <circle cx="4" cy="7" r="1.4" fill="#FFFFFF" fill-opacity="0.22"/>
       <circle cx="22" cy="18" r="1" fill="#FFFFFF" fill-opacity="0.14"/>
@@ -9,14 +48,17 @@
 
   <!-- Background tile reduced to the Apple Big Sur icon grid:
        824x824 (80.5% of the 1024 canvas, 100px margins). The artwork stays at its original size. -->
-  <rect x="100" y="100" width="824" height="824" rx="220" fill="#15181B"/>
-  <rect x="100" y="100" width="824" height="824" rx="220" fill="url(#grain)" opacity="0.42"/>
-  <rect x="101.5" y="101.5" width="821" height="821" rx="218.5" stroke="#33383D" stroke-width="3"/>
+  <rect x="100" y="100" width="824" height="824" rx="220" fill="url(#tile)" filter="url(#tile-shadow)"/>
+  <rect x="100" y="100" width="824" height="824" rx="220" fill="url(#surface-light)"/>
+  <rect x="100" y="100" width="824" height="824" rx="220" fill="url(#grain)" opacity="0.12"/>
+  <rect x="104.5" y="104.5" width="815" height="815" rx="215.5" stroke="url(#rim)" stroke-width="9"/>
 
-  <path d="M272 342H742" stroke="#E4E8EB" stroke-width="36" stroke-linecap="round"/>
-  <path d="M742 342L650 410" stroke="#E4E8EB" stroke-width="36" stroke-linecap="round"/>
-  <path d="M328 648L282 682" stroke="#E4E8EB" stroke-width="36" stroke-linecap="round"/>
-  <path d="M282 682H744" stroke="#E4E8EB" stroke-width="36" stroke-linecap="round"/>
-  <path d="M351 422L445 502L351 582" stroke="#7BDFFF" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M505 582H671" stroke="#7BDFFF" stroke-width="38" stroke-linecap="round"/>
+  <g filter="url(#symbol-shadow)">
+    <path d="M272 342H742" stroke="url(#silver)" stroke-width="36" stroke-linecap="round"/>
+    <path d="M742 342L650 410" stroke="url(#silver)" stroke-width="36" stroke-linecap="round"/>
+    <path d="M328 648L282 682" stroke="url(#silver)" stroke-width="36" stroke-linecap="round"/>
+    <path d="M282 682H744" stroke="url(#silver)" stroke-width="36" stroke-linecap="round"/>
+    <path d="M351 422L445 502L351 582" stroke="url(#cyan)" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M505 582H671" stroke="url(#cyan)" stroke-width="38" stroke-linecap="round"/>
+  </g>
 </svg>
