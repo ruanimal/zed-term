@@ -21,7 +21,7 @@ versions anywhere else — nothing else declares one.
 | Commit contents | only `crates/terminal_app/Cargo.toml` + `Cargo.lock` |
 | Push remote | `origin` (`github.com:ruanimal/zed-term.git`) — this is where Actions run |
 | Workflow | `.github/workflows/release.yml`, triggered by pushing a `v*` tag |
-| Assets | 1 deb (`zedterm-X.Y.Z-linux-amd64.deb`) + 2 DMGs (`macos-x86_64`, `macos-arm64`), exactly 3 |
+| Assets | 2 debs (`zedterm-X.Y.Z-linux-amd64.deb`, `zedterm-X.Y.Z-linux-arm64.deb`) + 2 DMGs (`macos-x86_64`, `macos-arm64`), exactly 4 |
 
 ## Steps
 
@@ -98,8 +98,8 @@ gh run view <run-id>                           # after a few seconds: check the 
 `prepare` finishes in seconds even though the build jobs run for much longer,
 so this one early check is worth doing — it catches a tag/version mismatch
 immediately instead of after an hour of building. The remaining jobs are
-`linux`, `macos` (x86_64 + arm64 matrix), and `publish`, which downloads the
-`zedterm-*` artifacts, hard-fails unless it finds exactly 3 files, and creates
+`linux` (amd64 + arm64 matrix), `macos` (x86_64 + arm64 matrix), and `publish`, which downloads the
+`zedterm-*` artifacts, hard-fails unless it finds exactly 4 files, and creates
 the GitHub release with generated notes and `draft: false`.
 
 Verification is a separate, later step — run it when the user asks or the run
@@ -110,7 +110,7 @@ gh run list --workflow release.yml --limit 1
 gh release view vX.Y.Z
 ```
 
-Success is a published release with all three assets attached. A run that is
+Success is a published release with all four assets attached. A run that is
 merely still going is not a failure: report that it is in progress and the
 release URL, and only report failure once a job actually fails.
 

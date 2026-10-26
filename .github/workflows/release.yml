@@ -66,9 +66,17 @@ jobs:
           printf 'tag=%s\n' "$release_tag" >> "$GITHUB_OUTPUT"
 
   linux:
-    name: Build Linux deb
+    name: Build Linux ${{ matrix.arch }} deb
     needs: prepare
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -90,6 +98,7 @@ jobs:
             liblzma-dev \
             libssl-dev \
             libvulkan-dev \
+            lld \
             libwayland-dev \
             libx11-dev \
             libx11-xcb-dev \
@@ -118,13 +127,13 @@ jobs:
         run: |
           bash scripts/package-linux-deb.sh \
             --version "$VERSION" \
-            --output "$RUNNER_TEMP/zedterm-${VERSION}-linux-amd64.deb"
+            --output "$RUNNER_TEMP/zedterm-${VERSION}-linux-${{ matrix.arch }}.deb"
 
       - name: Upload Linux package
         uses: actions/upload-artifact@v4
         with:
-          name: zedterm-linux-deb
-          path: ${{ runner.temp }}/zedterm-${{ needs.prepare.outputs.version }}-linux-amd64.deb
+          name: zedterm-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/zedterm-${{ needs.prepare.outputs.version }}-linux-${{ matrix.arch }}.deb
           if-no-files-found: error
           retention-days: 7
 
@@ -191,8 +200,8 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t assets < <(find release-assets -maxdepth 1 -type f -print | sort)
-          if [ "${#assets[@]}" -ne 3 ]; then
-            echo "::error::Expected one deb and two macOS packages, found ${#assets[@]}"
+          if [ "${#assets[@]}" -ne 4 ]; then
+            echo "::error::Expected two debs and two macOS packages, found ${#assets[@]}"
             printf '%s\n' "${assets[@]}"
             exit 1
           fi

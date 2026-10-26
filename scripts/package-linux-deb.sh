@@ -65,7 +65,8 @@ if [[ "$version" == */* || "$version" == *[[:space:]]* ]]; then
 fi
 
 if [[ -z "$output_path" ]]; then
-    output_path="$workspace_root/target/package/zedterm-${version}-linux-amd64.deb"
+    architecture="$(dpkg --print-architecture)"
+    output_path="$workspace_root/target/package/zedterm-${version}-linux-${architecture}.deb"
 elif [[ "$output_path" != /* ]]; then
     output_path="$(pwd)/$output_path"
 fi
