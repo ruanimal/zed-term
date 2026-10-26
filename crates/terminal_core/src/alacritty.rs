@@ -216,6 +216,8 @@ pub(super) fn spawn_event_loop<P>(
 where
     P: tty::EventedPty + event::OnResize + Send + 'static,
 {
+    // Observe only bytes released by the transfer mux, never file-transfer payloads.
+    let pty = crate::progress::ProgressPty::new(pty, events_tx.clone());
     let event_loop = EventLoop::new(term, ZedListener(events_tx), pty, drain_on_exit, false)
         .context("failed to create event loop")?;
     let pty_tx = event_loop.channel();

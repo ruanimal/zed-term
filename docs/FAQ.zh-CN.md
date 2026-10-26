@@ -2,6 +2,39 @@
 
 [English](FAQ.md) | **简体中文**
 
+## 哪些命令可以在标签页和任务栏显示进度？
+
+ZedTerm 接收 `OSC 9;4` 进度协议，需要程序主动发送；不会识别 `apt update`
+等命令输出的普通百分比文本。可以在 POSIX shell 中测试：
+
+```sh
+printf '\033]9;4;1;50\007'  # 50% 进度
+printf '\033]9;4;3\007'     # 未知进度，标签页显示动画
+printf '\033]9;4;2;50\007'  # 50% 时发生错误
+printf '\033]9;4;4;50\007'  # 暂停在 50%
+printf '\033]9;4;0\007'     # 清除
+```
+
+支持 BEL 和 `ESC \\` 两种结束符。每个终端分屏独立保存进度；标签页显示其中最近更新的进度。
+macOS Dock、KDE Plasma 任务栏和兼容的 GNOME Dock 显示当前进程所有窗口中最近更新的进度，
+该任务清除或关闭后，会回退到另一个仍有进度的任务。
+
+标签页支持错误色和暂停色。Dock 使用原生进度条，并支持未知进度动画。
+Linux 通过 Unity Launcher D-Bus 接口发送数值进度，兼容 KDE Plasma、GNOME 的
+[Ubuntu Dock](https://github.com/micheleg/dash-to-dock/tree/ubuntu-dock) 和
+[Dash to Dock](https://github.com/micheleg/dash-to-dock)。未知进度时不显示系统图标进度条；
+需要安装 `dev.zed.ZedTerm.desktop` 启动项才能正确关联应用。
+进度有效期间会定期重新发送，因此启用或重启 Dock 后也能恢复显示，无需等待命令的百分比变化。
+
+原生 GNOME Shell 的 Dash 没有提供这一进度接口，需要启用 Ubuntu Dock 或 Dash to Dock。
+扩展的 `show-icons-emblems` 选项须保持开启（默认开启），勿扰模式也可能抑制图标标记。
+没有兼容 Dock 时，仍可查看 ZedTerm 标签页进度。其他 Linux 桌面需要支持同一接口的任务栏或扩展。
+
+达到 100% 不会自动清除，程序应主动发送状态 `0`，包括中断退出时。
+终端复位（`ESC c`）、shell 退出和关闭分屏也会清除进度。
+没有无活动超时，避免更新较慢的任务提前消失；如果命令异常退出后进度残留，
+可以执行上面的清除指令。终端复用器需要支持或透传这些控制序列。
+
 ## 为什么在 ZedTerm 中执行 `cargo run` 会立即退出？
 
 ZedTerm 对每个数据目录只允许一个进程，安装版和开发构建也遵循同一限制。执行：

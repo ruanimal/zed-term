@@ -59,6 +59,14 @@ util.workspace = true
 # fix is merged and published.
 zmodem2 = { git = "https://codeberg.org/fivetime/zmodem2", rev = "a17df2a824d08eebe4e35d599940c940500e460b" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5.13.2", default-features = false, features = ["async-io"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSDockTile", "NSImage", "NSImageView", "NSProgressIndicator"] }
+
 [build-dependencies]
 embed-resource = "=3.0.6"
 

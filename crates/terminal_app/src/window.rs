@@ -2531,7 +2531,13 @@ impl TerminalWindowView {
                     TabPosition::Middle(idx.cmp(&self.active_tab_index))
                 };
                 let tab_idx = idx;
-                Tab::new(idx.to_string())
+                let progress = tab
+                    .panes()
+                    .iter()
+                    .filter_map(|pane| pane.read(cx).progress())
+                    .max_by_key(|(updated, _)| *updated)
+                    .map(|(_, progress)| progress);
+                let tab_element = Tab::new(idx.to_string())
                     .height(window_chrome::TITLE_BAR_HEIGHT)
                     .position(position)
                     .toggle_state(idx == self.active_tab_index)
@@ -2629,6 +2635,12 @@ impl TerminalWindowView {
                             },
                         ))
                     })
+                    .into_any_element();
+                div()
+                    .id(format!("terminal-tab-{idx}"))
+                    .relative()
+                    .child(tab_element)
+                    .children(progress.map(|progress| crate::progress::render_bar(progress, cx)))
                     .into_any_element()
             })
             .collect()
@@ -3520,6 +3532,71 @@ mod tests {
             );
             assert_eq!(visual.debug_bounds("exit-fullscreen").is_some(), fullscreen);
         }
+    }
+
+    #[gpui::test]
+    fn osc_progress_renders_above_its_tab_and_clears(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        let (handle, terminal) = cx.update(|cx| {
+            let settings = TerminalSettings::get_global(cx).clone();
+            let pane = new_test_pane(&settings, 50_004, cx);
+            let second = new_test_pane(&settings, 50_005, cx);
+            let terminal = pane.read(cx).terminal.clone();
+            (
+                tab_drag_window(
+                    vec![WindowTab::new(pane), WindowTab::new(second)],
+                    gpui::Point::default(),
+                    cx,
+                ),
+                terminal,
+            )
+        });
+        cx.run_until_parked();
+        let view = cx.update(|cx| handle.entity(cx).expect("window view"));
+        view.update(cx, |view, cx| {
+            view.active_tab_index = 1;
+            cx.notify();
+        });
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]9;4;1;50\x07", cx)
+        });
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let bar = visual
+            .debug_bounds("OSC-PROGRESS")
+            .expect("progress bar should render");
+        let fill = visual
+            .debug_bounds("OSC-PROGRESS-FILL")
+            .expect("progress fill should render");
+        let tab = visual.debug_bounds("TAB-0").expect("tab should render");
+        assert_eq!(bar.origin, tab.origin);
+        assert_eq!(bar.size.width, tab.size.width);
+        assert_eq!(bar.size.height, px(2.));
+        assert_eq!(fill.size.width, bar.size.width * 0.5);
+        visual.simulate_mouse_down(bar.center(), MouseButton::Left, gpui::Modifiers::default());
+        visual.simulate_mouse_up(bar.center(), MouseButton::Left, gpui::Modifiers::default());
+        assert_eq!(view.read_with(&visual, |view, _| view.active_tab_index), 0);
+        visual.update(|_, cx| cx.set_reduce_motion(true));
+        terminal.update(&mut visual, |terminal, cx| {
+            terminal.write_output(b"\x1b]9;4;3\x07", cx)
+        });
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let static_fill = visual
+            .debug_bounds("OSC-PROGRESS-FILL")
+            .expect("unknown progress must remain visible with reduced motion");
+        assert!(static_fill.size.width > px(0.));
+        assert!(bar.contains(&static_fill.center()));
+        terminal.update(&mut visual, |terminal, cx| {
+            terminal.write_output(b"\x1b]9;4;0\x07", cx)
+        });
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        assert!(visual.debug_bounds("OSC-PROGRESS").is_none());
     }
 
     #[gpui::test]

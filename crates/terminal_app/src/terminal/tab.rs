@@ -94,6 +94,7 @@ pub struct TerminalTab {
     blink_started_at: Instant,
     /// Transfer overlay state + dialog driving (§6 of docs/TRANSFER_EXTENSION.md).
     pub(crate) transfer_ui: TransferUiState,
+    progress: Option<(Instant, terminal_core::TerminalProgress)>,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -124,6 +125,7 @@ impl TerminalTab {
             terminal_blinking_enabled: false,
             blink_started_at: Instant::now(),
             transfer_ui: TransferUiState::default(),
+            progress: None,
             _subscriptions: Vec::new(),
         };
 
@@ -170,6 +172,11 @@ impl TerminalTab {
                         this.transfer_ui.handle(event.clone(), &terminal, cx);
                         cx.notify();
                     }
+                    Event::ProgressChanged(progress) => {
+                        this.progress = progress.map(|progress| (Instant::now(), progress));
+                        crate::progress::update(cx.entity_id(), *progress, cx);
+                        cx.notify();
+                    }
                     _ => {}
                 }),
             );
@@ -181,6 +188,11 @@ impl TerminalTab {
                 this.scroll_handle.update(terminal.read(cx));
                 cx.notify();
             }));
+
+        let pane = cx.entity_id();
+        this._subscriptions.push(cx.on_release(move |_, cx| {
+            crate::progress::update(pane, None, cx);
+        }));
 
         this
     }
@@ -199,6 +211,10 @@ impl TerminalTab {
 
     pub(crate) fn transfer_ui_state(&self) -> &TransferUiState {
         &self.transfer_ui
+    }
+
+    pub(crate) fn progress(&self) -> Option<(Instant, terminal_core::TerminalProgress)> {
+        self.progress
     }
 
     /// Resolves the link under a pane-local position, so the context menu acts
@@ -871,6 +887,30 @@ mod tests {
         );
         let terminal = cx.new(|cx| builder.subscribe(cx));
         cx.new(|cx| TerminalTab::new(terminal, cx))
+    }
+
+    #[gpui::test]
+    fn osc_progress_updates_pane_state_and_clears(cx: &mut gpui::TestAppContext) {
+        let (pane, terminal) = cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            let pane = test_pane(cx);
+            let terminal = pane.read(cx).terminal.clone();
+            (pane, terminal)
+        });
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]9;4;1;65\x07", cx)
+        });
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane
+                .progress()
+                .map(|(_, progress)| progress.percentage)),
+            Some(Some(65))
+        );
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]9;4;0\x07", cx)
+        });
+        assert_eq!(pane.read_with(cx, |pane, _| pane.progress()), None);
     }
 
     #[test]

@@ -24,6 +24,7 @@ use util::ResultExt;
 pub mod extension_store;
 pub mod keymap;
 pub mod persistence;
+mod progress;
 pub mod providers_trzsz;
 pub mod providers_zmodem;
 pub mod settings_ui;
@@ -36,8 +37,9 @@ pub mod window;
 pub(crate) mod window_chrome;
 
 /// Product/program name injected into child processes (`TERM_PROGRAM`,
-/// `ZED_TERM`) and used as the window `app_id`.
+/// `ZED_TERM`).
 pub const TERM_PROGRAM: &str = "zedterm";
+pub(crate) const DESKTOP_ID: &str = "dev.zed.ZedTerm";
 
 actions!(
     terminal_app,
@@ -124,7 +126,11 @@ pub fn window_options(bounds: gpui::Bounds<gpui::Pixels>) -> WindowOptions {
         } else {
             Some(WindowDecorations::Server)
         },
-        app_id: Some(TERM_PROGRAM.to_string()),
+        app_id: Some(if cfg!(target_os = "linux") {
+            DESKTOP_ID.to_string()
+        } else {
+            TERM_PROGRAM.to_string()
+        }),
         window_min_size: Some(size(px(640.0), px(400.0))),
         ..Default::default()
     }
@@ -397,6 +403,7 @@ pub fn run(cx: &mut App, initial_directory: Option<std::path::PathBuf>) {
     load_extension_themes_in_background(cx);
     load_fonts(cx);
     persist_window_geometry_on_quit(cx);
+    progress::init(cx);
 
     bind_default_keys(cx);
     load_user_keymap(cx);

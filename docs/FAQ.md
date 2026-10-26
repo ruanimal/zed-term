@@ -2,6 +2,47 @@
 
 **English** | [简体中文](FAQ.zh-CN.md)
 
+## Which commands can show progress in the tab and taskbar?
+
+ZedTerm accepts the `OSC 9;4` progress protocol. Programs must send this protocol;
+ordinary percentage text from commands such as `apt update` is not interpreted.
+For example, in a POSIX shell:
+
+```sh
+printf '\033]9;4;1;50\007'  # 50 percent
+printf '\033]9;4;3\007'     # Unknown progress, animated in the tab
+printf '\033]9;4;2;50\007'  # Error at 50 percent
+printf '\033]9;4;4;50\007'  # Paused at 50 percent
+printf '\033]9;4;0\007'     # Clear
+```
+
+Both BEL and `ESC \\` terminators are accepted. Each terminal pane keeps its own
+progress. A split tab shows its most recently updated progress; the macOS Dock,
+KDE Plasma taskbar, or a supported GNOME dock shows the most recently updated
+progress across all panes and windows in the process. Clearing or closing that
+pane reveals another active task.
+
+The tab shows error and paused colors. The Dock uses a native progress bar and
+supports indeterminate animation. Linux docks receive numerical progress through
+the Unity Launcher D-Bus API; unknown progress has no dock/taskbar bar. This works
+with KDE Plasma, GNOME's [Ubuntu Dock](https://github.com/micheleg/dash-to-dock/tree/ubuntu-dock),
+and [Dash to Dock](https://github.com/micheleg/dash-to-dock). The installed
+`dev.zed.ZedTerm.desktop` launcher is required to associate the progress with the
+application. Progress is re-published while active, so enabling or restarting the
+dock can restore it without waiting for the command's percentage to change.
+
+GNOME Shell's built-in Dash does not provide this progress interface; enable
+Ubuntu Dock or Dash to Dock to show progress on its application icon. In those
+extensions, `show-icons-emblems` must be enabled (the default), and Do Not Disturb
+can suppress icon emblems. If a compatible dock is absent, progress still appears
+in ZedTerm's tabs. Other Linux desktops need a component supporting the same API.
+
+Reaching 100 percent does not clear the indicator. Programs should explicitly send
+state `0`, including when interrupted. Terminal reset (`ESC c`), shell exit, and
+closing the pane also clear it. There is no inactivity timeout: a task that updates
+slowly retains its progress. If a command dies without clearing, send the Clear
+sequence above. Terminal multiplexers must support or forward these sequences.
+
 ## Why does `cargo run` exit immediately when launched inside ZedTerm?
 
 ZedTerm enforces a single process per data directory, including across installed and

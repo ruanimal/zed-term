@@ -7,4 +7,4 @@ Terminal=false
 Type=Application
 Categories=System;TerminalEmulator;
 StartupNotify=true
-StartupWMClass=zedterm
+StartupWMClass=dev.zed.ZedTerm

@@ -1,10 +1,12 @@
 mod mappings;
 
 mod alacritty;
+mod progress;
 mod pty_info;
 pub mod terminal_settings;
 pub mod transfer_mux;
 
+pub use progress::{ProgressState, TerminalProgress};
 pub use transfer_mux::{Capabilities, Direction, TransferRegistry, TransferSetup, TransferUiEvent};
 
 #[cfg(not(windows))]
@@ -623,6 +625,7 @@ pub fn insert_terminal_env(env: &mut HashMap<String, String>, version: &str) {
 ///Upward flowing events, for changing the title and such
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
+    ProgressChanged(Option<TerminalProgress>),
     TitleChanged,
     BreadcrumbsChanged,
     CloseTerminal,
@@ -676,6 +679,7 @@ type TextAreaSizeFormatter = Arc<dyn Fn(TerminalBounds) -> String + Sync + Send 
 
 #[derive(Clone)]
 pub(crate) enum TerminalBackendEvent {
+    ProgressChanged(Option<TerminalProgress>),
     MouseCursorDirty,
     Title(String),
     ResetTitle,
@@ -694,6 +698,7 @@ pub(crate) enum TerminalBackendEvent {
 impl fmt::Debug for TerminalBackendEvent {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ProgressChanged(progress) => write!(f, "ProgressChanged({progress:?})"),
             Self::MouseCursorDirty => f.write_str("MouseCursorDirty"),
             Self::Title(title) => write!(f, "Title({title})"),
             Self::ResetTitle => f.write_str("ResetTitle"),
@@ -896,6 +901,8 @@ impl TerminalBuilder {
             term,
             term_config: config,
             output_processor: Processor::<StdSyncHandler>::new(),
+            progress_parser: progress::ProgressParser::default(),
+            progress: None,
             title_override: None,
             events: VecDeque::with_capacity(10),
             content_dirty: true,
@@ -1183,6 +1190,8 @@ impl TerminalBuilder {
                 term,
                 term_config: config,
                 output_processor: Processor::<StdSyncHandler>::new(),
+                progress_parser: progress::ProgressParser::default(),
+                progress: None,
                 title_override: terminal_title_override,
                 events: VecDeque::with_capacity(10), //Should never get this high.
                 content_dirty: true,
@@ -1396,6 +1405,8 @@ pub struct Terminal {
     term: Arc<AlacrittyTermLock>,
     term_config: AlacrittyTermConfig,
     output_processor: Processor<StdSyncHandler>,
+    progress_parser: progress::ProgressParser,
+    progress: Option<TerminalProgress>,
     events: VecDeque<InternalEvent>,
     /// Whether the Alacritty grid or terminal state changed since the last sync.
     content_dirty: bool,
@@ -1478,6 +1489,9 @@ impl Terminal {
 
     fn process_event(&mut self, event: TerminalBackendEvent, cx: &mut Context<Self>) {
         match event {
+            TerminalBackendEvent::ProgressChanged(progress) => {
+                self.set_progress(progress, cx);
+            }
             TerminalBackendEvent::Title(title) => {
                 // ignore default shell program title change as windows always sends those events
                 // and it would end up showing the shell executable path in breadcrumbs
@@ -1847,6 +1861,9 @@ impl Terminal {
     }
 
     pub fn write_output(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        if let Some(progress) = self.progress_parser.advance(bytes) {
+            self.set_progress(progress, cx);
+        }
         // Inject bytes directly into the terminal emulator and refresh the UI.
         // This bypasses the PTY/event loop for display-only terminals.
         let mut previous_byte_was_cr = false;
@@ -1857,6 +1874,17 @@ impl Terminal {
         drop(term);
         self.content_dirty = true;
         cx.emit(Event::Wakeup);
+    }
+
+    pub fn progress(&self) -> Option<TerminalProgress> {
+        self.progress
+    }
+
+    fn set_progress(&mut self, progress: Option<TerminalProgress>, cx: &mut Context<Self>) {
+        if self.progress != progress {
+            self.progress = progress;
+            cx.emit(Event::ProgressChanged(progress));
+        }
     }
 
     pub fn total_lines(&self) -> usize {
@@ -2850,6 +2878,7 @@ impl Terminal {
         exit_status: Option<ExitStatus>,
         cx: &mut Context<Terminal>,
     ) {
+        self.set_progress(None, cx);
         if let Some(tx) = &self.completion_tx {
             tx.try_send(exit_status).ok();
         }
@@ -3539,6 +3568,53 @@ mod tests {
         assert!(
             content_after.contains("from_injection"),
             "expected injected output to appear, got: {content_after}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn osc_progress_reaches_the_ui_from_a_real_pty(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (terminal, completion) = build_test_terminal_with_arguments(
+            cx,
+            "/bin/sh".to_string(),
+            vec![
+                "-c".to_string(),
+                "read start; printf '\\033]9;4;1;42\\007'; read finish".to_string(),
+            ],
+        )
+        .await;
+        terminal.update(cx, |terminal, _| terminal.input(b"start\n".to_vec()));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while terminal
+            .read_with(cx, |terminal, _| terminal.progress())
+            .is_none()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "OSC progress did not reach the terminal"
+            );
+            cx.background_executor
+                .timer(Duration::from_millis(10))
+                .await;
+        }
+        assert_eq!(
+            terminal.read_with(cx, |terminal, _| terminal.progress()),
+            Some(TerminalProgress {
+                state: ProgressState::Normal,
+                percentage: Some(42),
+            })
+        );
+        terminal.update(cx, |terminal, _| terminal.input(b"finish\n".to_vec()));
+        completion.recv().await.expect("shell should exit");
+        assert_eq!(
+            terminal.read_with(cx, |terminal, _| terminal.progress()),
+            None
+        );
+        assert!(
+            !terminal
+                .update(cx, |terminal, _| terminal.get_content())
+                .contains("9;4")
         );
     }
 
