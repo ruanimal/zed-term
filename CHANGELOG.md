@@ -6,6 +6,12 @@ changes are omitted unless they affect how users install or use ZedTerm.
 
 ## [Unreleased]
 
+## [0.8.1]
+
+- Advertised OSC 9;4 progress support so Cargo 1.95 and later can enable terminal
+  progress integration automatically.
+- Added the application logo to the About settings page.
+
 ## [0.8.0]
 
 - Added Linux arm64 release packages.
