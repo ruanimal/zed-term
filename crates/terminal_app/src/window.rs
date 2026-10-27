@@ -3591,7 +3591,7 @@ mod tests {
         assert!(static_fill.size.width > px(0.));
         assert!(bar.contains(&static_fill.center()));
         terminal.update(&mut visual, |terminal, cx| {
-            terminal.write_output(b"\x1b]9;4;0\x07", cx)
+            terminal.write_output(b"\x1b]9;4;0;\x1b\\", cx)
         });
         visual.update(|window, cx| {
             window.draw(cx).clear(cx);

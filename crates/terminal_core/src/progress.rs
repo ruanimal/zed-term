@@ -76,6 +76,8 @@ impl vte::Perform for ProgressHandler {
         let (state, percentage) = match remaining {
             [] => (b"0".as_slice(), None),
             [state] => (*state, None),
+            // Cargo leaves the optional percentage empty when clearing progress.
+            [state, b""] if matches!(*state, b"0" | b"2" | b"3" | b"4") => (*state, None),
             [state, percentage] => {
                 let Some(percentage) = parse_percentage(percentage) else {
                     return;
@@ -245,15 +247,27 @@ mod tests {
     }
 
     #[test]
+    fn cargo_style_clear_survives_every_read_boundary() {
+        for sequence in [b"\x1b]9;4;0;\x07".as_slice(), b"\x1b]9;4;0;\x1b\\"] {
+            for boundary in 0..sequence.len() {
+                let mut parser = ProgressParser::default();
+                parser.advance(b"\x1b]9;4;1;50\x07");
+                assert_eq!(parser.advance(&sequence[..boundary]), None);
+                assert_eq!(parser.advance(&sequence[boundary..]), Some(None));
+            }
+        }
+    }
+
+    #[test]
     fn states_preserve_optional_values_and_clear_explicitly() {
         let mut parser = ProgressParser::default();
         for (sequence, expected) in [
             ("1;50", Some((ProgressState::Normal, Some(50)))),
-            ("2", Some((ProgressState::Error, Some(50)))),
-            ("4", Some((ProgressState::Paused, Some(50)))),
-            ("3", Some((ProgressState::Indeterminate, Some(50)))),
+            ("2;", Some((ProgressState::Error, Some(50)))),
+            ("4;", Some((ProgressState::Paused, Some(50)))),
+            ("3;", Some((ProgressState::Indeterminate, Some(50)))),
             ("1;100", Some((ProgressState::Normal, Some(100)))),
-            ("0", None),
+            ("0;", None),
             ("2", Some((ProgressState::Error, None))),
             ("4;25", Some((ProgressState::Paused, Some(25)))),
             (
@@ -285,6 +299,9 @@ mod tests {
             b"\x1b]9;4;1;50.5\x07",
             b"\x1b]9;4;1;\x07",
             b"\x1b]9;4;1;10;extra\x07",
+            b"\x1b]9;4;0;\x18",
+            b"\x1b]9;4;0;\x1a",
+            b"\x1b]9;4;0;\x1bXignored\x1b\\",
             b"\x1b]9;4;1;20\x18",
             b"\x1b]9;4;1;20\x1a",
             b"\x1b]9;4;1;20\x1bXignored\x1b\\",

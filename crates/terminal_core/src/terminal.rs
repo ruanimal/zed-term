@@ -3582,7 +3582,7 @@ mod tests {
             "/bin/sh".to_string(),
             vec![
                 "-c".to_string(),
-                "read start; printf '\\033]9;4;1;42\\007'; read finish".to_string(),
+                "read start; printf '\\033]9;4;1;42\\007'; read finish; printf '\\033]9;4;0;\\033\\134'; read close".to_string(),
             ],
         )
         .await;
@@ -3608,16 +3608,31 @@ mod tests {
             })
         );
         terminal.update(cx, |terminal, _| terminal.input(b"finish\n".to_vec()));
-        completion.recv().await.expect("shell should exit");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while terminal
+            .read_with(cx, |terminal, _| terminal.progress())
+            .is_some()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "OSC clear did not reach the terminal"
+            );
+            cx.background_executor
+                .timer(Duration::from_millis(10))
+                .await;
+        }
         assert_eq!(
-            terminal.read_with(cx, |terminal, _| terminal.progress()),
-            None
+            completion.try_recv(),
+            Err(async_channel::TryRecvError::Empty),
+            "the shell must remain open after clearing progress"
         );
         assert!(
             !terminal
                 .update(cx, |terminal, _| terminal.get_content())
                 .contains("9;4")
         );
+        terminal.update(cx, |terminal, _| terminal.input(b"close\n".to_vec()));
+        completion.recv().await.expect("shell should exit");
     }
 
     #[cfg(unix)]
