@@ -617,6 +617,8 @@ pub const TERMINAL_PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn insert_terminal_env(env: &mut HashMap<String, String>, version: &str) {
     env.insert("ZED_TERM".to_string(), "zedterm".to_string());
     env.insert("TERM_PROGRAM".to_string(), "zedterm".to_string());
+    // Replace inherited capabilities so child processes only see features we advertise.
+    env.insert("TERM_FEATURES".to_string(), "P".to_string());
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
     env.insert("TERM_PROGRAM_VERSION".to_string(), version.to_string());

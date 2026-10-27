@@ -6,6 +6,8 @@
 
 ZedTerm accepts the `OSC 9;4` progress protocol. Programs must send this protocol;
 ordinary percentage text from commands such as `apt update` is not interpreted.
+New terminal sessions set `TERM_FEATURES=P` to advertise progress support, allowing
+programs such as Cargo 1.95 and later to enable terminal progress integration automatically.
 For example, in a POSIX shell:
 
 ```sh
