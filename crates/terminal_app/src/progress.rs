@@ -296,11 +296,11 @@ mod native {
                             }
                         }
                     }
-                    if let Some(session) = &connection {
-                        if let Err(error) = send(session, progress).await {
-                            log::warn!("Could not update taskbar progress: {error}");
-                            connection = None;
-                        }
+                    if let Some(session) = &connection
+                        && let Err(error) = send(session, progress).await
+                    {
+                        log::warn!("Could not update taskbar progress: {error}");
+                        connection = None;
                     }
                 }
             });
