@@ -6,6 +6,10 @@ changes are omitted unless they affect how users install or use ZedTerm.
 
 ## [Unreleased]
 
+## [0.8.2]
+
+- Fixed Cargo progress indicators remaining visible after a command completes.
+
 ## [0.8.1]
 
 - Advertised OSC 9;4 progress support so Cargo 1.95 and later can enable terminal
