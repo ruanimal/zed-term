@@ -1402,6 +1402,14 @@ impl Render for SettingsPage {
 
 impl SettingsPage {
     fn render_about_tab(&self) -> gpui::AnyElement {
+        static LOGO: std::sync::OnceLock<Arc<gpui::Image>> = std::sync::OnceLock::new();
+        let logo = LOGO.get_or_init(|| {
+            Arc::new(gpui::Image::from_bytes(
+                gpui::ImageFormat::Png,
+                include_bytes!("../../resources/app-icon.png").to_vec(),
+            ))
+        });
+
         v_flex()
             .id("about-content")
             .w_full()
@@ -1409,12 +1417,20 @@ impl SettingsPage {
             .py_4()
             .gap_2()
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(Label::new("ZedTerm").size(LabelSize::Large))
+                h_flex()
+                    .items_center()
+                    .gap_4()
+                    .child(gpui::img(logo.clone()).w(px(64.)).h(px(64.)))
                     .child(
-                        Label::new("A standalone terminal application based on Zed's terminal.")
-                            .color(Color::Muted),
+                        v_flex()
+                            .gap_1()
+                            .child(Label::new("ZedTerm").size(LabelSize::Large))
+                            .child(
+                                Label::new(
+                                    "A standalone terminal application based on Zed's terminal.",
+                                )
+                                .color(Color::Muted),
+                            ),
                     ),
             )
             .child(self.row(
