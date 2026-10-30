@@ -421,7 +421,8 @@ impl TerminalTab {
         // cannot repopulate the highlights afterwards.
         self.search_generation = self.search_generation.wrapping_add(1);
         self.search_task = None;
-        self.terminal.update(cx, |term, _| term.matches.clear());
+        self.terminal
+            .update(cx, |term, _| term.matches = Vec::new());
         self.focus_handle.clone().focus(window, cx);
         cx.notify();
     }
@@ -639,7 +640,8 @@ impl TerminalTab {
                 None => {
                     self.search_invalid_regex = true;
                     self.active_match = None;
-                    self.terminal.update(cx, |term, _| term.matches.clear());
+                    self.terminal
+                        .update(cx, |term, _| term.matches = Vec::new());
                     cx.notify();
                     return;
                 }
@@ -648,7 +650,8 @@ impl TerminalTab {
 
         let Some(searcher) = searcher else {
             self.active_match = None;
-            self.terminal.update(cx, |term, _| term.matches.clear());
+            self.terminal
+                .update(cx, |term, _| term.matches = Vec::new());
             cx.notify();
             return;
         };
@@ -1527,7 +1530,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn closing_the_bar_clears_the_query_and_highlights(cx: &mut gpui::TestAppContext) {
+    async fn closing_the_bar_clears_the_query_and_releases_matches(cx: &mut gpui::TestAppContext) {
         let pane = pane_with_output(cx, "alpha\r\n");
         run_query(&pane, "alpha", cx);
         assert_eq!(match_count(&pane, cx), 1);
@@ -1543,7 +1546,40 @@ mod tests {
             assert!(pane.search_query.is_empty());
             assert!(pane.active_match.is_none());
             assert!(pane.terminal.read(cx).matches.is_empty());
+            assert_eq!(pane.terminal.read(cx).matches.capacity(), 0);
         });
+    }
+
+    #[gpui::test]
+    async fn clearing_or_invalidating_the_query_releases_matches(cx: &mut gpui::TestAppContext) {
+        let pane = pane_with_output(cx, "alpha\r\n");
+        for query in ["", "(", "."] {
+            cx.update(|cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.search_regex = true;
+                    pane.select_all_search_text(cx);
+                });
+            });
+            run_query(&pane, "alpha", cx);
+            assert_eq!(match_count(&pane, cx), 1);
+
+            cx.update(|cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.select_all_search_text(cx);
+                    pane.replace_search_text(None, query.to_string(), None, false, cx);
+                });
+            });
+            cx.run_until_parked();
+
+            cx.update(|cx| {
+                let pane = pane.read(cx);
+                assert!(pane.active_match.is_none());
+                assert_eq!(pane.search_invalid_regex, query == "(");
+                let matches = &pane.terminal.read(cx).matches;
+                assert!(matches.is_empty());
+                assert_eq!(matches.capacity(), 0);
+            });
+        }
     }
 
     #[gpui::test]
