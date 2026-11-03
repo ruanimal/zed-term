@@ -526,15 +526,23 @@ impl DraggedTerminalTab {
 }
 
 impl Render for DraggedTerminalTab {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = terminal_tab_colors(cx.theme().colors());
         Tab::new("dragged-terminal-tab")
             .height(window_chrome::TITLE_BAR_HEIGHT)
             .toggle_state(self.is_active)
+            .when_some(colors, |tab, (background, _)| {
+                tab.selected_background(background)
+            })
             .child(
                 div().w(TAB_TITLE_WIDTH).child(
                     Label::new(self.title.clone())
                         .single_line()
                         .truncate()
+                        .when_some(
+                            colors.filter(|_| self.is_active),
+                            |label, (_, foreground)| label.color(Color::Custom(foreground)),
+                        )
                         .size(LabelSize::Small),
                 ),
             )
@@ -2531,6 +2539,11 @@ impl TerminalWindowView {
                     TabPosition::Middle(idx.cmp(&self.active_tab_index))
                 };
                 let tab_idx = idx;
+                let is_active = idx == self.active_tab_index;
+                let terminal_colors = terminal_tab_colors(cx.theme().colors());
+                let active_foreground = terminal_colors
+                    .filter(|_| is_active)
+                    .map(|(_, foreground)| foreground);
                 let progress = tab
                     .panes()
                     .iter()
@@ -2540,7 +2553,10 @@ impl TerminalWindowView {
                 let tab_element = Tab::new(idx.to_string())
                     .height(window_chrome::TITLE_BAR_HEIGHT)
                     .position(position)
-                    .toggle_state(idx == self.active_tab_index)
+                    .toggle_state(is_active)
+                    .when_some(terminal_colors, |tab, (background, _)| {
+                        tab.selected_background(background)
+                    })
                     .tooltip(Tooltip::text_with_background_opacity(full_title, 0.8))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -2568,7 +2584,7 @@ impl TerminalWindowView {
                     .start_slot::<Indicator>(
                         has_bell.then(|| Indicator::dot().color(Color::Accent)),
                     )
-                    .child(self.render_tab_label(title))
+                    .child(self.render_tab_label(title, active_foreground))
                     .end_slot(
                         // Per-tab close button. Clicking a tab's x closes that
                         // whole tab (confirming first when it holds a split).
@@ -2586,6 +2602,9 @@ impl TerminalWindowView {
                                 IconButton::new(format!("close-tab-{tab_idx}"), IconName::Close)
                                     .icon_size(IconSize::XSmall)
                                     .size(ButtonSize::None)
+                                    .when_some(active_foreground, |button, foreground| {
+                                        button.icon_color(Color::Custom(foreground))
+                                    })
                                     .on_click(cx.listener(
                                         move |this, _: &gpui::ClickEvent, window, cx| {
                                             cx.stop_propagation();
@@ -2647,11 +2666,12 @@ impl TerminalWindowView {
     }
 
     /// A truncated, single-line label for a tab.
-    fn render_tab_label(&self, title: String) -> impl IntoElement {
+    fn render_tab_label(&self, title: String, color: Option<gpui::Hsla>) -> impl IntoElement {
         div().w(TAB_TITLE_WIDTH).child(
             Label::new(title)
                 .single_line()
                 .truncate()
+                .when_some(color, |label, color| label.color(Color::Custom(color)))
                 .size(LabelSize::Small),
         )
     }
@@ -2761,6 +2781,15 @@ impl TerminalWindowView {
             .into_any_element(),
         )
     }
+}
+
+fn terminal_tab_colors(colors: &theme::ThemeColors) -> Option<(gpui::Hsla, gpui::Hsla)> {
+    // A transparent background composites over different surfaces in the tab
+    // bar and terminal, so the theme's tab colors are safer in that case.
+    colors
+        .terminal_background
+        .is_opaque()
+        .then_some((colors.terminal_background, colors.terminal_foreground))
 }
 
 fn render_tab_rename_input_content(
@@ -5655,6 +5684,67 @@ mod tests {
             cx.set_global(settings_store);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
         });
+    }
+
+    #[gpui::test]
+    fn active_tab_uses_the_terminal_background_when_the_theme_changes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test_theme(cx);
+        let handle = cx.update(|cx| {
+            let settings = TerminalSettings::get_global(cx).clone();
+            let first = new_test_pane(&settings, 50_101, cx);
+            let second = new_test_pane(&settings, 50_102, cx);
+            tab_drag_window(
+                vec![WindowTab::new(first), WindowTab::new(second)],
+                gpui::Point::default(),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+
+        let theme_tab_background: gpui::Hsla = gpui::rgb(0xff00ff).into();
+        for (terminal_background, inactive_background, expected_active_background) in [
+            (
+                gpui::rgb(0x152030).into(),
+                gpui::rgb(0x354050).into(),
+                gpui::rgb(0x152030).into(),
+            ),
+            (
+                gpui::rgb(0xf0e8d8).into(),
+                gpui::rgb(0xc0b8a8).into(),
+                gpui::rgb(0xf0e8d8).into(),
+            ),
+            (
+                gpui::rgba(0x15203000).into(),
+                gpui::rgb(0x354050).into(),
+                theme_tab_background,
+            ),
+        ] {
+            visual.update(|window, cx| {
+                let mut theme = (**theme::GlobalTheme::theme(cx)).clone();
+                theme.styles.colors.terminal_background = terminal_background;
+                theme.styles.colors.tab_active_background = theme_tab_background;
+                theme.styles.colors.tab_inactive_background = inactive_background;
+                theme::GlobalTheme::update_theme(cx, std::sync::Arc::new(theme));
+                window.draw(cx).clear(cx);
+            });
+            let active = visual.debug_bounds("TAB-0").expect("active tab");
+            let inactive = visual.debug_bounds("TAB-1").expect("inactive tab");
+            visual.update(|window, _| {
+                let quads = window.painted_quads();
+                let scale = window.scale_factor();
+                assert!(quads.iter().any(|quad| {
+                    quad.bounds == active.scale(scale)
+                        && quad.background == gpui::Background::from(expected_active_background)
+                }));
+                assert!(quads.iter().any(|quad| {
+                    quad.bounds == inactive.scale(scale)
+                        && quad.background == gpui::Background::from(inactive_background)
+                }));
+            });
+        }
     }
 
     /// A split layout must show the search bar inside the pane it searches and

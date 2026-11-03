@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use gpui::{AnyElement, IntoElement, Stateful};
+use gpui::{AnyElement, Hsla, IntoElement, Stateful};
 use smallvec::SmallVec;
 
 use crate::prelude::*;
@@ -34,6 +34,7 @@ pub struct Tab {
     div: Stateful<Div>,
     height: Option<Pixels>,
     selected: bool,
+    selected_background: Option<Hsla>,
     position: TabPosition,
     close_side: TabCloseSide,
     start_slot: Option<AnyElement>,
@@ -50,6 +51,7 @@ impl Tab {
                 .debug_selector(|| format!("TAB-{}", id)),
             height: None,
             selected: false,
+            selected_background: None,
             position: TabPosition::First,
             close_side: TabCloseSide::End,
             start_slot: None,
@@ -65,6 +67,11 @@ impl Tab {
 
     pub fn position(mut self, position: TabPosition) -> Self {
         self.position = position;
+        self
+    }
+
+    pub fn selected_background(mut self, background: Hsla) -> Self {
+        self.selected_background = Some(background);
         self
     }
 
@@ -127,7 +134,8 @@ impl RenderOnce for Tab {
             ),
             true => (
                 cx.theme().colors().text,
-                cx.theme().colors().tab_active_background,
+                self.selected_background
+                    .unwrap_or(cx.theme().colors().tab_active_background),
                 cx.theme().colors().element_hover,
                 cx.theme().colors().element_active,
             ),
