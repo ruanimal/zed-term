@@ -114,6 +114,7 @@ pub struct TerminalWindowView {
     /// a tab is the top-level unit; cmd-d splits within the active tab).
     pub(crate) tabs: Vec<WindowTab>,
     pub(crate) active_tab_index: usize,
+    window_title: Option<String>,
     /// Right-click context menu for the active terminal, if open.
     context_menu: Option<(Entity<ContextMenu>, gpui::Point<Pixels>, Subscription)>,
     /// Link under the last right-click, if that cell held one. Its menu entries
@@ -564,6 +565,7 @@ impl TerminalWindowView {
             focus_handle: cx.focus_handle(),
             tabs: Vec::new(),
             active_tab_index: 0,
+            window_title: None,
             context_menu: None,
             context_navigation_target: None,
             tab_rename: None,
@@ -2944,6 +2946,17 @@ impl Render for TerminalWindowView {
             active.active_pane_tab = Some(focused);
         }
 
+        let title = self
+            .tabs
+            .get(self.active_tab_index)
+            .map(|tab| tab.title(cx))
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| "ZedTerm".to_string());
+        if self.window_title.as_ref() != Some(&title) {
+            window.set_window_title(&title);
+            self.window_title = Some(title);
+        }
+
         // Content area: the active tab's split tree, a zoomed pane, or a
         // single terminal when that tab has no splits yet. Zoom does not
         // mutate the tree, so restoring it preserves divider positions.
@@ -3513,6 +3526,7 @@ mod tests {
                 focus_handle: cx.focus_handle(),
                 tabs,
                 active_tab_index,
+                window_title: None,
                 context_menu: None,
                 context_navigation_target: None,
                 tab_rename: None,
@@ -3735,6 +3749,50 @@ mod tests {
             tab.set_title_override("  ".to_string());
             assert_eq!(tab.title(cx), generated_title);
         });
+    }
+
+    #[gpui::test]
+    fn window_title_tracks_active_tab(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        let handle = cx.update(|cx| {
+            let settings = TerminalSettings::get_global(cx).clone();
+            let first = new_test_pane(&settings, 50_004, cx);
+            let second = new_test_pane(&settings, 50_005, cx);
+            let mut first_tab = WindowTab::new(first);
+            first_tab.set_title_override("First".to_string());
+            let mut second_tab = WindowTab::new(second);
+            second_tab.set_title_override("Second".to_string());
+            open_test_window_with_tabs(vec![first_tab, second_tab], 0, cx)
+        });
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(visual.window_title().as_deref(), Some("First"));
+
+        handle
+            .update(&mut visual, |view, window, cx| {
+                view.activate_tab(1, window, cx)
+            })
+            .expect("window should exist");
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(visual.window_title().as_deref(), Some("Second"));
+
+        handle
+            .update(&mut visual, |view, _, cx| {
+                view.tabs[1].set_title_override("Renamed".to_string());
+                cx.notify();
+            })
+            .expect("window should exist");
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(visual.window_title().as_deref(), Some("Renamed"));
+
+        handle
+            .update(&mut visual, |view, _, cx| {
+                view.tabs[1].set_title_override(String::new());
+                cx.notify();
+            })
+            .expect("window should exist");
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(visual.window_title().as_deref(), Some("Terminal"));
     }
 
     fn pane_entity_ids(window_view: &Entity<TerminalWindowView>, cx: &App) -> Vec<gpui::EntityId> {
@@ -5661,6 +5719,7 @@ mod tests {
                 focus_handle: cx.focus_handle(),
                 tabs,
                 active_tab_index: 0,
+                window_title: None,
                 context_menu: None,
                 context_navigation_target: None,
                 tab_rename: None,
@@ -5869,6 +5928,7 @@ mod tests {
                 focus_handle: cx.focus_handle(),
                 tabs,
                 active_tab_index: 0,
+                window_title: None,
                 context_menu: None,
                 context_navigation_target: None,
                 tab_rename: None,

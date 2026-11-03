@@ -106,7 +106,7 @@ pub fn window_options(bounds: gpui::Bounds<gpui::Pixels>) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
-            title: None,
+            title: Some("ZedTerm".into()),
             appears_transparent: true,
             traffic_light_position: Some(point(
                 window_chrome::TITLE_BAR_TRAFFIC_LIGHT_X,
