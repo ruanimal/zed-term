@@ -6,6 +6,12 @@ changes are omitted unless they affect how users install or use ZedTerm.
 
 ## [Unreleased]
 
+## [0.8.3]
+
+- Matched active terminal tab colors to the terminal background for opaque themes.
+- Removed stale themes from the picker after updating or uninstalling extensions.
+- Released memory retained by terminal search results when searches are cleared.
+
 ## [0.8.2]
 
 - Fixed Cargo progress indicators remaining visible after a command completes.
