@@ -3,6 +3,7 @@
 //! Keeps only traditional terminal capabilities and terminal-related settings
 //! (including a settings page). See `docs/PLAN.md` for the split plan.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,7 +11,8 @@ use futures::StreamExt;
 #[cfg(target_os = "macos")]
 use gpui::MenuItem;
 use gpui::{
-    Action, App, AppContext as _, KeyBinding, UpdateGlobal, WindowOptions, actions, px, size,
+    Action, App, AppContext as _, Global, KeyBinding, SharedString, UpdateGlobal, WindowOptions,
+    actions, px, size,
 };
 use settings::Settings as _;
 use settings::SettingsStore;
@@ -202,47 +204,171 @@ fn load_user_themes_in_background(cx: &mut App) {
     .detach();
 }
 
+#[derive(Default)]
+struct ExtensionThemes {
+    themes: HashMap<SharedString, (Option<Arc<theme::Theme>>, Arc<theme::Theme>)>,
+    revision: u64,
+}
+
+impl Global for ExtensionThemes {}
+
+impl ExtensionThemes {
+    fn replace(&mut self, registry: &theme::ThemeRegistry, theme_files: &[Vec<u8>]) -> usize {
+        for (name, (previous, installed)) in self.themes.drain() {
+            if registry
+                .get(&name)
+                .is_ok_and(|current| Arc::ptr_eq(&current, &installed))
+            {
+                match previous {
+                    Some(previous) => registry.insert_themes([(*previous).clone()]),
+                    None => registry.remove_user_themes(&[name]),
+                }
+            }
+        }
+
+        let mut loaded = 0;
+        for bytes in theme_files {
+            let family = match theme_settings::deserialize_user_theme(bytes) {
+                Ok(family) => theme_settings::refine_theme_family(family),
+                Err(error) => {
+                    log::warn!("Could not load an extension theme: {error:#}");
+                    continue;
+                }
+            };
+            loaded += 1;
+            for theme in family.themes {
+                let name = theme.name.clone();
+                let previous = self
+                    .themes
+                    .remove(&name)
+                    .map_or_else(|| registry.get(&name).ok(), |(previous, _)| previous);
+                registry.insert_themes([theme]);
+                if let Ok(installed) = registry.get(&name) {
+                    self.themes.insert(name, (previous, installed));
+                }
+            }
+        }
+        loaded
+    }
+}
+
 /// Registers the themes contributed by installed theme extensions.
-///
-/// Returns the number of theme files loaded, so callers can skip re-resolving
-/// the active theme when nothing changed.
 pub fn load_extension_themes(cx: &mut App) -> usize {
     let theme_files = extension_store::installed_theme_files();
     apply_extension_themes(cx, &theme_files)
 }
 
-/// Registers extension theme files in the registry and re-resolves the active
-/// theme when any of them loaded.
 fn apply_extension_themes(cx: &mut App, theme_files: &[Vec<u8>]) -> usize {
     let registry = theme::ThemeRegistry::global(cx);
-    let mut loaded = 0;
-    for bytes in theme_files {
-        match theme_settings::load_user_theme(&registry, bytes) {
-            Ok(()) => loaded += 1,
-            Err(error) => log::warn!("Could not load an extension theme: {error:#}"),
-        }
-    }
-    if loaded > 0 {
-        // A newly loaded theme may be the one settings.json selects, so the
-        // active theme is re-resolved now that the registry has grown.
-        theme_settings::reload_theme(cx);
-    }
+    let state = cx.default_global::<ExtensionThemes>();
+    state.revision += 1;
+    let loaded = state.replace(&registry, theme_files);
+    theme_settings::reload_theme(cx);
     loaded
 }
 
 /// Registers the themes contributed by installed theme extensions, on a
 /// background thread so a slow disk does not delay the first window.
 fn load_extension_themes_in_background(cx: &mut App) {
+    let revision = cx.default_global::<ExtensionThemes>().revision;
     cx.spawn(async move |cx| {
         // Reading and parsing theme files is blocking work.
         let theme_files =
             cx.background_spawn(async move { extension_store::installed_theme_files() });
         let theme_files = theme_files.await;
         cx.update(|cx| {
-            apply_extension_themes(cx, &theme_files);
+            if cx.default_global::<ExtensionThemes>().revision == revision {
+                apply_extension_themes(cx, &theme_files);
+            }
         });
     })
     .detach();
+}
+
+#[cfg(test)]
+mod extension_theme_tests {
+    use super::*;
+    use crate::extension_store::test_support::{
+        build_extension_archive, extension_manifest, theme_family_json,
+    };
+
+    fn archive(version: &str, theme_name: &str) -> Vec<u8> {
+        build_extension_archive(&[
+            (
+                "extension.toml",
+                &extension_manifest("example", "Example", version, &["themes/example.json"]),
+            ),
+            (
+                "themes/example.json",
+                &theme_family_json("Example", &[theme_name]),
+            ),
+        ])
+    }
+
+    #[test]
+    fn updating_and_uninstalling_remove_old_files_and_registered_themes() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let registry = theme::ThemeRegistry::default();
+        let mut themes = ExtensionThemes::default();
+        let theme_path = directory.path().join("example/themes/example.json");
+
+        extension_store::install_archive(
+            directory.path(),
+            "example",
+            archive("1.0.0", "Old theme"),
+        )
+        .expect("install succeeds");
+        themes.replace(
+            &registry,
+            &[std::fs::read(&theme_path).expect("installed theme")],
+        );
+        assert!(registry.get("Old theme").is_ok());
+
+        extension_store::install_archive(
+            directory.path(),
+            "example",
+            archive("2.0.0", "New theme"),
+        )
+        .expect("update succeeds");
+        themes.replace(
+            &registry,
+            &[std::fs::read(&theme_path).expect("updated theme")],
+        );
+        assert!(registry.get("Old theme").is_err());
+        assert!(registry.get("New theme").is_ok());
+
+        extension_store::uninstall_extension_from(directory.path(), "example")
+            .expect("uninstall succeeds");
+        themes.replace(&registry, &[]);
+        assert!(!theme_path.exists());
+        assert!(registry.get("New theme").is_err());
+    }
+
+    #[test]
+    fn removing_extension_themes_restores_previous_themes_without_overwriting_newer_ones() {
+        let registry = theme::ThemeRegistry::default();
+        let original = theme_family_json("Original", &["Shared", "Changed"]);
+        theme_settings::load_user_theme(&registry, &original).expect("original themes load");
+        let shared_original = registry.get("Shared").expect("original theme");
+        let mut themes = ExtensionThemes::default();
+        themes.replace(
+            &registry,
+            &[theme_family_json("Extension", &["Shared", "Changed"])],
+        );
+        let replacement = theme_family_json("Replacement", &["Changed"]);
+        theme_settings::load_user_theme(&registry, &replacement).expect("replacement loads");
+        let changed_replacement = registry.get("Changed").expect("replacement theme");
+
+        themes.replace(&registry, &[]);
+        assert_eq!(
+            *registry.get("Shared").expect("restored theme"),
+            *shared_original
+        );
+        assert!(Arc::ptr_eq(
+            &registry.get("Changed").expect("replacement theme"),
+            &changed_replacement
+        ));
+    }
 }
 
 /// Watches the ZedTerm user settings file and applies changes live.

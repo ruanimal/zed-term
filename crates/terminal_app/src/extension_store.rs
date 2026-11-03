@@ -495,6 +495,7 @@ fn installed_theme_paths() -> Vec<PathBuf> {
             paths.push(path);
         }
     }
+    paths.sort();
     paths
 }
 
