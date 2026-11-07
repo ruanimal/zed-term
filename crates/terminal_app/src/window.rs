@@ -3692,6 +3692,67 @@ mod tests {
         assert!(visual.debug_bounds("exit-fullscreen").is_none());
     }
 
+    #[gpui::test]
+    fn search_clipboard_shortcuts_use_the_focused_search_field(cx: &mut gpui::TestAppContext) {
+        init_test_theme(cx);
+        let (handle, pane) = cx.update(|cx| {
+            crate::bind_default_keys(cx);
+            let settings = TerminalSettings::get_global(cx).clone();
+            let pane = new_test_pane(&settings, 50_005, cx);
+            let handle = tab_drag_window(
+                vec![WindowTab::new(pane.clone())],
+                gpui::Point::default(),
+                cx,
+            );
+            (handle, pane)
+        });
+        cx.run_until_parked();
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        pane.update_in(&mut visual, |pane, window, cx| {
+            pane.toggle_search(window, cx)
+        });
+        visual.run_until_parked();
+
+        visual
+            .update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("first\ntext".into())));
+        visual.simulate_keystrokes("cmd-v");
+        visual.run_until_parked();
+        visual.update(|_, cx| assert_eq!(pane.read(cx).search_query, "first text"));
+
+        visual.simulate_keystrokes("cmd-a");
+        visual.simulate_keystrokes("cmd-c");
+        visual.update(|_, cx| {
+            assert_eq!(
+                cx.read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref(),
+                Some("first text")
+            );
+            cx.write_to_clipboard(ClipboardItem::new_string("replacement".into()));
+        });
+        visual.simulate_keystrokes("cmd-v");
+        visual.run_until_parked();
+        visual.update(|_, cx| assert_eq!(pane.read(cx).search_query, "replacement"));
+
+        visual.simulate_keystrokes("cmd-a");
+        visual.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("plain".into())));
+        visual.simulate_keystrokes("ctrl-cmd-v");
+        visual.run_until_parked();
+        visual.update(|_, cx| assert_eq!(pane.read(cx).search_query, "plain"));
+
+        #[cfg(target_os = "macos")]
+        let (select_all, cut, paste) = ("cmd-a", "cmd-x", "cmd-v");
+        #[cfg(not(target_os = "macos"))]
+        let (select_all, cut, paste) = ("ctrl-a", "ctrl-x", "ctrl-v");
+        visual.simulate_keystrokes(select_all);
+        visual.simulate_keystrokes(cut);
+        visual.run_until_parked();
+        visual.update(|_, cx| assert!(pane.read(cx).search_query.is_empty()));
+        visual.simulate_keystrokes(paste);
+        visual.run_until_parked();
+        visual.update(|_, cx| assert_eq!(pane.read(cx).search_query, "plain"));
+    }
+
     #[cfg(target_os = "macos")]
     #[gpui::test]
     fn fullscreen_shortcut_works_with_terminal_and_search_focused(cx: &mut gpui::TestAppContext) {

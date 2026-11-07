@@ -177,6 +177,30 @@ impl RenderOnce for TerminalSearchBar {
                         tab.update(cx, |tab, cx| tab.close_search(window, cx));
                     })
             })
+            .on_action({
+                let tab = tab.clone();
+                move |_: &terminal_core::Copy, _, cx| {
+                    tab.update(cx, |tab, cx| tab.copy_search_selection(cx));
+                }
+            })
+            .on_action({
+                let tab = tab.clone();
+                move |_: &terminal_core::Paste, _, cx| {
+                    tab.update(cx, |tab, cx| tab.paste_search_text(cx));
+                }
+            })
+            .on_action({
+                let tab = tab.clone();
+                move |_: &terminal_core::PasteText, _, cx| {
+                    tab.update(cx, |tab, cx| tab.paste_search_text(cx));
+                }
+            })
+            .on_action({
+                let tab = tab.clone();
+                move |_: &terminal_core::SelectAll, _, cx| {
+                    tab.update(cx, |tab, cx| tab.select_all_search_text(cx));
+                }
+            })
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_ref();
                 let shift = event.keystroke.modifiers.shift;
