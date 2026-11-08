@@ -6,6 +6,13 @@ changes are omitted unless they affect how users install or use ZedTerm.
 
 ## [Unreleased]
 
+## [0.8.4]
+
+- Kept window titles in sync with the active terminal tab.
+- Fixed clipboard shortcuts in terminal search.
+- Improved macOS local network access by signing the app bundle and declaring
+  its local network usage.
+
 ## [0.8.3]
 
 - Matched active terminal tab colors to the terminal background for opaque themes.
