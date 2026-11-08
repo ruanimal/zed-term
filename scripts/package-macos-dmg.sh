@@ -200,6 +200,8 @@ cat > "$contents_path/Info.plist" <<PLIST
     <string>public.app-category.utilities</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>ZedTerm needs access to your local network so terminal commands can connect to devices and services on it.</string>
 </dict>
 </plist>
 PLIST
@@ -207,6 +209,8 @@ PLIST
 cp "$installation_document_path" "$installation_document_target"
 
 plutil -lint "$contents_path/Info.plist"
+codesign --force --sign - --timestamp=none "$app_path"
+codesign --verify --strict --verbose=2 "$app_path"
 test -f "$contents_path/Resources/ZedTerm.icns"
 test -L "$dmg_root/Applications"
 test "$(readlink "$dmg_root/Applications")" = "/Applications"
