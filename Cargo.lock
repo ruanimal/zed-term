@@ -6916,7 +6916,7 @@ dependencies = [
 
 [[package]]
 name = "terminal_app"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "anyhow",
  "assets",
