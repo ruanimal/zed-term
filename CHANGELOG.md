@@ -6,6 +6,12 @@ changes are omitted unless they affect how users install or use ZedTerm.
 
 ## [Unreleased]
 
+## [0.9.0]
+
+- Added a Simplified Chinese interface alongside English. Switch languages
+  under Settings → Terminal → Appearance without restarting ZedTerm.
+- Adjusted the spacing around macOS window controls.
+
 ## [0.8.4]
 
 - Kept window titles in sync with the active terminal tab.
