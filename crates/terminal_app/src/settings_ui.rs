@@ -29,6 +29,7 @@ use ui::{
 };
 use util::{ResultExt, shell::Shell as TerminalShell};
 
+use crate::language::{self, localized_format};
 use crate::text_edit::{
     next_utf16_boundary, previous_utf16_boundary, replace_utf16_range, substring_utf16,
 };
@@ -132,6 +133,7 @@ enum EditableField {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum DirtySetting {
     Theme,
+    DisplayLanguage,
     FileManagerOpenMode,
     ResetTerminalDefaults,
     FontFamily,
@@ -161,6 +163,7 @@ enum DirtySetting {
 #[derive(Clone)]
 struct SettingsPageDraft {
     draft_settings: TerminalSettings,
+    display_language: Option<settings::DisplayLanguage>,
     theme_name: String,
     font_family: String,
     shell_form: ShellForm,
@@ -220,6 +223,7 @@ pub struct SettingsPage {
     editing_cursor: usize,
     marked_range: Option<Range<usize>>,
     draft_settings: TerminalSettings,
+    draft_display_language: Option<settings::DisplayLanguage>,
     theme_name: String,
     font_family: String,
     shell_form: ShellForm,
@@ -358,6 +362,7 @@ fn settings_page_draft_from_settings(
     environment.sort_by(|left, right| left.key.cmp(&right.key));
 
     SettingsPageDraft {
+        display_language: None,
         theme_name,
         font_family: draft_settings
             .font_family
@@ -395,10 +400,16 @@ impl CapturedPatch {
                     );
                 }
 
+                if let Some(language) = patch.draft.display_language {
+                    content.display_language = Some(language);
+                }
+
                 if !patch.dirty_settings.iter().any(|setting| {
                     !matches!(
                         setting,
-                        DirtySetting::Theme | DirtySetting::ResetTerminalDefaults
+                        DirtySetting::Theme
+                            | DirtySetting::DisplayLanguage
+                            | DirtySetting::ResetTerminalDefaults
                     )
                 }) {
                     return;
@@ -409,7 +420,9 @@ impl CapturedPatch {
                     .get_or_insert_with(settings::TerminalSettingsContent::default);
                 for setting in &patch.dirty_settings {
                     match setting {
-                        DirtySetting::Theme | DirtySetting::ResetTerminalDefaults => {}
+                        DirtySetting::Theme
+                        | DirtySetting::DisplayLanguage
+                        | DirtySetting::ResetTerminalDefaults => {}
                         DirtySetting::FileManagerOpenMode => {
                             terminal.file_manager_open_mode =
                                 Some(patch.draft.draft_settings.file_manager_open_mode);
@@ -552,6 +565,7 @@ impl SettingsPage {
 
         let SettingsPageDraft {
             draft_settings,
+            display_language,
             theme_name,
             font_family,
             shell_form,
@@ -570,6 +584,7 @@ impl SettingsPage {
             editing_cursor: 0,
             marked_range: None,
             draft_settings,
+            draft_display_language: display_language,
             theme_name,
             font_family,
             shell_form,
@@ -590,6 +605,7 @@ impl SettingsPage {
     fn current_draft(&self) -> SettingsPageDraft {
         SettingsPageDraft {
             draft_settings: self.draft_settings.clone(),
+            display_language: self.draft_display_language,
             theme_name: self.theme_name.clone(),
             font_family: self.font_family.clone(),
             shell_form: self.shell_form.clone(),
@@ -613,6 +629,7 @@ impl SettingsPage {
                             self.draft_settings.file_manager_open_mode;
                     }
                     DirtySetting::Theme
+                    | DirtySetting::DisplayLanguage
                     | DirtySetting::ResetTerminalDefaults
                     | DirtySetting::FontFamily
                     | DirtySetting::Shell
@@ -797,6 +814,7 @@ impl SettingsPage {
 
     fn replace_draft(&mut self, draft: SettingsPageDraft) {
         self.draft_settings = draft.draft_settings;
+        self.draft_display_language = draft.display_language;
         self.theme_name = draft.theme_name;
         self.font_family = draft.font_family;
         self.shell_form = draft.shell_form;
@@ -812,6 +830,9 @@ impl SettingsPage {
                     source.draft_settings.file_manager_open_mode;
             }
             DirtySetting::Theme => self.theme_name.clone_from(&source.theme_name),
+            DirtySetting::DisplayLanguage => {
+                self.draft_display_language = source.display_language;
+            }
             DirtySetting::ResetTerminalDefaults => {}
             DirtySetting::FontFamily => self.font_family.clone_from(&source.font_family),
             DirtySetting::FontSize => {
@@ -1011,7 +1032,11 @@ impl SettingsPage {
             }
             Err(error) => {
                 self.save_status = SaveStatus::Failed;
-                self.status_message = Some(format!("Could not save settings: {error}"));
+                self.status_message = Some(localized_format!(
+                    language::current(cx),
+                    "Could not save settings: {error}",
+                    "无法保存设置：{error}"
+                ));
             }
         }
         cx.notify();
@@ -1022,7 +1047,7 @@ impl SettingsPage {
         if self.pending_write.is_some() {
             return;
         }
-        let draft = match default_settings_page_draft(self.theme_name.clone()) {
+        let mut draft = match default_settings_page_draft(self.theme_name.clone()) {
             Ok(draft) => draft,
             Err(error) => {
                 self.fail_validation(error, cx);
@@ -1030,12 +1055,18 @@ impl SettingsPage {
             }
         };
         let theme_was_dirty = self.dirty_settings.contains(&DirtySetting::Theme);
+        draft.display_language = self.draft_display_language;
         self.replace_draft(draft);
         self.dirty_settings.clear();
         self.draft_revisions.field_revisions.clear();
         if theme_was_dirty {
             self.dirty_settings.push(DirtySetting::Theme);
             self.draft_revisions.record_edit(DirtySetting::Theme);
+        }
+        if self.draft_display_language.is_some() {
+            self.dirty_settings.push(DirtySetting::DisplayLanguage);
+            self.draft_revisions
+                .record_edit(DirtySetting::DisplayLanguage);
         }
         self.dirty_settings
             .push(DirtySetting::ResetTerminalDefaults);
@@ -1512,7 +1543,9 @@ impl SettingsPage {
         cx.spawn(async move |this, cx| {
             let result = match completion.await {
                 Ok(result) => result.map_err(|error| error.to_string()),
-                Err(_) => Err("The settings update was canceled.".to_string()),
+                Err(_) => Err(cx.update(|cx| {
+                    language::text(cx, "The settings update was canceled.").to_string()
+                })),
             };
             this.update(cx, |this, cx| {
                 this.finish_write(operation_id, result, cx);
@@ -1542,9 +1575,12 @@ impl SettingsPage {
             let answer = match window_handle.update(cx, |_, window, cx| {
                 window.prompt(
                     PromptLevel::Warning,
-                    "Discard unsaved settings changes?",
-                    Some("Your changes have not been saved."),
-                    &["Discard changes", "Cancel"],
+                    language::text(cx, "Discard unsaved settings changes?"),
+                    Some(language::text(cx, "Your changes have not been saved.")),
+                    &[
+                        language::text(cx, "Discard changes"),
+                        language::text(cx, "Cancel"),
+                    ],
                     cx,
                 )
             }) {

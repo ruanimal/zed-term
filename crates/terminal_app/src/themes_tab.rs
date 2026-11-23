@@ -17,6 +17,7 @@ use ui::{
 use crate::extension_store::{
     self, CatalogEntry, ExtensionMetadata, InstalledExtension, StoreError,
 };
+use crate::language::{self, Locale, localized_format};
 
 /// Fixed height of one extension row.
 ///
@@ -372,11 +373,6 @@ impl ThemesTab {
         });
     }
 
-    /// Reports a store failure, naming the stage that failed.
-    fn set_store_error(&mut self, action: &str, error: StoreError) {
-        self.set_status(format!("Could not {action}: {error}"), StatusKind::Error);
-    }
-
     /// Fetches the catalog for the current tab open.
     pub fn begin_load(
         &mut self,
@@ -401,7 +397,7 @@ impl ThemesTab {
             http_client,
             None,
             move |page, result, cx| {
-                page.themes_tab.finish_load(result);
+                page.themes_tab.finish_load(result, language::current(cx));
                 cx.notify();
             },
             cx,
@@ -410,7 +406,7 @@ impl ThemesTab {
     }
 
     /// Applies a finished catalog fetch.
-    pub fn finish_load(&mut self, result: Result<Vec<ExtensionMetadata>, StoreError>) {
+    fn finish_load(&mut self, result: Result<Vec<ExtensionMetadata>, StoreError>, locale: Locale) {
         self.busy = BusyState::Idle;
         self.busy_extension = None;
         self.loaded_once = true;
@@ -421,14 +417,25 @@ impl ThemesTab {
                 let count = catalog.len();
                 self.set_catalog(catalog);
                 self.set_status(
-                    format!("Loaded {count} theme extensions."),
+                    localized_format!(
+                        locale,
+                        "Loaded {count} theme extensions.",
+                        "已加载 {count} 个主题扩展。"
+                    ),
                     StatusKind::Success,
                 );
             }
             Err(error) => {
                 // An empty catalog would hide the extensions already on disk,
                 // so the cached rows are kept and only the status changes.
-                self.set_store_error("load theme extensions", error);
+                self.set_status(
+                    localized_format!(
+                        locale,
+                        "Could not load theme extensions: {error}",
+                        "无法加载主题扩展：{error}"
+                    ),
+                    StatusKind::Error,
+                );
             }
         }
     }
@@ -461,7 +468,14 @@ impl ThemesTab {
         }
         self.busy = BusyState::Installing;
         self.busy_extension = Some(extension_id.clone());
-        self.set_status(format!("Installing {extension_id}…"), StatusKind::Info);
+        self.set_status(
+            localized_format!(
+                language::current(cx),
+                "Installing {extension_id}…",
+                "正在安装 {extension_id}…"
+            ),
+            StatusKind::Info,
+        );
         cx.notify();
 
         extension_store::spawn_install(
@@ -490,7 +504,14 @@ impl ThemesTab {
         }
         self.busy = BusyState::Uninstalling;
         self.busy_extension = Some(extension_id.clone());
-        self.set_status(format!("Removing {extension_id}…"), StatusKind::Info);
+        self.set_status(
+            localized_format!(
+                language::current(cx),
+                "Removing {extension_id}…",
+                "正在卸载 {extension_id}…"
+            ),
+            StatusKind::Info,
+        );
         cx.notify();
 
         extension_store::spawn_uninstall(
@@ -519,6 +540,7 @@ impl ThemesTab {
     ) {
         self.busy = BusyState::Idle;
         self.busy_extension = None;
+        let locale = language::current(cx);
         match result {
             Ok(version) => {
                 self.installed =
@@ -529,17 +551,38 @@ impl ThemesTab {
                 crate::load_extension_themes(cx);
                 let message = if action == "install" {
                     if version.is_empty() {
-                        format!("Installed {extension_id}.")
+                        localized_format!(
+                            locale,
+                            "Installed {extension_id}.",
+                            "已安装 {extension_id}。"
+                        )
                     } else {
-                        format!("Installed {extension_id} {version}.")
+                        localized_format!(
+                            locale,
+                            "Installed {extension_id} {version}.",
+                            "已安装 {extension_id} {version}。"
+                        )
                     }
                 } else {
-                    format!("Removed {extension_id}.")
+                    localized_format!(locale, "Removed {extension_id}.", "已卸载 {extension_id}。")
                 };
                 self.set_status(message, StatusKind::Success);
             }
             Err(error) => {
-                self.set_store_error(&format!("{action} {extension_id}"), error);
+                let message = if action == "install" {
+                    localized_format!(
+                        locale,
+                        "Could not install {extension_id}: {error}",
+                        "无法安装 {extension_id}：{error}"
+                    )
+                } else {
+                    localized_format!(
+                        locale,
+                        "Could not remove {extension_id}: {error}",
+                        "无法卸载 {extension_id}：{error}"
+                    )
+                };
+                self.set_status(message, StatusKind::Error);
             }
         }
         cx.notify();
@@ -567,7 +610,7 @@ impl ThemesTab {
                 .child(toolbar)
                 .child(
                     v_flex().px_8().py_4().child(
-                        Label::new(message)
+                        Label::new(language::text(cx, message))
                             .size(LabelSize::Small)
                             .color(Color::Muted),
                     ),
@@ -634,9 +677,13 @@ impl ThemesTab {
                         div()
                             .debug_selector(|| "themes-installed-count".to_string())
                             .child(
-                                Label::new(format!("{installed_count} installed"))
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
+                                Label::new(localized_format!(
+                                    language::current(cx),
+                                    "{installed_count} installed",
+                                    "已安装 {installed_count} 个"
+                                ))
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
                             ),
                     )
                     .child(
@@ -645,7 +692,10 @@ impl ThemesTab {
                             .child(
                                 IconButton::new("themes-installed-filter", IconName::Check)
                                     .toggle_state(self.only_installed)
-                                    .tooltip(Tooltip::text("Show installed extensions only"))
+                                    .tooltip(Tooltip::text(language::text(
+                                        cx,
+                                        "Show installed extensions only",
+                                    )))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.themes_tab.toggle_installed_filter(cx);
                                     })),
@@ -655,7 +705,10 @@ impl ThemesTab {
                         div().debug_selector(|| "themes-reload".to_string()).child(
                             IconButton::new("themes-reload", IconName::RotateCw)
                                 .disabled(busy)
-                                .tooltip(Tooltip::text("Reload the theme extension list"))
+                                .tooltip(Tooltip::text(language::text(
+                                    cx,
+                                    "Reload the theme extension list",
+                                )))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     let http_client = cx.http_client();
                                     let page = cx.weak_entity();
@@ -667,7 +720,7 @@ impl ThemesTab {
             .when_some(status, |this, status| {
                 this.child(
                     h_flex().px_8().py_1().child(
-                        Label::new(status.text.clone())
+                        Label::new(language::text(cx, &status.text))
                             .size(LabelSize::Small)
                             .color(match status.kind {
                                 StatusKind::Info => Color::Muted,
@@ -718,9 +771,13 @@ impl ThemesTab {
         }
         if is_installed && theme_count > 0 {
             badges = badges.child(
-                Label::new(format!("{theme_count} themes"))
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
+                Label::new(localized_format!(
+                    language::current(cx),
+                    "{theme_count} themes",
+                    "{theme_count} 个主题"
+                ))
+                .size(LabelSize::Small)
+                .color(Color::Muted),
             );
         }
         if !version_label.is_empty() {
@@ -760,11 +817,14 @@ impl ThemesTab {
             // Progress replaces the controls so the row cannot be acted on
             // twice while an operation is running.
             controls = controls.child(
-                Label::new(match self.busy {
-                    BusyState::Installing => "Installing…",
-                    BusyState::Uninstalling => "Removing…",
-                    BusyState::Fetching | BusyState::Idle => "Working…",
-                })
+                Label::new(language::text(
+                    cx,
+                    match self.busy {
+                        BusyState::Installing => "Installing…",
+                        BusyState::Uninstalling => "Removing…",
+                        BusyState::Fetching | BusyState::Idle => "Working…",
+                    },
+                ))
                 .size(LabelSize::Small)
                 .color(Color::Muted),
             );
@@ -782,7 +842,7 @@ impl ThemesTab {
                         .child(
                             Button::new(
                                 SharedString::from(format!("themes-update-{extension_id}")),
-                                "Update",
+                                language::text(cx, "Update"),
                             )
                             .style(ButtonStyle::Filled)
                             .label_size(LabelSize::Small)
@@ -812,7 +872,7 @@ impl ThemesTab {
                         .child(
                             Button::new(
                                 SharedString::from(format!("themes-install-{extension_id}")),
-                                "Install",
+                                language::text(cx, "Install"),
                             )
                             .style(ButtonStyle::Outlined)
                             .label_size(LabelSize::Small)
@@ -847,7 +907,10 @@ impl ThemesTab {
                                 IconName::Trash,
                             )
                             .disabled(any_busy)
-                            .tooltip(Tooltip::text("Uninstall this theme extension"))
+                            .tooltip(Tooltip::text(language::text(
+                                cx,
+                                "Uninstall this theme extension",
+                            )))
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
                                     this.themes_tab.uninstall(id.clone(), page.clone(), cx);
@@ -1023,10 +1086,13 @@ mod tests {
     #[test]
     fn a_failed_load_reports_the_error_without_claiming_success() {
         let mut tab = tab_with(catalog_fixture(), Vec::new());
-        tab.finish_load(Err(StoreError {
-            kind: StoreErrorKind::Network,
-            message: "offline".to_string(),
-        }));
+        tab.finish_load(
+            Err(StoreError {
+                kind: StoreErrorKind::Network,
+                message: "offline".to_string(),
+            }),
+            Locale::default(),
+        );
 
         let (text, is_success) = tab.status_text().expect("a status should be shown");
         assert!(text.contains("network error"), "got: {text}");
@@ -1041,10 +1107,13 @@ mod tests {
     #[test]
     fn a_failed_first_load_leaves_an_empty_but_usable_list() {
         let mut tab = isolated_tab();
-        tab.finish_load(Err(StoreError {
-            kind: StoreErrorKind::Network,
-            message: "offline".to_string(),
-        }));
+        tab.finish_load(
+            Err(StoreError {
+                kind: StoreErrorKind::Network,
+                message: "offline".to_string(),
+            }),
+            Locale::default(),
+        );
 
         assert!(tab.rows().is_empty());
         assert!(
@@ -1058,7 +1127,7 @@ mod tests {
     #[test]
     fn a_successful_load_reports_the_catalog_size() {
         let mut tab = isolated_tab();
-        tab.finish_load(Ok(catalog_fixture()));
+        tab.finish_load(Ok(catalog_fixture()), Locale::default());
 
         let (text, is_success) = tab.status_text().expect("a status should be shown");
         assert!(text.contains('2'), "got: {text}");
@@ -1070,13 +1139,16 @@ mod tests {
     #[test]
     fn a_reload_after_a_failed_load_clears_the_error_state() {
         let mut tab = isolated_tab();
-        tab.finish_load(Err(StoreError {
-            kind: StoreErrorKind::Api,
-            message: "HTTP 500".to_string(),
-        }));
+        tab.finish_load(
+            Err(StoreError {
+                kind: StoreErrorKind::Api,
+                message: "HTTP 500".to_string(),
+            }),
+            Locale::default(),
+        );
         assert!(!tab.is_busy());
 
-        tab.finish_load(Ok(catalog_fixture()));
+        tab.finish_load(Ok(catalog_fixture()), Locale::default());
         assert_eq!(tab.matches().len(), 2);
         let (_, is_success) = tab.status_text().unwrap();
         assert!(is_success);

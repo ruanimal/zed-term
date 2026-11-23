@@ -172,6 +172,9 @@ pub enum ReduceMotionMode {
 #[with_fallible_options]
 #[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct SettingsContent {
+    /// The display language of the ZedTerm interface.
+    pub display_language: Option<DisplayLanguage>,
+
     #[serde(flatten)]
     pub project: ProjectSettingsContent,
 
@@ -320,6 +323,17 @@ pub struct SettingsContent {
     /// Settings for developer-oriented instrumentation tools (profilers,
     /// tracers, etc.) that can be toggled at runtime.
     pub instrumentation: Option<InstrumentationSettingsContent>,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom,
+)]
+pub enum DisplayLanguage {
+    #[default]
+    #[serde(rename = "en")]
+    English,
+    #[serde(rename = "zh-CN")]
+    SimplifiedChinese,
 }
 
 /// Configuration for developer-oriented instrumentation tools that collect

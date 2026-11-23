@@ -2820,6 +2820,10 @@ impl Terminal {
     }
 
     pub fn title(&self, truncate: bool) -> String {
+        self.title_with_fallback(truncate, "Terminal")
+    }
+
+    pub fn title_with_fallback(&self, truncate: bool, fallback: &str) -> String {
         const MAX_CHARS: usize = 25;
         self.title_override
             .as_ref()
@@ -2856,8 +2860,8 @@ impl Terminal {
                         };
                         format!("{process_file} — {process_name}")
                     })
-                    .unwrap_or_else(|| "Terminal".to_string()),
-                TerminalType::DisplayOnly => "Terminal".to_string(),
+                    .unwrap_or_else(|| fallback.to_owned()),
+                TerminalType::DisplayOnly => fallback.to_owned(),
             })
     }
 

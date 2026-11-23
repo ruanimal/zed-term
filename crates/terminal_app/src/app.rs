@@ -25,6 +25,7 @@ use util::ResultExt;
 
 pub mod extension_store;
 pub mod keymap;
+mod language;
 pub mod persistence;
 mod progress;
 pub mod providers_trzsz;
@@ -539,10 +540,27 @@ pub fn run(cx: &mut App, initial_directory: Option<std::path::PathBuf>) {
     {
         // Dock menu actions have no active window to receive them after all windows close.
         cx.on_action(|_: &NewWindow, cx| open_new_window(cx));
-        cx.set_dock_menu(vec![MenuItem::action("New Window", NewWindow)]);
+        let mut locale = language::current(cx);
+        update_dock_menu(cx);
+        cx.observe_global::<SettingsStore>(move |cx| {
+            let next_locale = language::current(cx);
+            if locale != next_locale {
+                locale = next_locale;
+                update_dock_menu(cx);
+            }
+        })
+        .detach();
     }
 
     open_first_window(cx, initial_directory);
+}
+
+#[cfg(target_os = "macos")]
+fn update_dock_menu(cx: &mut App) {
+    cx.set_dock_menu(vec![MenuItem::action(
+        language::text(cx, "New Window"),
+        NewWindow,
+    )]);
 }
 
 /// Registers the built-in key bindings.

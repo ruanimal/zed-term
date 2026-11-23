@@ -19,6 +19,7 @@ macOS 是主要支持的平台，同时也支持 Linux 构建和 deb 打包。
 - URL、OSC 8 和路径链接支持
 - 通过 [trzsz](https://trzsz.github.io/) 和 ZMODEM 上传与下载文件
 - 终端设置、快捷键编辑、主题扩展管理和文件管理器集成
+- 界面支持英文和简体中文。在**设置 → 终端 → 外观**中选择**界面语言**，保存后立即生效。
 
 常见问题与 shell 配置说明请参阅 [FAQ](docs/FAQ.zh-CN.md)。
 

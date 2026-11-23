@@ -18,6 +18,7 @@ use transfer_core::TransferProvider;
 use ui::prelude::*;
 use ui::{IconButtonShape, Tooltip};
 
+use crate::language::{self, Locale, localized_format};
 use crate::providers_trzsz::TrzszProvider;
 use crate::providers_zmodem::ZmodemProvider;
 use crate::transfer_io::AppTransferHost;
@@ -141,12 +142,19 @@ struct FinishedTransfer {
 /// The finished-transfer summary line. Only a download "saves" anything
 /// locally; an upload's paths are the files that were sent, so "Saved" there
 /// would claim a local save that never happened.
-fn completion_summary(paths: &[PathBuf], direction: Option<Direction>) -> String {
+fn completion_summary(paths: &[PathBuf], direction: Option<Direction>, locale: Locale) -> String {
     match paths.len() {
-        0 => "Transfer completed".to_string(),
-        1 if direction == Some(Direction::Upload) => format!("Sent {}", paths[0].display()),
-        1 => format!("Saved {}", paths[0].display()),
-        _ => format!("Transferred {} files", paths.len()),
+        0 => locale.text("Transfer completed").to_string(),
+        1 if direction == Some(Direction::Upload) => {
+            localized_format!(locale, "Sent {}", "已发送 {}", paths[0].display())
+        }
+        1 => localized_format!(locale, "Saved {}", "已保存 {}", paths[0].display()),
+        _ => localized_format!(
+            locale,
+            "Transferred {} files",
+            "已传输 {} 个文件",
+            paths.len()
+        ),
     }
 }
 
@@ -233,7 +241,7 @@ impl TransferUiState {
             }
             TransferUiEvent::Completed { paths } => {
                 let direction = self.active.as_ref().and_then(|active| active.direction);
-                let summary = completion_summary(&paths, direction);
+                let summary = completion_summary(&paths, direction, language::current(cx));
                 self.finished = Some(FinishedTransfer {
                     message: summary,
                     ok: true,
@@ -242,7 +250,11 @@ impl TransferUiState {
             }
             TransferUiEvent::Failed { reason } => {
                 self.finished = Some(FinishedTransfer {
-                    message: format!("Transfer failed: {reason}"),
+                    message: localized_format!(
+                        language::current(cx),
+                        "Transfer failed: {reason}",
+                        "传输失败：{reason}"
+                    ),
                     ok: false,
                 });
                 self.active = None;
@@ -324,8 +336,11 @@ impl TransferUiState {
                         this.terminal.update(cx, |terminal, _| {
                             terminal.transfer_answer_upload_paths(None);
                         });
-                        this.transfer_ui
-                            .fail(format!("无法打开文件选择器: {error}"));
+                        this.transfer_ui.fail(localized_format!(
+                            language::current(cx),
+                            "Could not open the file picker: {error}",
+                            "无法打开文件选择器：{error}"
+                        ));
                         this.transfer_ui.schedule_dismiss(cx);
                         cx.notify();
                     }) {
@@ -385,8 +400,11 @@ impl TransferUiState {
                         this.terminal.update(cx, |terminal, _| {
                             terminal.transfer_answer_download_dir(None);
                         });
-                        this.transfer_ui
-                            .fail(format!("无法打开目录选择器: {error}"));
+                        this.transfer_ui.fail(localized_format!(
+                            language::current(cx),
+                            "Could not open the directory picker: {error}",
+                            "无法打开目录选择器：{error}"
+                        ));
                         this.transfer_ui.schedule_dismiss(cx);
                         cx.notify();
                     }) {
@@ -446,17 +464,24 @@ impl TransferBar {
 
 impl RenderOnce for TransferBar {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let locale = language::current(cx);
         let state = self.tab.read(cx).transfer_ui_state();
         let colors = cx.theme().colors();
 
         let (text, ok, fraction, hint) = if let Some(active) = &state.active {
-            let direction = match active.direction {
+            let direction = locale.text(match active.direction {
                 Some(Direction::Upload) => "Uploading",
                 Some(Direction::Download) => "Downloading",
                 None => "Transferring",
-            };
+            });
             let file = if active.file_count > 1 {
-                format!(" (file {}/{})", active.file_index + 1, active.file_count)
+                localized_format!(
+                    locale,
+                    " (file {}/{})",
+                    "（文件 {}/{}）",
+                    active.file_index + 1,
+                    active.file_count
+                )
             } else {
                 String::new()
             };
@@ -465,10 +490,11 @@ impl RenderOnce for TransferBar {
                 .map(|total| format!(" / {}", human_bytes(total)))
                 .unwrap_or_default();
             (
-                format!(
-                    "{}{file}: {}{total}",
-                    direction,
-                    human_bytes(active.bytes_done)
+                localized_format!(
+                    locale,
+                    "{direction}{file}: {}{total}",
+                    "{direction}{file}：{}{total}",
+                    human_bytes(active.bytes_done),
                 ),
                 true,
                 active
@@ -482,13 +508,13 @@ impl RenderOnce for TransferBar {
             )
         } else if let Some(finished) = &state.finished {
             (
-                finished.message.clone(),
+                locale.text(&finished.message).to_owned(),
                 finished.ok,
                 None,
                 state.hint.clone(),
             )
         } else if let Some(hint) = &state.hint {
-            (hint.clone(), true, None, None)
+            (locale.text(hint).to_owned(), true, None, None)
         } else {
             return div();
         };
@@ -543,11 +569,11 @@ impl RenderOnce for TransferBar {
                         IconButton::new("transfer-close", IconName::Close)
                             .shape(IconButtonShape::Square)
                             .icon_size(IconSize::Small)
-                            .tooltip(Tooltip::text(if cancel_active {
+                            .tooltip(Tooltip::text(locale.text(if cancel_active {
                                 "Cancel transfer"
                             } else {
                                 "Dismiss"
-                            }))
+                            })))
                             .on_click(move |_, window, cx| {
                                 if cancel_active {
                                     terminal.update(cx, |terminal, _| terminal.transfer_cancel());
@@ -558,7 +584,11 @@ impl RenderOnce for TransferBar {
                     ),
             )
             .when_some(hint, |bar, hint| {
-                bar.child(Label::new(hint).size(LabelSize::Small).color(Color::Muted))
+                bar.child(
+                    Label::new(locale.text(&hint))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
             })
             .when_some(progress, |bar, progress| bar.child(progress))
     }
@@ -629,18 +659,30 @@ mod tests {
     fn completion_summary_distinguishes_uploads_from_downloads() {
         let path = PathBuf::from("/tmp/report.csv");
         assert_eq!(
-            completion_summary(std::slice::from_ref(&path), Some(Direction::Download)),
+            completion_summary(
+                std::slice::from_ref(&path),
+                Some(Direction::Download),
+                Locale::default()
+            ),
             "Saved /tmp/report.csv"
         );
         assert_eq!(
-            completion_summary(std::slice::from_ref(&path), Some(Direction::Upload)),
+            completion_summary(
+                std::slice::from_ref(&path),
+                Some(Direction::Upload),
+                Locale::default()
+            ),
             "Sent /tmp/report.csv"
         );
-        assert_eq!(completion_summary(&[], None), "Transfer completed");
+        assert_eq!(
+            completion_summary(&[], None, Locale::default()),
+            "Transfer completed"
+        );
         assert_eq!(
             completion_summary(
                 &[path.clone(), PathBuf::from("/tmp/b")],
-                Some(Direction::Upload)
+                Some(Direction::Upload),
+                Locale::default(),
             ),
             "Transferred 2 files"
         );

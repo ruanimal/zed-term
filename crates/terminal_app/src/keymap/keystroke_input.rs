@@ -13,6 +13,8 @@ use ui::{
     ParentElement as _, Render, Styled as _, Tooltip, Window, prelude::*,
 };
 
+use crate::language;
+
 actions!(
     terminal_app_keymap,
     [
@@ -513,7 +515,7 @@ impl Render for KeystrokeInput {
             .rounded_sm()
             .child(recording_pulse(Color::Error))
             .child(
-                Label::new("REC")
+                Label::new(language::text(cx, "REC"))
                     .size(LabelSize::XSmall)
                     .weight(FontWeight::SEMIBOLD)
                     .color(Color::Error),
@@ -531,7 +533,7 @@ impl Render for KeystrokeInput {
             .rounded_sm()
             .child(recording_pulse(Color::Accent))
             .child(
-                Label::new("SEARCH")
+                Label::new(language::text(cx, "SEARCH"))
                     .size(LabelSize::XSmall)
                     .weight(FontWeight::SEMIBOLD)
                     .color(Color::Accent),
@@ -620,11 +622,14 @@ impl Render for KeystrokeInput {
                                     .shape(IconButtonShape::Square)
                                     .map(|this| {
                                         this.tooltip(Tooltip::for_action_title(
-                                            if self.search {
-                                                "Stop Searching"
-                                            } else {
-                                                "Stop Recording"
-                                            },
+                                            language::text(
+                                                cx,
+                                                if self.search {
+                                                    "Stop Searching"
+                                                } else {
+                                                    "Stop Recording"
+                                                },
+                                            ),
                                             &StopRecording,
                                         ))
                                     })
@@ -639,11 +644,14 @@ impl Render for KeystrokeInput {
                                     .shape(IconButtonShape::Square)
                                     .map(|this| {
                                         this.tooltip(Tooltip::for_action_title(
-                                            if self.search {
-                                                "Start Searching"
-                                            } else {
-                                                "Start Recording"
-                                            },
+                                            language::text(
+                                                cx,
+                                                if self.search {
+                                                    "Start Searching"
+                                                } else {
+                                                    "Start Recording"
+                                                },
+                                            ),
                                             &StartRecording,
                                         ))
                                     })
@@ -661,9 +669,9 @@ impl Render for KeystrokeInput {
                                 .shape(IconButtonShape::Square)
                                 .tooltip(move |_, cx| {
                                     Tooltip::with_meta(
-                                        "Clear Keystrokes",
+                                        language::text(cx, "Clear Keystrokes"),
                                         Some(&ClearKeystrokes),
-                                        "Hit it three times to execute",
+                                        language::text(cx, "Hit it three times to execute"),
                                         cx,
                                     )
                                 })

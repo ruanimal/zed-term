@@ -2126,6 +2126,7 @@ fn test_settings_page(shell_form: ShellForm, cx: &mut Context<SettingsPage>) -> 
         editing_cursor: 0,
         marked_range: None,
         draft_settings: TerminalSettings::get_global(cx).clone(),
+        draft_display_language: None,
         theme_name: String::new(),
         font_family: String::new(),
         shell_form,
@@ -3082,6 +3083,106 @@ fn captured_save_patch(settings_page: &SettingsPage) -> CapturedPatch {
         working_directory: None,
         appearance: theme::Appearance::Dark,
     }))
+}
+
+#[gpui::test]
+async fn display_language_saves_independently_of_terminal_defaults(cx: &mut gpui::TestAppContext) {
+    use fs::Fs as _;
+    use settings::DisplayLanguage::{English, SimplifiedChinese};
+
+    let filesystem = fs::FakeFs::new(cx.background_executor.clone());
+    let settings_path = paths::settings_file();
+    let settings_directory = settings_path
+        .parent()
+        .expect("settings should have a parent directory");
+    filesystem
+        .create_dir(settings_directory)
+        .await
+        .expect("the settings directory should be creatable");
+    let original = r#"{
+  // Keep this comment.
+  "terminal": {"font_size": 20},
+  "macos": {"display_language": "en"},
+  "linux": {"display_language": "en"},
+  "windows": {"display_language": "en"},
+  "auto_update": false
+}"#;
+    filesystem
+        .insert_file(settings_path, original.as_bytes().to_vec())
+        .await;
+
+    cx.update(|cx| {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        assert_eq!(language::current(cx).language(), English);
+        assert_eq!(language::text(cx, "Settings"), "Settings");
+    });
+    let (page, cx) = cx.add_window_view(|_, cx| clean_test_settings_page(cx));
+    cx.simulate_resize(size(px(700.), px(700.)));
+    cx.run_until_parked();
+    let language_row = cx
+        .debug_bounds("setting-Display language")
+        .expect("the display language row should be visible");
+    cx.simulate_click(
+        gpui::point(language_row.right() - px(60.), language_row.center().y),
+        gpui::Modifiers::default(),
+    );
+    cx.run_until_parked();
+    let chinese_option = cx
+        .debug_bounds("MENU_ITEM-简体中文")
+        .expect("the language menu should offer Simplified Chinese");
+    cx.simulate_click(chinese_option.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+
+    let patch = page.update(cx, |page, cx| {
+        assert_eq!(page.draft_display_language, Some(SimplifiedChinese));
+        page.reset_terminal_defaults(cx);
+        assert_eq!(language::current(cx).language(), English);
+        assert_eq!(page.draft_display_language, Some(SimplifiedChinese));
+        captured_save_patch(page)
+    });
+    let completion = cx.update(|_, cx| {
+        SettingsStore::global(cx)
+            .update_settings_file_with_completion(filesystem.clone(), move |content, _| {
+                patch.apply(content)
+            })
+    });
+    completion
+        .await
+        .expect("the writer should report completion")
+        .expect("saving the language should succeed");
+    let updated = filesystem
+        .load(settings_path)
+        .await
+        .expect("settings should be saved on disk");
+    assert!(updated.contains("// Keep this comment."));
+    assert!(updated.contains("\"zh-CN\""));
+    assert!(!updated.contains("\"terminal\""));
+    assert!(updated.contains("\"auto_update\": false"));
+
+    cx.update(|_, cx| {
+        assert_eq!(language::current(cx).language(), SimplifiedChinese);
+        assert_eq!(language::text(cx, "Settings"), "设置");
+        let mut reloaded_store = SettingsStore::test(cx);
+        reloaded_store
+            .set_user_settings(&updated, cx)
+            .result()
+            .expect("the saved settings should reload");
+        assert_eq!(
+            reloaded_store
+                .get_content_for_file(settings::SettingsFile::User)
+                .and_then(|content| content.display_language),
+            Some(SimplifiedChinese)
+        );
+        SettingsStore::update_global(cx, |store, cx| {
+            store
+                .set_user_settings(r#"{"display_language": "en"}"#, cx)
+                .result()
+                .expect("English settings should load");
+        });
+        assert_eq!(language::current(cx).language(), English);
+    });
 }
 
 #[derive(Debug, PartialEq)]

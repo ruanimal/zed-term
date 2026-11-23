@@ -23,6 +23,7 @@ use util::ResultExt;
 use util::paths::PathWithPosition;
 
 use super::TerminalScrollHandle;
+use crate::language;
 use crate::text_edit::{
     next_utf16_boundary, previous_utf16_boundary, replace_utf16_range, substring_utf16,
 };
@@ -202,7 +203,9 @@ impl TerminalTab {
     }
 
     pub fn title(&self, cx: &App) -> String {
-        self.terminal.read(cx).title(false)
+        self.terminal
+            .read(cx)
+            .title_with_fallback(false, language::text(cx, "Terminal"))
     }
 
     pub(crate) fn has_bell(&self) -> bool {
@@ -890,6 +893,20 @@ mod tests {
         );
         let terminal = cx.new(|cx| builder.subscribe(cx));
         cx.new(|cx| TerminalTab::new(terminal, cx))
+    }
+
+    #[gpui::test]
+    fn terminal_title_fallback_follows_display_language(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut store = SettingsStore::test(cx);
+            store
+                .set_user_settings(r#"{"display_language":"zh-CN"}"#, cx)
+                .result()
+                .expect("Chinese settings should load");
+            cx.set_global(store);
+            let pane = test_pane(cx);
+            assert_eq!(pane.read(cx).title(cx), "终端");
+        });
     }
 
     #[gpui::test]

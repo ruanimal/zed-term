@@ -30,6 +30,7 @@ where
         }
 
         let controls = window.window_controls();
+        let locale = crate::language::current(cx);
         let layout = complete_button_layout(cx);
         let mut close_handler = Some(on_close);
         let left = render_button_side(
@@ -37,12 +38,14 @@ where
             window.is_maximized(),
             controls,
             &mut close_handler,
+            locale,
         );
         let right = render_button_side(
             layout.right,
             window.is_maximized(),
             controls,
             &mut close_handler,
+            locale,
         );
         (left, right)
     }
@@ -82,6 +85,7 @@ fn render_button_side<F>(
     is_maximized: bool,
     controls: WindowControls,
     close_handler: &mut Option<F>,
+    locale: crate::language::Locale,
 ) -> Option<AnyElement>
 where
     F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -102,7 +106,7 @@ where
         } else {
             None
         };
-        render_window_button(button, is_maximized, close_handler)
+        render_window_button(button, is_maximized, close_handler, locale)
     });
 
     Some(
@@ -120,6 +124,7 @@ fn render_window_button<F>(
     button: WindowButton,
     is_maximized: bool,
     close_handler: Option<F>,
+    locale: crate::language::Locale,
 ) -> AnyElement
 where
     F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -131,6 +136,7 @@ where
         WindowButton::Close => (IconName::GenericClose, "Close"),
     };
 
+    let label = locale.text(label);
     let button_id = button.id();
     let button = match button {
         WindowButton::Minimize => IconButton::new(button.id(), icon)
@@ -359,6 +365,7 @@ mod tests {
                 false,
                 WindowControls::default(),
                 &mut close_handler,
+                crate::language::Locale::default(),
             )
             .is_none()
         );
@@ -376,6 +383,7 @@ mod tests {
                     ..WindowControls::default()
                 },
                 &mut close_handler,
+                crate::language::Locale::default(),
             )
             .is_none()
         );
@@ -397,6 +405,7 @@ mod tests {
                     false,
                     WindowControls::default(),
                     &mut close_handler,
+                    crate::language::Locale::default(),
                 );
                 assert_eq!(side.is_some(), has_buttons);
             }

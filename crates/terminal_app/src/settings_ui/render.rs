@@ -8,6 +8,7 @@ impl SettingsPage {
         active: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let placeholder = language::text(cx, placeholder);
         if !active {
             return Label::new(if value.is_empty() {
                 placeholder.to_string()
@@ -156,7 +157,7 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    fn status_row(&self) -> gpui::AnyElement {
+    fn status_row(&self, locale: language::Locale) -> gpui::AnyElement {
         let Some(message) = self.status_message.as_ref() else {
             return div().into_any_element();
         };
@@ -169,7 +170,7 @@ impl SettingsPage {
             .px_8()
             .py_2()
             .child(
-                Label::new(message.clone())
+                Label::new(locale.text(message))
                     .size(LabelSize::Small)
                     .color(color),
             )
@@ -178,6 +179,7 @@ impl SettingsPage {
 
     fn row(
         &self,
+        locale: language::Locale,
         title: &'static str,
         description: &'static str,
         control: gpui::AnyElement,
@@ -185,6 +187,7 @@ impl SettingsPage {
         let id = element_id_for(title);
         v_flex()
             .id(id.clone())
+            .debug_selector(|| id.to_string())
             .group(format!("setting-item-{id}"))
             .w_full()
             .px_8()
@@ -199,9 +202,9 @@ impl SettingsPage {
                             .w_full()
                             .max_w_2_3()
                             .min_w_0()
-                            .child(Label::new(SharedString::new_static(title)))
+                            .child(Label::new(locale.text(title)))
                             .child(
-                                Label::new(SharedString::new_static(description))
+                                Label::new(locale.text(description))
                                     .size(LabelSize::Small)
                                     .color(Color::Muted),
                             ),
@@ -212,14 +215,18 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    fn section_header(&self, label: &'static str, _cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn section_header(&self, label: &'static str, cx: &App) -> gpui::AnyElement {
         v_flex()
             .id(format!("section-{label}"))
             .w_full()
             .px_8()
             .pt_4()
             .pb_1()
-            .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
+            .child(
+                Label::new(language::text(cx, label))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
             .into_any_element()
     }
 
@@ -233,11 +240,12 @@ impl SettingsPage {
         options: DropdownOptions,
     ) -> gpui::AnyElement {
         let page = cx.weak_entity();
+        let locale = language::current(cx);
         let menu = ContextMenu::build(window, cx, move |menu, _, _| {
             let mut menu = menu;
             for (option_label, apply) in options {
                 let page = page.clone();
-                menu = menu.entry(option_label, None, move |window, cx| {
+                menu = menu.entry(locale.text(option_label), None, move |window, cx| {
                     page.update(cx, |this, _| this.clear_active_edit())
                         .log_err();
                     apply(window, cx);
@@ -246,9 +254,12 @@ impl SettingsPage {
             menu
         });
         self.row(
+            locale,
             title,
             description,
-            DropdownMenu::new(element_id_for(title), value, menu).into_any_element(),
+            DropdownMenu::new(element_id_for(title), locale.text(&value), menu)
+                .aria_label(locale.text(title))
+                .into_any_element(),
         )
     }
 
@@ -286,11 +297,12 @@ impl SettingsPage {
                     })),
             )
             .into_any_element();
-        self.row(title, description, control)
+        self.row(language::current(cx), title, description, control)
     }
 
     fn toggle_row(
         &self,
+        cx: &App,
         title: &'static str,
         description: &'static str,
         enabled: bool,
@@ -307,7 +319,7 @@ impl SettingsPage {
         )
         .on_click(move |_, _window, cx| apply(cx))
         .into_any_element();
-        self.row(title, description, control)
+        self.row(language::current(cx), title, description, control)
     }
 
     fn action_button(
@@ -329,11 +341,15 @@ impl SettingsPage {
             } else {
                 cx.theme().colors().editor_background
             })
-            .child(Label::new(label).size(LabelSize::Small).color(if enabled {
-                Color::Default
-            } else {
-                Color::Muted
-            }));
+            .child(
+                Label::new(language::text(cx, label))
+                    .size(LabelSize::Small)
+                    .color(if enabled {
+                        Color::Default
+                    } else {
+                        Color::Muted
+                    }),
+            );
         if enabled {
             button.on_click(cx.listener(on_click)).into_any_element()
         } else {
@@ -393,6 +409,53 @@ impl SettingsPage {
         }
     }
 
+    fn display_language_row(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        use settings::DisplayLanguage;
+
+        let languages = [
+            ("English", DisplayLanguage::English),
+            ("简体中文", DisplayLanguage::SimplifiedChinese),
+        ];
+        let active = language::current(cx).language();
+        let selected = self.draft_display_language.unwrap_or(active);
+        let label = match selected {
+            DisplayLanguage::English => "English",
+            DisplayLanguage::SimplifiedChinese => "简体中文",
+        };
+        let page = cx.weak_entity();
+        let options = languages
+            .into_iter()
+            .map(|(label, language)| {
+                let page = page.clone();
+                opt(label, move |_, cx| {
+                    page.update(cx, |this, cx| {
+                        if language
+                            != this
+                                .draft_display_language
+                                .unwrap_or_else(|| language::current(cx).language())
+                        {
+                            this.draft_display_language = Some(language);
+                            this.mark_dirty(DirtySetting::DisplayLanguage, cx);
+                        }
+                    })
+                    .log_err();
+                })
+            })
+            .collect();
+        self.enum_row(
+            window,
+            cx,
+            "Display language",
+            "Choose the interface language. The change takes effect when you save.",
+            label.to_owned(),
+            options,
+        )
+    }
+
     fn theme_row(
         &self,
         window: &mut Window,
@@ -416,6 +479,7 @@ impl SettingsPage {
             menu
         });
         self.row(
+            language::current(cx),
             "Color theme",
             "Choose the color theme for the terminal and UI.",
             DropdownMenu::new(element_id_for("Color theme"), current, menu).into_any_element(),
@@ -429,8 +493,11 @@ impl SettingsPage {
         font_families: Vec<SharedString>,
     ) -> gpui::AnyElement {
         let page = cx.weak_entity();
-        let application_default_label =
-            format!("Application default ({DEFAULT_TERMINAL_FONT_FAMILY})");
+        let application_default_label = localized_format!(
+            language::current(cx),
+            "Application default ({DEFAULT_TERMINAL_FONT_FAMILY})",
+            "应用默认（{DEFAULT_TERMINAL_FONT_FAMILY}）"
+        );
         let menu_application_default_label = application_default_label.clone();
         let menu = ContextMenu::build(window, cx, |menu, _, _| {
             let inherited_page = page.clone();
@@ -459,6 +526,7 @@ impl SettingsPage {
             menu
         });
         self.row(
+            language::current(cx),
             "Font family",
             "Choose an installed font, or use the application default.",
             DropdownMenu::new(
@@ -516,6 +584,7 @@ impl SettingsPage {
         ));
         if self.shell_form.mode != ShellMode::System {
             form = form.child(self.row(
+                language::current(cx),
                 "Shell program",
                 "The executable to run for each new terminal.",
                 self.text_input(
@@ -529,6 +598,7 @@ impl SettingsPage {
         }
         if self.shell_form.mode == ShellMode::WithArguments {
             form = form.child(self.row(
+                language::current(cx),
                 "Shell title override",
                 "Optional title used for tabs started with this shell.",
                 self.text_input(
@@ -548,7 +618,15 @@ impl SettingsPage {
                         .py_1()
                         .gap_2()
                         .items_center()
-                        .child(Label::new(format!("Argument {}", index + 1)).color(Color::Muted))
+                        .child(
+                            Label::new(localized_format!(
+                                language::current(cx),
+                                "Argument {}",
+                                "参数 {}",
+                                index + 1
+                            ))
+                            .color(Color::Muted),
+                        )
                         .child(self.text_input(
                             format!("shell-argument-input-{index}"),
                             EditableField::ShellArgument(index),
@@ -701,6 +779,7 @@ impl SettingsPage {
         ));
         if self.working_directory.mode == WorkingDirectoryMode::Fixed {
             form = form.child(self.row(
+                language::current(cx),
                 "Fixed working directory",
                 "An existing directory. `~` is expanded before it is saved.",
                 self.text_input(
@@ -718,6 +797,7 @@ impl SettingsPage {
 
 impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let locale = language::current(cx);
         let settings = self.draft_settings.clone();
         let font_size = settings.font_size.map(f32::from);
         let cursor_shape = format!("{:?}", settings.cursor_shape).to_lowercase();
@@ -729,7 +809,9 @@ impl Render for SettingsPage {
         let line_height = match settings.line_height {
             settings::TerminalLineHeight::Comfortable => "comfortable".to_string(),
             settings::TerminalLineHeight::Standard => "standard".to_string(),
-            settings::TerminalLineHeight::Custom(value) => format!("custom ({value:.2})"),
+            settings::TerminalLineHeight::Custom(value) => {
+                localized_format!(locale, "custom ({value:.2})", "自定义（{value:.2}）")
+            }
         };
         let line_height_custom = match settings.line_height {
             settings::TerminalLineHeight::Custom(value) => Some(value),
@@ -766,8 +848,9 @@ impl Render for SettingsPage {
             v_flex()
             .id("settings-content")
             .w_full()
-            .child(self.status_row())
+            .child(self.status_row(locale))
             .child(self.section_header("Appearance", cx))
+            .child(self.display_language_row(window, cx))
             .child(self.theme_row(window, cx, current_theme.clone(), theme_names))
             .child(self.font_family_row(window, cx, font_families))
             .child(self.number_row(
@@ -775,7 +858,7 @@ impl Render for SettingsPage {
                 "Font size",
                 "The size of the terminal font. The default is the application terminal font size.",
                 font_size.map_or_else(
-                    || format!("Application default ({DEFAULT_TERMINAL_FONT_SIZE:.1} px)"),
+                    || localized_format!(locale, "Application default ({DEFAULT_TERMINAL_FONT_SIZE:.1} px)", "应用默认（{DEFAULT_TERMINAL_FONT_SIZE:.1} px）"),
                     |value| format!("{value:.1} px"),
                 ),
                 {
@@ -805,7 +888,7 @@ impl Render for SettingsPage {
                 "Font weight",
                 "CSS font weight from 100 to 900. The default uses the normal font weight.",
                 font_weight.map_or_else(
-                    || "400 (default)".to_string(),
+                    || locale.text("400 (default)").to_string(),
                     |value| format!("{value:.0}"),
                 ),
                 {
@@ -971,7 +1054,7 @@ impl Render for SettingsPage {
                 ],
             ))
             .child(self.section_header("Behavior", cx))
-            .child(self.toggle_row(
+            .child(self.toggle_row(cx,
                 "Option as meta",
                 "Use the option key as the meta key.",
                 settings.option_as_meta,
@@ -990,7 +1073,7 @@ impl Render for SettingsPage {
                     }
                 },
             ))
-            .child(self.toggle_row(
+            .child(self.toggle_row(cx,
                 "Copy on select",
                 "Automatically copy selected text to the clipboard.",
                 settings.copy_on_select,
@@ -1009,7 +1092,7 @@ impl Render for SettingsPage {
                     }
                 },
             ))
-            .child(self.toggle_row(
+            .child(self.toggle_row(cx,
                 "Keep selection on copy",
                 "Keep a terminal selection after it is copied manually.",
                 settings.keep_selection_on_copy,
@@ -1028,7 +1111,7 @@ impl Render for SettingsPage {
                     }
                 },
             ))
-            .child(self.toggle_row(
+            .child(self.toggle_row(cx,
                 "Open links in mouse mode",
                 "Allow Command-click links while an application receives mouse input.",
                 settings.open_links_in_mouse_mode,
@@ -1084,7 +1167,7 @@ impl Render for SettingsPage {
                 ],
             ))
             .child(self.section_header("File transfer", cx))
-            .child(self.row(
+            .child(self.row(language::current(cx),
                 "Download directory",
                 "Where received files are saved. Leave blank to choose a directory for each download.",
                 self.text_input(
@@ -1095,7 +1178,7 @@ impl Render for SettingsPage {
                     cx,
                 ),
             ))
-            .child(self.toggle_row(
+            .child(self.toggle_row(cx,
                 "Confirm download location",
                 "Ask where each download should be saved. When disabled, the configured directory is used without prompting.",
                 transfer_settings.confirm_before_download,
@@ -1127,7 +1210,7 @@ impl Render for SettingsPage {
                 cx,
                 "Transfer notification timeout",
                 "Seconds before a finished transfer notification closes. Set to 0 to keep it open.",
-                format!("{} s", transfer_settings.notification_timeout_secs),
+                localized_format!(locale, "{} s", "{} 秒", transfer_settings.notification_timeout_secs),
                 {
                     let page = page.clone();
                     move |cx, delta| {
@@ -1151,7 +1234,7 @@ impl Render for SettingsPage {
             ))
             .child(self.section_header("Shell and environment", cx))
             .child(self.render_shell_form(window, cx))
-            .child(self.row(
+            .child(self.row(language::current(cx),
                 "Environment variables",
                 "Variables are validated and apply only to newly created terminals and panes.",
                 div().into_any_element(),
@@ -1215,7 +1298,7 @@ impl Render for SettingsPage {
                     "The maximum number of lines to keep in scrollback for newly created terminals and panes.",
                     settings
                         .max_scroll_history_lines
-                        .map_or_else(|| "10,000 (default)".to_string(), |value| value.to_string()),
+                        .map_or_else(|| locale.text("10,000 (default)").to_string(), |value| value.to_string()),
                     {
                         let page = page.clone();
                         move |cx, delta| {
@@ -1283,7 +1366,7 @@ impl Render for SettingsPage {
                 ],
             ))
             .child(self.section_header("Reset", cx))
-            .child(self.row(
+            .child(self.row(language::current(cx),
                 "Reset Terminal Defaults",
                 "Restore terminal defaults in this draft. Click Save to persist the changes.",
                 self.action_button(
@@ -1391,7 +1474,7 @@ impl Render for SettingsPage {
                                 let search_input = self.themes_search_input(search_query, cx);
                                 self.themes_tab.render(search_input, cx)
                             }
-                            SettingsTab::About => self.render_about_tab(),
+                            SettingsTab::About => self.render_about_tab(cx),
                         }),
                 ),
             window,
@@ -1401,7 +1484,7 @@ impl Render for SettingsPage {
 }
 
 impl SettingsPage {
-    fn render_about_tab(&self) -> gpui::AnyElement {
+    fn render_about_tab(&self, cx: &App) -> gpui::AnyElement {
         static LOGO: std::sync::OnceLock<Arc<gpui::Image>> = std::sync::OnceLock::new();
         let logo = LOGO.get_or_init(|| {
             Arc::new(gpui::Image::from_bytes(
@@ -1426,27 +1509,34 @@ impl SettingsPage {
                             .gap_1()
                             .child(Label::new("ZedTerm").size(LabelSize::Large))
                             .child(
-                                Label::new(
+                                Label::new(language::text(
+                                    cx,
                                     "A standalone terminal application based on Zed's terminal.",
-                                )
+                                ))
                                 .color(Color::Muted),
                             ),
                     ),
             )
             .child(self.row(
+                language::current(cx),
                 "Version",
                 "The version of ZedTerm currently running.",
                 Label::new(env!("CARGO_PKG_VERSION")).into_any_element(),
             ))
             .child(
                 self.row(
+                    language::current(cx),
                     "Repository",
                     "View the ZedTerm source code.",
-                    ButtonLink::new("GitHub repository", "https://github.com/ruanimal/zed-term")
-                        .into_any_element(),
+                    ButtonLink::new(
+                        language::text(cx, "GitHub repository"),
+                        "https://github.com/ruanimal/zed-term",
+                    )
+                    .into_any_element(),
                 ),
             )
             .child(self.row(
+                language::current(cx),
                 "License",
                 "ZedTerm is distributed under the GPL-3.0-or-later license.",
                 Label::new("GPL-3.0-or-later").into_any_element(),
@@ -1464,13 +1554,16 @@ impl SettingsPage {
         let titlebar_height = window_chrome::TITLE_BAR_HEIGHT;
         let has_unsaved_changes = !self.dirty_settings.is_empty();
         let saving = self.save_status == SaveStatus::Saving;
-        let save_label = if saving {
-            "Saving…"
-        } else if self.save_status == SaveStatus::Succeeded && !has_unsaved_changes {
-            "Saved"
-        } else {
-            "Save"
-        }
+        let save_label = language::text(
+            cx,
+            if saving {
+                "Saving…"
+            } else if self.save_status == SaveStatus::Succeeded && !has_unsaved_changes {
+                "Saved"
+            } else {
+                "Save"
+            },
+        )
         .to_string();
         let is_server_decorations = matches!(window.window_decorations(), Decorations::Server);
         let can_maximize =
@@ -1487,7 +1580,7 @@ impl SettingsPage {
             .gap_2()
             .child(self.title_bar_action_button(
                 "discard-settings",
-                "Discard".to_string(),
+                language::text(cx, "Discard").to_string(),
                 has_unsaved_changes && !saving,
                 false,
                 false,
@@ -1599,7 +1692,7 @@ impl SettingsPage {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.switch_tab(tab, cx);
             }))
-            .child(Label::new(tab.label()).size(LabelSize::Small))
+            .child(Label::new(language::text(cx, tab.label())).size(LabelSize::Small))
             .into_any_element()
     }
 

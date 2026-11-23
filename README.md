@@ -19,6 +19,7 @@ macOS is the primary platform. Linux builds and deb packaging are also supported
 - URL, OSC 8, and path link support
 - File uploads and downloads via [trzsz](https://trzsz.github.io/) and ZMODEM
 - Terminal settings, keymap editing, theme extension management, and file manager integration
+- English and Simplified Chinese interface. Choose **Display language** under **Settings → Terminal → Appearance** and save to switch without restarting.
 
 See the [FAQ](docs/FAQ.md) for common questions and shell configuration tips.
 
