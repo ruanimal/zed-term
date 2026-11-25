@@ -348,8 +348,9 @@ fn get_tests(t_bin: &str) -> impl ExactSizeIterator<Item = (String, String)> {
         "Malformed tests in test binary {t_bin}"
     );
 
-    let out = test_list
-        .chunks_exact_mut(2)
+    let (pairs, _) = test_list.as_chunks::<2>();
+    let out = pairs
+        .iter()
         .map(|pair| {
             // Be resilient against changes to these constants.
             if consts::SUF_NORMAL < consts::SUF_MDATA {

@@ -2,11 +2,11 @@
 
 [English](README.md) | **简体中文**
 
-ZedTerm 是一个从 [Zed](https://github.com/zed-industries/zed) 分叉而来的独立终端应用。它使用已发布的 `gpui-pre` 框架快照，并拥有自己的 UI、主题、设置和终端实现，不依赖编辑器功能。
+ZedTerm 是一个从 [Zed](https://github.com/zed-industries/zed) 分叉而来的独立终端应用。它使用 [GPUI Fast](https://github.com/longbridge/gpui-fast)，并拥有自己的 UI、主题、设置和终端实现。
 
 该分叉目前已与上游产生较大差异，不再跟踪上游，因此这里的修复无需维持 Zed 的行为。不过，用户与 Zed 安装共享的格式——`keymap.json`、主题和扩展目录结构以及数据目录——会有意保持兼容。修改代码时的相关说明请参阅 [`.rules`](.rules)。
 
-macOS 是主要支持的平台，同时也支持 Linux 构建和 deb 打包。
+支持 macOS 12 Monterey 及更新版本，也支持 Linux 构建和 deb 打包。
 
 ![ZedTerm 截图](docs/screenshot.png)
 
@@ -28,7 +28,7 @@ macOS 是主要支持的平台，同时也支持 Linux 构建和 deb 打包。
 - `crates/terminal_core` — 终端状态、PTY 处理、解析、滚动和搜索
 - `crates/terminal_app` — 应用启动、窗口、标签页、窗格、设置和渲染
 - `crates/ui`、`crates/theme`、`crates/settings`、`crates/fs`、`crates/paths` 等 — 从 Zed 继承的基础设施。应用特有的行为应优先在上述两个 crate 中实现；只有当改动确实属于共享层时，才修改共享 crate。
-- GPUI 核心、宏、平台后端、HTTP 接口和 refinement trait 来自 `gpui-pre` 系列，在 `Cargo.toml` 中固定为 `=0.3.1`，并由 `Cargo.lock` 解析。仓库中的 `gpui_util` 和 `gpui_shared_string` 仍供独立支持库的用户使用。
+- GPUI 核心、宏和平台后端使用 `gpui-fast` `0.1.19`。HTTP 接口和 refinement trait 使用配套的 `gpui-pre` 支持库 `0.3.14`。
 
 当前工作、计划功能和暂不支持的项目请参阅 [`docs/TODO.md`](docs/TODO.md)。[`docs/PLAN.md`](docs/PLAN.md) 和 [`docs/GAPS.md`](docs/GAPS.md) 保存了归档的项目背景。
 
@@ -62,12 +62,12 @@ ZedTerm 会打开一个新窗口，新编译的进程则正常退出。新窗口
 修改代码后还应运行 `git diff --check`。影响交互行为的更改应在 macOS 上进行冒烟测试。
 
 升级框架时还需要运行 `cargo check --locked --workspace --all-targets`、`cargo test --locked --workspace --all-targets` 和 `cargo clippy --locked --workspace --all-targets -- --deny warnings`。
-核心依赖和平台依赖都必须启用 `font-kit`、`wayland` 和 `x11`；只启用核心 feature 不会选择平台后端。仅包含宏的 `inspector` feature 和共享的 proptest patch 用于规避 [`docs/GPUI_PRE_MIGRATION.md`](docs/GPUI_PRE_MIGRATION.md) 中记录的快照/测试宏缺陷。
+GPUI 核心和平台依赖均启用 `font-kit`、`wayland` 和 `x11`，以构建两个 Linux 后端。GPUI 属性测试与框架使用同一版本的 `proptest`。
 
-使用 `cargo build --locked --release -p terminal_app --bin terminal-app` 构建发布版本。使用 `scripts/package-linux-deb.sh` 或 `scripts/package-macos-dmg.sh` 打包生成的二进制文件。macOS 构建仍需要 Xcode Metal 工具；外部 Apple 后端已嵌入编译后的着色器，因此不需要本地 GPUI checkout，也无需额外复制着色器资源。
+使用 `cargo build --locked --release -p terminal_app --bin terminal-app` 构建发布版本，再用 `scripts/package-linux-deb.sh` 或 `scripts/package-macos-dmg.sh` 打包。macOS 默认用 Xcode Metal 工具预编译并嵌入着色器。只有 Command Line Tools 时，本地构建和测试可向 Cargo 传入 `--features gpui_platform/runtime_shaders`。
 
 ## 许可证
 
 ZedTerm 继承自 Zed 的许可证：GPL-3.0（[`LICENSE-GPL`](LICENSE-GPL)）和 Apache-2.0（[`LICENSE-APACHE`](LICENSE-APACHE)，版权归 Zed Industries, Inc. 所有）。
-已发布的 `gpui-pre` 系列采用 Apache-2.0 许可证，并保留 Zed Industries 的署名。
+GPUI Fast 和 GPUI 支持库采用 Apache-2.0 许可证，并保留 Zed Industries 的署名。
 随附的字体、图标和主题保留位于 `assets/` 下的许可证和署名文件。

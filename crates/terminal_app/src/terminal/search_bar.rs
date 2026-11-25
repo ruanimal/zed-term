@@ -205,7 +205,7 @@ impl RenderOnce for TerminalSearchBar {
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_ref();
                 let shift = event.keystroke.modifiers.shift;
-                let secondary = event.keystroke.modifiers.secondary();
+                let secondary = event.keystroke.modifiers.secondary(cx);
                 tab.update(cx, |tab, cx| {
                     let handled = match key {
                         "escape" => {
@@ -337,14 +337,6 @@ fn search_field_content(
 /// the field's real bounds to position its candidate window against.
 struct SearchFieldInput {
     tab: Entity<TerminalTab>,
-}
-
-impl IntoElement for SearchFieldInput {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
 }
 
 impl Element for SearchFieldInput {

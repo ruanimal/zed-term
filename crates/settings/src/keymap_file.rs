@@ -4,7 +4,8 @@ use fs::Fs;
 use gpui::{
     Action, ActionBuildError, App, InvalidKeystrokeError, KEYSTROKE_PARSE_EXPECTED_MESSAGE,
     KeyBinding, KeyBindingContextPredicate, KeyBindingMetaIndex, KeybindingKeystroke, Keystroke,
-    NoAction, SharedString, Unbind, generate_list_of_all_registered_actions, register_action,
+    NoAction, OperatingSystem, SharedString, Unbind, generate_list_of_all_registered_actions,
+    register_action,
 };
 use schemars::{JsonSchema, json_schema};
 use serde::Deserialize;
@@ -426,7 +427,7 @@ impl KeymapFile {
             context,
             use_key_equivalents,
             action_input_string.map(SharedString::from),
-            cx.keyboard_mapper().as_ref(),
+            cx,
         ) {
             Ok(key_binding) => key_binding,
             Err(InvalidKeystrokeError { keystroke }) => {
@@ -480,7 +481,7 @@ impl KeymapFile {
             key_binding.predicate(),
             use_key_equivalents,
             key_binding.action_input(),
-            cx.keyboard_mapper().as_ref(),
+            cx,
         )
         .map_err(|InvalidKeystrokeError { keystroke }| {
             format!(
@@ -893,6 +894,7 @@ impl KeymapFile {
         mut keymap_contents: String,
         tab_size: usize,
         keyboard_mapper: &dyn gpui::PlatformKeyboardMapper,
+        operating_system: OperatingSystem,
         deprecated_aliases: &HashMap<&'static str, &'static str>,
     ) -> Result<String> {
         // When replacing or removing a non-user binding, we may need to write an unbind entry
@@ -906,7 +908,9 @@ impl KeymapFile {
                 source,
                 target,
             } if *target_source != KeybindSource::User => {
-                if target.keystrokes_unparsed() != source.keystrokes_unparsed() {
+                if target.keystrokes_unparsed(operating_system)
+                    != source.keystrokes_unparsed(operating_system)
+                {
                     suppression_unbind = Some(target.clone());
                 }
                 operation = KeybindUpdateOperation::Add {
@@ -943,6 +947,7 @@ impl KeymapFile {
                     target,
                     &target_action_value,
                     keyboard_mapper,
+                    operating_system,
                     deprecated_aliases,
                 ) else {
                     anyhow::bail!("Failed to find keybinding to remove");
@@ -983,6 +988,7 @@ impl KeymapFile {
                 &target,
                 &target_action_value,
                 keyboard_mapper,
+                operating_system,
                 deprecated_aliases,
             ) {
                 if target.context == source.context {
@@ -996,7 +1002,7 @@ impl KeymapFile {
                             binding_location.keystrokes_str,
                         ],
                         Some(&source_action_value),
-                        Some(&source.keystrokes_unparsed()),
+                        Some(&source.keystrokes_unparsed(operating_system)),
                         binding_location.index,
                         tab_size,
                     );
@@ -1015,7 +1021,7 @@ impl KeymapFile {
                             binding_location.keystrokes_str,
                         ],
                         Some(&source_action_value),
-                        Some(&source.keystrokes_unparsed()),
+                        Some(&source.keystrokes_unparsed(operating_system)),
                         binding_location.index,
                         tab_size,
                     );
@@ -1077,7 +1083,7 @@ impl KeymapFile {
             let use_key_equivalents = from.and_then(|from| {
                 let action_value = from.action_value().context("Failed to serialize action value. `use_key_equivalents` on new keybinding may be incorrect.").log_err()?;
                 let binding_location =
-                    find_binding(&keymap, &from, &action_value, keyboard_mapper, deprecated_aliases)?;
+                    find_binding(&keymap, &from, &action_value, keyboard_mapper, operating_system, deprecated_aliases)?;
                 Some(keymap.0[binding_location.index].use_key_equivalents)
             }).unwrap_or(false);
 
@@ -1094,6 +1100,7 @@ impl KeymapFile {
                 &keybinding,
                 &action,
                 keyboard_mapper,
+                operating_system,
                 deprecated_aliases,
             )
             .is_some_and(|location| {
@@ -1112,7 +1119,7 @@ impl KeymapFile {
 
                 value.insert("bindings".to_string(), {
                     let mut bindings = serde_json::Map::new();
-                    bindings.insert(keybinding.keystrokes_unparsed(), action);
+                    bindings.insert(keybinding.keystrokes_unparsed(operating_system), action);
                     bindings.into()
                 });
 
@@ -1136,6 +1143,7 @@ impl KeymapFile {
                 &suppression_unbind,
                 &action,
                 keyboard_mapper,
+                operating_system,
                 deprecated_aliases,
             )
             .is_some_and(|location| matches!(location.kind, BindingKind::Unbind));
@@ -1147,7 +1155,10 @@ impl KeymapFile {
                 }
                 value.insert("unbind".to_string(), {
                     let mut unbind = serde_json::Map::new();
-                    unbind.insert(suppression_unbind.keystrokes_unparsed(), action);
+                    unbind.insert(
+                        suppression_unbind.keystrokes_unparsed(operating_system),
+                        action,
+                    );
                     unbind.into()
                 });
                 let (replace_range, replace_value) = append_top_level_array_value_in_json_text(
@@ -1166,6 +1177,7 @@ impl KeymapFile {
             target: &KeybindUpdateTarget<'a>,
             target_action_value: &Value,
             keyboard_mapper: &dyn gpui::PlatformKeyboardMapper,
+            operating_system: OperatingSystem,
             deprecated_aliases: &HashMap<&'static str, &'static str>,
         ) -> Option<BindingLocation<'b>> {
             let target_context_parsed =
@@ -1184,6 +1196,7 @@ impl KeymapFile {
                     target,
                     target_action_value,
                     keyboard_mapper,
+                    operating_system,
                     deprecated_aliases,
                     |action| &action.0,
                 ) {
@@ -1197,6 +1210,7 @@ impl KeymapFile {
                     target,
                     target_action_value,
                     keyboard_mapper,
+                    operating_system,
                     deprecated_aliases,
                     |action| &action.0,
                 ) {
@@ -1213,6 +1227,7 @@ impl KeymapFile {
             target: &KeybindUpdateTarget<'a>,
             target_action_value: &Value,
             keyboard_mapper: &dyn gpui::PlatformKeyboardMapper,
+            operating_system: OperatingSystem,
             deprecated_aliases: &HashMap<&'static str, &'static str>,
             action_value: impl Fn(&T) -> &Value,
         ) -> Option<BindingLocation<'b>> {
@@ -1221,7 +1236,7 @@ impl KeymapFile {
                 let Ok(keystrokes) = keystrokes_str
                     .split_whitespace()
                     .map(|source| {
-                        let keystroke = Keystroke::parse(source)?;
+                        let keystroke = Keystroke::parse_with_os(source, operating_system)?;
                         Ok(KeybindingKeystroke::new_with_mapper(
                             keystroke,
                             false,
@@ -1344,6 +1359,7 @@ pub enum KeybindUpdateOperation<'a> {
 impl KeybindUpdateOperation<'_> {
     pub fn generate_telemetry(
         &self,
+        operating_system: OperatingSystem,
     ) -> (
         // The keybind that is created
         String,
@@ -1366,10 +1382,10 @@ impl KeybindUpdateOperation<'_> {
         };
 
         let new_binding = new_binding
-            .map(KeybindUpdateTarget::telemetry_string)
+            .map(|target| target.telemetry_string(operating_system))
             .unwrap_or("null".to_owned());
         let removed_binding = removed_binding
-            .map(KeybindUpdateTarget::telemetry_string)
+            .map(|target| target.telemetry_string(operating_system))
             .unwrap_or("null".to_owned());
 
         let source = source
@@ -1413,26 +1429,26 @@ impl<'a> KeybindUpdateTarget<'a> {
         Ok(value)
     }
 
-    fn keystrokes_unparsed(&self) -> String {
+    fn keystrokes_unparsed(&self, operating_system: OperatingSystem) -> String {
         let mut keystrokes = String::with_capacity(self.keystrokes.len() * 8);
         for keystroke in self.keystrokes {
             // The reason use `keystroke.unparse()` instead of `keystroke.inner.unparse()`
             // here is that, we want the user to use `ctrl-shift-4` instead of `ctrl-$`
             // by default on Windows.
-            keystrokes.push_str(&keystroke.unparse());
+            keystrokes.push_str(&keystroke.unparse(operating_system));
             keystrokes.push(' ');
         }
         keystrokes.pop();
         keystrokes
     }
 
-    fn telemetry_string(&self) -> String {
+    fn telemetry_string(&self, operating_system: OperatingSystem) -> String {
         format!(
             "action_name: {}, context: {}, action_arguments: {}, keystrokes: {}",
             self.action_name,
             self.context.unwrap_or("global"),
             self.action_arguments.unwrap_or("none"),
-            self.keystrokes_unparsed()
+            self.keystrokes_unparsed(operating_system)
         )
     }
 }
@@ -1520,7 +1536,7 @@ impl ActionSequence {
                             Ok((action, _)) => Ok(action),
                             Err(err) => {
                                 return Err(ActionBuildError::BuildError {
-                                    name: Self::name_for_type().to_string(),
+                                    name: Self::name_for_type().into(),
                                     error: anyhow::anyhow!(
                                         "error at sequence index {index}: {err}"
                                     ),
@@ -1537,7 +1553,7 @@ impl ActionSequence {
 
     fn expected_array_error() -> ActionBuildError {
         ActionBuildError::BuildError {
-            name: Self::name_for_type().to_string(),
+            name: Self::name_for_type().into(),
             error: anyhow::anyhow!("expected array of actions"),
         }
     }
@@ -1612,7 +1628,10 @@ impl Action for ActionSequence {
 #[cfg(test)]
 mod tests {
     use collections::HashMap;
-    use gpui::{Action, App, DummyKeyboardMapper, KeybindingKeystroke, Keystroke, Unbind};
+    use gpui::{
+        Action, App, DummyKeyboardMapper, KeybindingKeystroke, Keystroke, NoAction,
+        OperatingSystem, Unbind,
+    };
     use serde_json::Value;
     use unindent::Unindent;
 
@@ -1845,6 +1864,7 @@ mod tests {
             input.to_string(),
             4,
             &gpui::DummyKeyboardMapper,
+            OperatingSystem::Linux,
             &deprecated_aliases,
         )
         .expect("Update succeeded");
@@ -1857,12 +1877,54 @@ mod tests {
             .split(' ')
             .map(|s| {
                 KeybindingKeystroke::new_with_mapper(
-                    Keystroke::parse(s).expect("Keystrokes valid"),
+                    Keystroke::parse_with_os(s, OperatingSystem::Linux).expect("Keystrokes valid"),
                     false,
                     &DummyKeyboardMapper,
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn keymap_update_resolves_secondary_modifier_for_the_host() {
+        for (operating_system, old_keystroke, new_spelling) in [
+            (OperatingSystem::Mac, "cmd-x", "cmd-y"),
+            (OperatingSystem::Linux, "ctrl-x", "super-y"),
+        ] {
+            let old_keystrokes = parse_keystrokes(old_keystroke);
+            let new_keystrokes = parse_keystrokes("cmd-y");
+            let target = KeybindUpdateTarget {
+                context: None,
+                keystrokes: &old_keystrokes,
+                action_name: NoAction.name(),
+                action_arguments: None,
+            };
+            let source = KeybindUpdateTarget {
+                keystrokes: &new_keystrokes,
+                ..target.clone()
+            };
+            let updated = KeymapFile::update_keybinding(
+                KeybindUpdateOperation::Replace {
+                    source,
+                    target,
+                    target_keybind_source: KeybindSource::User,
+                },
+                r#"[{"bindings": {"secondary-x": null}}]"#.into(),
+                4,
+                &DummyKeyboardMapper,
+                operating_system,
+                &HashMap::default(),
+            )
+            .expect("existing secondary binding should be replaced");
+
+            let parsed = KeymapFile::parse(&updated).expect("updated keymap should parse");
+            let keystrokes: Vec<_> = parsed
+                .sections()
+                .flat_map(|section| section.bindings())
+                .map(|(keystroke, _)| keystroke.as_str())
+                .collect();
+            assert_eq!(keystrokes, [new_spelling]);
+        }
     }
 
     #[test]

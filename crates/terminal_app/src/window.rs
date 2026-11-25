@@ -244,14 +244,6 @@ struct TabRenameInput {
     focus_handle: FocusHandle,
 }
 
-impl IntoElement for TabRenameInput {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for TabRenameInput {
     type RequestLayoutState = ();
     type PrepaintState = ();
@@ -1709,7 +1701,7 @@ impl TerminalWindowView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Ok(keystroke) = gpui::Keystroke::parse(key) else {
+        let Ok(keystroke) = gpui::Keystroke::parse_with_os(key, cx.platform_info().os) else {
             log::warn!("Invalid SendKeystroke binding: {key:?}");
             return;
         };
@@ -1953,7 +1945,7 @@ impl TerminalWindowView {
             return;
         }
         let key = event.keystroke.key.as_str();
-        let secondary = event.keystroke.modifiers.secondary();
+        let secondary = event.keystroke.modifiers.secondary(cx);
         let shift = event.keystroke.modifiers.shift;
         let handled = match key {
             "escape" => {
@@ -3604,12 +3596,13 @@ mod tests {
         cx.run_until_parked();
         let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
         for fullscreen in [false, true, false] {
-            visual.update(|window, cx| {
+            visual.update(|window, _| {
                 if window.is_fullscreen() != fullscreen {
                     window.toggle_fullscreen();
                 }
-                window.draw(cx).clear(cx);
             });
+            visual.run_until_parked();
+            visual.update(|window, cx| window.draw(cx).clear(cx));
             let tab_bounds = visual
                 .debug_bounds("TAB-0")
                 .expect("first tab should render");

@@ -195,7 +195,7 @@ cat > "$contents_path/Info.plist" <<PLIST
     <key>CFBundleVersion</key>
     <string>$build_number</string>
     <key>LSMinimumSystemVersion</key>
-    <string>10.15.7</string>
+    <string>12.0</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
     <key>NSHighResolutionCapable</key>

@@ -1390,7 +1390,7 @@ impl Render for SettingsPage {
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     let key = event.keystroke.key.as_ref();
                     let extend_selection = event.keystroke.modifiers.shift;
-                    let secondary_modifier = event.keystroke.modifiers.secondary();
+                    let secondary_modifier = event.keystroke.modifiers.secondary(cx);
                     let handled = match key {
                         "enter" => {
                             this.commit_active_edit(cx);

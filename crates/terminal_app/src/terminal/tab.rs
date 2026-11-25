@@ -10,8 +10,8 @@ use std::{
 };
 
 use gpui::{
-    App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Pixels, Point,
-    ScrollWheelEvent, Task, Window,
+    App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Pixels, Point, ScrollEvent,
+    Task, Window,
 };
 use settings::Settings as _;
 use terminal_core::{
@@ -272,7 +272,7 @@ impl TerminalTab {
         }
     }
 
-    pub(crate) fn scroll_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+    pub(crate) fn scroll_wheel(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) {
         self.terminal.update(cx, |term, cx| {
             term.scroll_wheel(
                 event,

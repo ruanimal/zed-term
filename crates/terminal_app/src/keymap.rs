@@ -13,8 +13,8 @@ use crate::language::{self, Locale, localized_format};
 
 use collections::{HashMap, HashSet};
 use gpui::{
-    App, AppContext as _, Context, Entity, KeyBinding, PlatformKeyboardMapper, SharedString,
-    Subscription, Window,
+    App, AppContext as _, Context, Entity, KeyBinding, OperatingSystem, PlatformKeyboardMapper,
+    SharedString, Subscription, Window,
 };
 use settings::{KeybindSource, KeymapFile};
 use ui::{
@@ -435,7 +435,7 @@ pub struct ActionPayload {
 impl ActionPayload {
     fn new(kind: PayloadKind, value: &str, cx: &App) -> Self {
         let display = match kind {
-            PayloadKind::Keystroke => gpui::Keystroke::parse(value)
+            PayloadKind::Keystroke => gpui::Keystroke::parse_with_os(value, cx.platform_info().os)
                 .map(|keystroke| {
                     ui::text_for_keystrokes(std::slice::from_ref(&keystroke), cx).into()
                 })
@@ -700,10 +700,10 @@ impl KeymapTab {
     pub fn reload_bindings(&mut self, cx: &mut App) {
         self.bindings = process_bindings(cx);
         self.conflict_state = ConflictState::new(&self.bindings);
-        self.refresh_matches();
+        self.refresh_matches(cx.platform_info().os);
     }
 
-    fn refresh_matches(&mut self) {
+    fn refresh_matches(&mut self, operating_system: OperatingSystem) {
         let query = self.search_query.to_lowercase();
         self.matches = self
             .bindings
@@ -733,7 +733,7 @@ impl KeymapTab {
                     if keybind
                         .keystrokes
                         .iter()
-                        .map(|keystroke| keystroke.inner().unparse())
+                        .map(|keystroke| keystroke.inner().unparse(operating_system))
                         .collect::<Vec<_>>()
                         .join(" ")
                         .to_lowercase()
@@ -754,19 +754,19 @@ impl KeymapTab {
         cx: &mut Context<super::settings_ui::SettingsPage>,
     ) {
         self.search_query = query;
-        self.refresh_matches();
+        self.refresh_matches(cx.platform_info().os);
         cx.notify();
     }
 
     pub fn toggle_user_filter(&mut self, cx: &mut Context<super::settings_ui::SettingsPage>) {
         self.only_user = !self.only_user;
-        self.refresh_matches();
+        self.refresh_matches(cx.platform_info().os);
         cx.notify();
     }
 
     pub fn toggle_conflict_filter(&mut self, cx: &mut Context<super::settings_ui::SettingsPage>) {
         self.only_conflicts = !self.only_conflicts;
-        self.refresh_matches();
+        self.refresh_matches(cx.platform_info().os);
         cx.notify();
     }
 
@@ -992,12 +992,18 @@ impl KeymapTab {
 
         let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(cx.background_executor().clone()));
         let keyboard_mapper = cx.keyboard_mapper().clone();
+        let operating_system = cx.platform_info().os;
         let deprecated_aliases = cx.deprecated_actions_to_preferred_actions().clone();
 
         let completion = cx.spawn(async move |page, cx| {
-            let result =
-                write_keybinding_file(pending, &fs, keyboard_mapper.as_ref(), &deprecated_aliases)
-                    .await;
+            let result = write_keybinding_file(
+                pending,
+                &fs,
+                keyboard_mapper.as_ref(),
+                operating_system,
+                &deprecated_aliases,
+            )
+            .await;
             page.update(cx, |page, cx| {
                 page.keymap_tab.write_in_progress = false;
                 match result {
@@ -1034,12 +1040,18 @@ impl KeymapTab {
 
         let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(cx.background_executor().clone()));
         let keyboard_mapper = cx.keyboard_mapper().clone();
+        let operating_system = cx.platform_info().os;
         let deprecated_aliases = cx.deprecated_actions_to_preferred_actions().clone();
 
         let completion = cx.spawn(async move |page, cx| {
-            let result =
-                write_unbinding_file(pending, &fs, keyboard_mapper.as_ref(), &deprecated_aliases)
-                    .await;
+            let result = write_unbinding_file(
+                pending,
+                &fs,
+                keyboard_mapper.as_ref(),
+                operating_system,
+                &deprecated_aliases,
+            )
+            .await;
             page.update(cx, |page, cx| {
                 page.keymap_tab.write_in_progress = false;
                 match result {
@@ -1550,6 +1562,7 @@ async fn write_unbinding_file(
     pending: PendingKeybindUnbind,
     fs: &Arc<dyn fs::Fs>,
     keyboard_mapper: &dyn PlatformKeyboardMapper,
+    operating_system: OperatingSystem,
     deprecated_aliases: &HashMap<&'static str, &'static str>,
 ) -> anyhow::Result<String> {
     let keymap_contents = KeymapFile::load_keymap_file(fs)
@@ -1571,6 +1584,7 @@ async fn write_unbinding_file(
         keymap_contents,
         tab_size,
         keyboard_mapper,
+        operating_system,
         deprecated_aliases,
     )
     .map_err(|error| error.context("Could not update keymap"))?;
@@ -1584,6 +1598,7 @@ async fn write_unbinding_file(
             updated,
             tab_size,
             keyboard_mapper,
+            operating_system,
             deprecated_aliases,
         )
         .map_err(|error| error.context("Could not suppress the default keybinding"))?
@@ -1601,6 +1616,7 @@ async fn write_keybinding_file(
     pending: PendingKeybindWrite,
     fs: &Arc<dyn fs::Fs>,
     keyboard_mapper: &dyn PlatformKeyboardMapper,
+    operating_system: OperatingSystem,
     deprecated_aliases: &HashMap<&'static str, &'static str>,
 ) -> anyhow::Result<String> {
     let keymap_contents = KeymapFile::load_keymap_file(fs)
@@ -1640,6 +1656,7 @@ async fn write_keybinding_file(
         keymap_contents,
         tab_size,
         keyboard_mapper,
+        operating_system,
         deprecated_aliases,
     )
     .map_err(|error| error.context("Could not update keymap"))?;
@@ -1738,8 +1755,10 @@ mod tests {
         section: &'a serde_json::Value,
         entry_kind: &str,
         keystroke: &str,
+        operating_system: OperatingSystem,
     ) -> Option<&'a serde_json::Value> {
-        let expected = gpui::Keystroke::parse(keystroke).expect("test keystroke should be valid");
+        let expected = gpui::Keystroke::parse_with_os(keystroke, operating_system)
+            .expect("test keystroke should be valid");
         // Writes use the platform's modifier spelling, which can differ from the fixture.
         section
             .get(entry_kind)?
@@ -1749,7 +1768,8 @@ mod tests {
                 let actual: Vec<_> = source
                     .split_whitespace()
                     .map(|source| {
-                        gpui::Keystroke::parse(source).expect("keymap keystroke should be valid")
+                        gpui::Keystroke::parse_with_os(source, operating_system)
+                            .expect("keymap keystroke should be valid")
                     })
                     .collect();
                 (actual.as_slice() == std::slice::from_ref(&expected)).then_some(action)
@@ -1930,17 +1950,23 @@ mod tests {
             new_context: Some("TerminalWindow".to_string()),
         };
 
-        let (keyboard_mapper, deprecated_aliases) = cx.update(|cx| {
+        let (keyboard_mapper, operating_system, deprecated_aliases) = cx.update(|cx| {
             (
                 cx.keyboard_mapper().clone(),
+                cx.platform_info().os,
                 cx.deprecated_actions_to_preferred_actions().clone(),
             )
         });
 
-        let updated =
-            write_keybinding_file(pending, &fs, keyboard_mapper.as_ref(), &deprecated_aliases)
-                .await
-                .expect("writing the keybinding should succeed");
+        let updated = write_keybinding_file(
+            pending,
+            &fs,
+            keyboard_mapper.as_ref(),
+            operating_system,
+            &deprecated_aliases,
+        )
+        .await
+        .expect("writing the keybinding should succeed");
 
         let parsed = settings::parse_json_with_comments::<serde_json::Value>(&updated)
             .expect("the rewritten keymap must stay valid JSONC");
@@ -1989,9 +2015,10 @@ mod tests {
             .await;
         let fs: Arc<dyn fs::Fs> = fake_fs;
 
-        let (keyboard_mapper, deprecated_aliases) = cx.update(|cx| {
+        let (keyboard_mapper, operating_system, deprecated_aliases) = cx.update(|cx| {
             (
                 cx.keyboard_mapper().clone(),
+                cx.platform_info().os,
                 cx.deprecated_actions_to_preferred_actions().clone(),
             )
         });
@@ -2006,18 +2033,23 @@ mod tests {
             existing_source: KeybindSource::Default,
             write_suppression_unbind: false,
         };
-        let updated =
-            write_unbinding_file(pending, &fs, keyboard_mapper.as_ref(), &deprecated_aliases)
-                .await
-                .expect("disabling the default binding should succeed");
+        let updated = write_unbinding_file(
+            pending,
+            &fs,
+            keyboard_mapper.as_ref(),
+            operating_system,
+            &deprecated_aliases,
+        )
+        .await
+        .expect("disabling the default binding should succeed");
         let parsed = settings::parse_json_with_comments::<serde_json::Value>(&updated)
             .expect("the unbind keymap must stay valid JSONC");
         let unbind = parsed
             .as_array()
             .and_then(|sections| {
-                sections
-                    .iter()
-                    .find_map(|section| action_for_keystroke(section, "unbind", "cmd-delete"))
+                sections.iter().find_map(|section| {
+                    action_for_keystroke(section, "unbind", "cmd-delete", operating_system)
+                })
             })
             .cloned()
             .expect("the unbind entry should have been written");
@@ -2036,17 +2068,23 @@ mod tests {
             existing_source: KeybindSource::User,
             write_suppression_unbind: false,
         };
-        let restored =
-            write_unbinding_file(pending, &fs, keyboard_mapper.as_ref(), &deprecated_aliases)
-                .await
-                .expect("restoring the default binding should succeed");
+        let restored = write_unbinding_file(
+            pending,
+            &fs,
+            keyboard_mapper.as_ref(),
+            operating_system,
+            &deprecated_aliases,
+        )
+        .await
+        .expect("restoring the default binding should succeed");
         let restored = settings::parse_json_with_comments::<serde_json::Value>(&restored)
             .expect("the restored keymap must stay valid JSONC");
         assert!(
             restored.as_array().is_some_and(|sections| {
-                sections
-                    .iter()
-                    .all(|section| action_for_keystroke(section, "unbind", "cmd-delete").is_none())
+                sections.iter().all(|section| {
+                    action_for_keystroke(section, "unbind", "cmd-delete", operating_system)
+                        .is_none()
+                })
             }),
             "restoring should remove the matching unbind entry: {restored}"
         );
@@ -2083,9 +2121,10 @@ mod tests {
             .await;
         let fs: Arc<dyn fs::Fs> = fake_fs;
 
-        let (keyboard_mapper, deprecated_aliases) = cx.update(|cx| {
+        let (keyboard_mapper, operating_system, deprecated_aliases) = cx.update(|cx| {
             (
                 cx.keyboard_mapper().clone(),
+                cx.platform_info().os,
                 cx.deprecated_actions_to_preferred_actions().clone(),
             )
         });
@@ -2100,23 +2139,36 @@ mod tests {
             existing_source: KeybindSource::User,
             write_suppression_unbind: true,
         };
-        let updated =
-            write_unbinding_file(pending, &fs, keyboard_mapper.as_ref(), &deprecated_aliases)
-                .await
-                .expect("unbinding a user override should succeed");
+        let updated = write_unbinding_file(
+            pending,
+            &fs,
+            keyboard_mapper.as_ref(),
+            operating_system,
+            &deprecated_aliases,
+        )
+        .await
+        .expect("unbinding a user override should succeed");
         let parsed = settings::parse_json_with_comments::<serde_json::Value>(&updated)
             .expect("the keymap must stay valid JSONC");
         let sections = parsed.as_array().expect("the keymap is a list of sections");
         assert!(
-            sections
-                .iter()
-                .all(|section| action_for_keystroke(section, "bindings", "cmd-t").is_none()),
+            sections.iter().all(|section| action_for_keystroke(
+                section,
+                "bindings",
+                "cmd-t",
+                operating_system
+            )
+            .is_none()),
             "the user override should have been removed: {updated}"
         );
         assert!(
-            sections
-                .iter()
-                .any(|section| action_for_keystroke(section, "unbind", "cmd-t").is_some()),
+            sections.iter().any(|section| action_for_keystroke(
+                section,
+                "unbind",
+                "cmd-t",
+                operating_system
+            )
+            .is_some()),
             "the default binding must not take the keystroke back: {updated}"
         );
     }
@@ -2139,9 +2191,10 @@ mod tests {
             let mut tab = KeymapTab::empty();
             tab.reload_bindings(cx);
 
+            let operating_system = cx.platform_info().os;
             let user_row = |keystroke: &str| {
-                let expected =
-                    gpui::Keystroke::parse(keystroke).expect("test keystroke should be valid");
+                let expected = gpui::Keystroke::parse_with_os(keystroke, operating_system)
+                    .expect("test keystroke should be valid");
                 tab.bindings()
                     .iter()
                     .position(|binding| {
@@ -2245,18 +2298,24 @@ mod tests {
             new_context: Some("TerminalWindow".to_string()),
         };
 
-        let (keyboard_mapper, deprecated_aliases) = cx.update(|cx| {
+        let (keyboard_mapper, operating_system, deprecated_aliases) = cx.update(|cx| {
             (
                 cx.keyboard_mapper().clone(),
+                cx.platform_info().os,
                 cx.deprecated_actions_to_preferred_actions().clone(),
             )
         });
 
         // The file is read from and written back to the same fake path.
-        let updated =
-            write_keybinding_file(pending, &fs, keyboard_mapper.as_ref(), &deprecated_aliases)
-                .await
-                .expect("writing the keybinding should succeed");
+        let updated = write_keybinding_file(
+            pending,
+            &fs,
+            keyboard_mapper.as_ref(),
+            operating_system,
+            &deprecated_aliases,
+        )
+        .await
+        .expect("writing the keybinding should succeed");
 
         let parsed = settings::parse_json_with_comments::<serde_json::Value>(&updated)
             .expect("the rewritten keymap must stay valid JSONC");
@@ -2331,31 +2390,43 @@ mod tests {
             new_context: Some("TerminalWindow".to_string()),
         };
 
-        let (keyboard_mapper, deprecated_aliases) = cx.update(|cx| {
+        let (keyboard_mapper, operating_system, deprecated_aliases) = cx.update(|cx| {
             (
                 cx.keyboard_mapper().clone(),
+                cx.platform_info().os,
                 cx.deprecated_actions_to_preferred_actions().clone(),
             )
         });
 
-        let updated =
-            write_keybinding_file(pending, &fs, keyboard_mapper.as_ref(), &deprecated_aliases)
-                .await
-                .expect("rebinding a disabled binding should succeed");
+        let updated = write_keybinding_file(
+            pending,
+            &fs,
+            keyboard_mapper.as_ref(),
+            operating_system,
+            &deprecated_aliases,
+        )
+        .await
+        .expect("rebinding a disabled binding should succeed");
 
         let parsed = settings::parse_json_with_comments::<serde_json::Value>(&updated)
             .expect("the keymap must stay valid JSONC");
         let sections = parsed.as_array().expect("the keymap is a list of sections");
         assert!(
             sections.iter().any(|section| {
-                action_for_keystroke(section, "bindings", "cmd-shift-t").is_some()
+                action_for_keystroke(section, "bindings", "cmd-shift-t", operating_system).is_some()
             }),
             "the new keystroke should have been bound: {updated}"
         );
         assert_eq!(
             sections
                 .iter()
-                .filter(|section| action_for_keystroke(section, "unbind", "cmd-t").is_some())
+                .filter(|section| action_for_keystroke(
+                    section,
+                    "unbind",
+                    "cmd-t",
+                    operating_system
+                )
+                .is_some())
                 .count(),
             1,
             "the disabled keystroke should stay suppressed exactly once: {updated}"
@@ -2631,7 +2702,7 @@ mod tests {
             assert_eq!(total, tab.bindings().len());
 
             tab.search_query = "spl".to_string();
-            tab.refresh_matches();
+            tab.refresh_matches(cx.platform_info().os);
             assert!(
                 !tab.matches().is_empty(),
                 "searching 'spl' should match the split actions"
@@ -2639,7 +2710,7 @@ mod tests {
             assert!(tab.matches().len() < total);
 
             tab.search_query = "向右拆分".to_string();
-            tab.refresh_matches();
+            tab.refresh_matches(cx.platform_info().os);
             let matching_actions: Vec<_> = tab
                 .matches()
                 .iter()
@@ -2661,7 +2732,7 @@ mod tests {
                 .and_then(|binding| binding.keystroke_text(cx))
                 .expect("the New Tab binding should render keystrokes");
             tab.search_query = rendered.to_lowercase();
-            tab.refresh_matches();
+            tab.refresh_matches(cx.platform_info().os);
             assert!(
                 !tab.matches().is_empty(),
                 "searching {rendered:?} should match its binding"

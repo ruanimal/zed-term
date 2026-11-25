@@ -6,7 +6,7 @@ use gpui::{
     Context, Corners, CursorStyle, DispatchPhase, Div, Edges, Element, ElementId, Entity, EntityId,
     GlobalElementId, Hitbox, HitboxBehavior, Hsla, InteractiveElement, IntoElement, IsZero,
     LayoutId, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
-    Pixels, Point, Position, Render, ScrollHandle, ScrollWheelEvent, Size, Stateful,
+    Pixels, Point, Position, Render, ScrollEvent, ScrollHandle, Size, Stateful,
     StatefulInteractiveElement, Style, Styled, Task, UniformListDecoration,
     UniformListScrollHandle, Window, ease_in_out, prelude::FluentBuilder as _, px, quad, relative,
     size,
@@ -306,8 +306,8 @@ impl ScrollAxes {
         T: Debug + Default + PartialEq + Clone,
     {
         match self {
-            Self::Horizontal => point.apply_along(ScrollbarAxis::Horizontal, |_| value),
-            Self::Vertical => point.apply_along(ScrollbarAxis::Vertical, |_| value),
+            Self::Horizontal => Point::new(value, point.y),
+            Self::Vertical => Point::new(point.x, value),
             Self::Both => Point::new(value.clone(), value),
         }
     }
@@ -1554,7 +1554,7 @@ impl<T: ScrollableHandle> Element for ScrollbarElement<T> {
             window.on_mouse_event({
                 let state = self.state.clone();
 
-                move |event: &ScrollWheelEvent, phase, window, cx| {
+                move |event: &ScrollEvent, phase, window, cx| {
                     state.update(cx, |state, cx| {
                         if phase.capture() && state.parent_hovered(window) {
                             state.update_hovered_thumb(&event.position, window, cx)
@@ -1633,14 +1633,6 @@ impl<T: ScrollableHandle> Element for ScrollbarElement<T> {
                 }
             });
         })
-    }
-}
-
-impl<T: ScrollableHandle> IntoElement for ScrollbarElement<T> {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
     }
 }
 

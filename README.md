@@ -2,11 +2,11 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-ZedTerm is a standalone terminal application forked from [Zed](https://github.com/zed-industries/zed). It uses the published `gpui-pre` framework snapshots and retains its own UI, theme, settings, and terminal implementation without depending on editor features.
+ZedTerm is a standalone terminal application forked from [Zed](https://github.com/zed-industries/zed). It uses [GPUI Fast](https://github.com/longbridge/gpui-fast) with its own UI, theme, settings, and terminal implementation.
 
 The fork has since diverged and does not track upstream, so a fix here is free to leave Zed's behavior behind. Formats users share with a Zed installation — `keymap.json`, the themes and extensions layout, the data directory — stay compatible on purpose. See [`.rules`](.rules) for what this means when changing code.
 
-macOS is the primary platform. Linux builds and deb packaging are also supported.
+macOS 12 Monterey and later are supported. Linux builds and deb packaging are also supported.
 
 ![ZedTerm screenshot](docs/screenshot.png)
 
@@ -30,9 +30,8 @@ See the [FAQ](docs/FAQ.md) for common questions and shell configuration tips.
 - `crates/ui`, `crates/theme`, `crates/settings`, `crates/fs`, `crates/paths`, ... — infrastructure
   inherited from Zed. Prefer the two crates above when behavior is specific to this app, and change
   a shared crate only when the change belongs there.
-- GPUI core, macros, platform backends, HTTP interfaces, and refinement traits come from the
-  `gpui-pre` family, pinned to `=0.3.1` in `Cargo.toml` and resolved in `Cargo.lock`. Local
-  `gpui_util` and `gpui_shared_string` remain for independent support-library users.
+- The GPUI core, macros, and platform backends use `gpui-fast` `0.1.19`. The HTTP client and
+  refinement traits use the matching `gpui-pre` support crates at `0.3.14`.
 
 See [`docs/TODO.md`](docs/TODO.md) for current work, planned features, and unsupported items. [`docs/PLAN.md`](docs/PLAN.md) and [`docs/GAPS.md`](docs/GAPS.md) contain archived project context.
 
@@ -69,18 +68,17 @@ For code changes, also run `git diff --check`. Changes affecting interaction beh
 Framework upgrades also require `cargo check --locked --workspace --all-targets`,
 `cargo test --locked --workspace --all-targets`, and
 `cargo clippy --locked --workspace --all-targets -- --deny warnings`.
-Keep `font-kit`, `wayland`, and `x11` enabled on both the core and platform dependencies;
-core features alone do not select the platform backends. The macro-only `inspector` feature and
-the shared proptest patch work around snapshot/test-macro defects documented in
-[`docs/GPUI_PRE_MIGRATION.md`](docs/GPUI_PRE_MIGRATION.md).
+Keep `font-kit`, `wayland`, and `x11` enabled on the GPUI core and platform dependencies to
+build both Linux backends. GPUI property tests use the same `proptest` version as the framework.
 
 Build releases with `cargo build --locked --release -p terminal_app --bin terminal-app`.
 Use `scripts/package-linux-deb.sh` or `scripts/package-macos-dmg.sh` to package the resulting
-binary. macOS builds still require the Xcode Metal tools; the external Apple backend embeds
-its compiled shaders, so no local GPUI checkout or additional shader resource copying is needed.
+binary. The default macOS build uses the Xcode Metal tools to embed precompiled shaders.
+For local builds and tests with only the Command Line Tools, pass
+`--features gpui_platform/runtime_shaders` to Cargo.
 
 ## License
 
 ZedTerm inherits its licenses from Zed: GPL-3.0 ([`LICENSE-GPL`](LICENSE-GPL)) and Apache-2.0 ([`LICENSE-APACHE`](LICENSE-APACHE), copyright Zed Industries, Inc.).
-The published `gpui-pre` family is Apache-2.0 licensed and retains Zed Industries' attribution.
+GPUI Fast and the GPUI support crates use Apache-2.0 and retain Zed Industries' attribution.
 Bundled fonts, icons, and themes retain the license and attribution files under `assets/`.

@@ -46,12 +46,11 @@ assets = { path = "crates/assets" }
 collections = { path = "crates/collections", version = "0.1.0" }
 component = { path = "crates/component" }
 fs = { path = "crates/fs" }
-gpui = { package = "gpui-pre", version = "=0.3.1", default-features = false }
-# 0.3.1's macro helper is unconditionally compiled even when its inspector module is gated out.
-gpui_macros = { package = "gpui-pre-macros", version = "=0.3.1", features = ["inspector"] }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.1", default-features = false }
+gpui = { package = "gpui-fast", version = "=0.1.19", default-features = false }
+gpui_macros = { package = "gpui-fast-macros", version = "=0.1.19", features = ["inspector"] }
+gpui_platform = { package = "gpui-fast-platform", version = "=0.1.19", default-features = false }
 gpui_util = { path = "crates/gpui_util" }
-http_client = { package = "gpui-pre-http-client", version = "=0.3.1" }
+http_client = { package = "gpui-pre-http-client", version = "=0.3.14" }
 icons = { path = "crates/icons" }
 menu = { path = "crates/menu" }
 migrator = { path = "crates/migrator" }
@@ -59,7 +58,7 @@ net = { path = "crates/net" }
 path = { path = "crates/path" }
 paths = { path = "crates/paths" }
 perf = { path = "tooling/perf" }
-refineable = { package = "gpui-pre-refineable", version = "=0.3.1" }
+refineable = { package = "gpui-pre-refineable", version = "=0.3.14" }
 reqwest_client = { path = "crates/reqwest_client" }
 settings = { path = "crates/settings" }
 settings_content = { path = "crates/settings_content" }
@@ -300,7 +299,7 @@ proc-macro2 = "1.0.93"
 profiling = "1"
 # replace this with main when #635 is merged
 pollster = "0.4.0"
-proptest = { git = "https://github.com/proptest-rs/proptest", rev = "3dca198a8fef1b32e3a66f1e1897c955b4dc5b5b", features = ["attr-macro"] }
+proptest = { version = "=1.12.0", features = ["attr-macro"] }
 proptest-derive = "0.8.0"
 prost-types = "0.9"
 proxyvars = "0.2"
@@ -508,8 +507,6 @@ features = [
 [patch.crates-io]
 # Fix block 0.1.6's uninhabited extern static without changing its API.
 block = { git = "https://github.com/Dicklesworthstone/rust-block", rev = "7c33ca4aabc0486fc14ea5bd897307c7563aadea" }
-# GPUI's property tests must share our async-closure-capable proptest snapshot.
-proptest = { git = "https://github.com/proptest-rs/proptest", rev = "3dca198a8fef1b32e3a66f1e1897c955b4dc5b5b" }
 # Unify `tree_sitter_language::LanguageFn` between crates.io grammar crates and
 # the git tree-sitter above; two instances of the crate would make grammar
 # constants type-incompatible with `tree_sitter::Language`.
@@ -544,7 +541,7 @@ debug = "full"
 
 [profile.dev.package]
 # proc-macros start
-gpui-pre-macros = { opt-level = 3 }
+gpui-fast-macros = { opt-level = 3 }
 gpui-pre-derive-refineable = { opt-level = 3 }
 settings_macros = { opt-level = 3 }
 ui_macros = { opt-level = 3 }

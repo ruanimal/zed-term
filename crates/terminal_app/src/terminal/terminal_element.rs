@@ -3,7 +3,7 @@ use crate::terminal::{CursorLayout, HighlightedRange, HighlightedRangeLine, Term
 use gpui::{
     AbsoluteLength, App, Bounds, ContentMask, Context, DispatchPhase, Element, ElementId, Entity,
     FocusHandle, Font, FontFeatures, FontStyle, FontWeight, GlobalElementId, HighlightStyle,
-    Hitbox, Hsla, InputHandler, InteractiveElement, Interactivity, IntoElement, LayoutId, Length,
+    Hitbox, Hsla, InputHandler, InteractiveElement, Interactivity, LayoutId, Length,
     ModifiersChangedEvent, MouseButton, MouseMoveEvent, Pixels, Point as GpuiPoint,
     StatefulInteractiveElement, StrikethroughStyle, TextRun, TextStyle, UTF16Selection,
     UnderlineStyle, WhiteSpace, Window, fill, point, px, relative, size,
@@ -1030,7 +1030,7 @@ impl TerminalElement {
             ),
         );
 
-        self.interactivity.on_scroll_wheel({
+        self.interactivity.on_scroll({
             let terminal_view = self.terminal_view.downgrade();
             move |e, window, cx| {
                 terminal_view
@@ -1515,7 +1515,7 @@ impl Element for TerminalElement {
 
             self.register_mouse_listeners(layout.mode, &layout.hitbox, window);
             // A held Cmd/Ctrl over a link advertises that clicking opens it.
-            let cursor_style = if layout.hovered_link && window.modifiers().secondary() {
+            let cursor_style = if layout.hovered_link && window.modifiers().secondary(cx) {
                 gpui::CursorStyle::PointingHand
             } else {
                 gpui::CursorStyle::IBeam
@@ -1638,14 +1638,6 @@ impl Element for TerminalElement {
                 },
             );
         });
-    }
-}
-
-impl IntoElement for TerminalElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
     }
 }
 

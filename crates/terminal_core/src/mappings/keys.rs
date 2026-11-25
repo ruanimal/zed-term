@@ -260,7 +260,7 @@ fn modifier_code(keystroke: &Keystroke) -> u32 {
 
 #[cfg(test)]
 mod test {
-    use gpui::Modifiers;
+    use gpui::{Modifiers, OperatingSystem};
 
     use super::*;
 
@@ -335,12 +335,17 @@ mod test {
         for (lower, upper) in letters_lower.zip(letters_upper) {
             assert_eq!(
                 to_esc_str(
-                    &Keystroke::parse(&format!("ctrl-shift-{}", lower)).unwrap(),
+                    &Keystroke::parse_with_os(
+                        &format!("ctrl-shift-{}", lower),
+                        OperatingSystem::Linux
+                    )
+                    .unwrap(),
                     mode,
                     false
                 ),
                 to_esc_str(
-                    &Keystroke::parse(&format!("ctrl-{}", upper)).unwrap(),
+                    &Keystroke::parse_with_os(&format!("ctrl-{}", upper), OperatingSystem::Linux)
+                        .unwrap(),
                     mode,
                     false
                 ),
@@ -357,7 +362,11 @@ mod test {
         for character in ascii_printable {
             assert_eq!(
                 to_esc_str(
-                    &Keystroke::parse(&format!("alt-{}", character)).unwrap(),
+                    &Keystroke::parse_with_os(
+                        &format!("alt-{}", character),
+                        OperatingSystem::Linux
+                    )
+                    .unwrap(),
                     Modes::NONE,
                     true
                 )
@@ -375,7 +384,8 @@ mod test {
         for key in gpui_keys {
             assert_ne!(
                 to_esc_str(
-                    &Keystroke::parse(&format!("alt-{}", key)).unwrap(),
+                    &Keystroke::parse_with_os(&format!("alt-{}", key), OperatingSystem::Linux)
+                        .unwrap(),
                     Modes::NONE,
                     true
                 )
@@ -392,7 +402,11 @@ mod test {
         for (character, esc_code) in letters_lower.zip(esc_codes) {
             assert_eq!(
                 to_esc_str(
-                    &Keystroke::parse(&format!("ctrl-alt-{}", character)).unwrap(),
+                    &Keystroke::parse_with_os(
+                        &format!("ctrl-alt-{}", character),
+                        OperatingSystem::Linux
+                    )
+                    .unwrap(),
                     Modes::NONE,
                     true
                 )
