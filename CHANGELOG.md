@@ -6,6 +6,11 @@ changes are omitted unless they affect how users install or use ZedTerm.
 
 ## [Unreleased]
 
+## [1.0.0]
+
+- Migrated the interface to GPUI Fast.
+- Raised the minimum macOS version to macOS 12 Monterey.
+
 ## [0.9.0]
 
 - Added a Simplified Chinese interface alongside English. Switch languages
