@@ -74,10 +74,10 @@ enum SettingsTab {
 impl SettingsTab {
     fn label(self) -> &'static str {
         match self {
-            Self::Terminal => "Terminal",
-            Self::Keymap => "Keymap",
-            Self::Themes => "Themes",
-            Self::About => "About",
+            Self::Terminal => "terminal",
+            Self::Keymap => "keymap",
+            Self::Themes => "themes",
+            Self::About => "about",
         }
     }
 }
@@ -935,7 +935,7 @@ impl SettingsPage {
         self.restore_preview(cx);
         self.reload_drafts_from_globals(cx);
         self.save_status = SaveStatus::Idle;
-        self.status_message = Some("Unsaved changes discarded.".to_string());
+        self.status_message = Some("unsaved-changes-discarded".to_string());
         cx.notify();
     }
 
@@ -950,7 +950,7 @@ impl SettingsPage {
 
         let Some(operation_id) = self.next_operation_id.checked_add(1) else {
             self.save_status = SaveStatus::Failed;
-            self.status_message = Some("Could not start another settings write.".to_string());
+            self.status_message = Some("settings-write-start-error".to_string());
             cx.notify();
             return None;
         };
@@ -963,7 +963,7 @@ impl SettingsPage {
             captured_patch: _captured_patch,
         });
         self.save_status = SaveStatus::Saving;
-        self.status_message = Some("Saving settings…".to_string());
+        self.status_message = Some("saving-settings".to_string());
         #[cfg(test)]
         {
             self.settings_write_request_count = self.settings_write_request_count.wrapping_add(1);
@@ -1021,9 +1021,9 @@ impl SettingsPage {
 
                 self.save_status = SaveStatus::Succeeded;
                 self.status_message = Some(if self.dirty_settings.is_empty() {
-                    "Settings saved.".to_string()
+                    "settings-saved".to_string()
                 } else {
-                    "Settings saved. Additional changes remain.".to_string()
+                    "settings-saved-with-pending-changes".to_string()
                 });
                 if !self.dirty_settings.is_empty() {
                     self.preview_draft(cx);
@@ -1034,8 +1034,8 @@ impl SettingsPage {
                 self.save_status = SaveStatus::Failed;
                 self.status_message = Some(localized_format!(
                     language::current(cx),
-                    "Could not save settings: {error}",
-                    "无法保存设置：{error}"
+                    "save-settings-error",
+                    error = error,
                 ));
             }
         }
@@ -1095,7 +1095,7 @@ impl SettingsPage {
     pub(crate) fn apply_user_keymap(&mut self, contents: &str, cx: &mut Context<Self>) {
         crate::reload_keymaps(contents, cx);
         self.keymap_tab.reload_bindings(cx);
-        self.keymap_tab.clear_write_status("Keybinding saved.");
+        self.keymap_tab.clear_write_status("keybinding-saved");
         cx.notify();
     }
 
@@ -1513,7 +1513,7 @@ impl SettingsPage {
         }
         if self.dirty_settings.is_empty() {
             self.save_status = SaveStatus::Succeeded;
-            self.status_message = Some("No settings changes to save.".to_string());
+            self.status_message = Some("no-settings-changes-to-save".to_string());
             cx.notify();
             return;
         }
@@ -1544,7 +1544,7 @@ impl SettingsPage {
             let result = match completion.await {
                 Ok(result) => result.map_err(|error| error.to_string()),
                 Err(_) => Err(cx.update(|cx| {
-                    language::text(cx, "The settings update was canceled.").to_string()
+                    language::text(cx, "the-settings-update-was-canceled").to_string()
                 })),
             };
             this.update(cx, |this, cx| {
@@ -1557,7 +1557,7 @@ impl SettingsPage {
 
     fn request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.pending_write.is_some() {
-            self.status_message = Some("Settings are still being saved.".to_string());
+            self.status_message = Some("settings-are-still-being-saved".to_string());
             cx.notify();
             return false;
         }
@@ -1575,11 +1575,11 @@ impl SettingsPage {
             let answer = match window_handle.update(cx, |_, window, cx| {
                 window.prompt(
                     PromptLevel::Warning,
-                    language::text(cx, "Discard unsaved settings changes?"),
-                    Some(language::text(cx, "Your changes have not been saved.")),
+                    &language::text(cx, "discard-unsaved-settings-changes"),
+                    Some(&language::text(cx, "your-changes-have-not-been-saved")),
                     &[
-                        language::text(cx, "Discard changes"),
-                        language::text(cx, "Cancel"),
+                        language::text(cx, "discard-changes").as_ref(),
+                        language::text(cx, "cancel").as_ref(),
                     ],
                     cx,
                 )
@@ -1638,31 +1638,31 @@ fn validate_shell_form(form: &ShellForm) -> Result<settings::Shell, String> {
         ShellMode::Program => {
             let program = form.program.trim().to_string();
             if program.is_empty() {
-                return Err("A custom shell program is required.".to_string());
+                return Err("custom-shell-program-required".to_string());
             }
             if program.contains('\0') {
-                return Err("A custom shell program cannot contain NUL.".to_string());
+                return Err("custom-shell-program-nul".to_string());
             }
             Ok(settings::Shell::Program(program))
         }
         ShellMode::WithArguments => {
             let program = form.program.trim().to_string();
             if program.is_empty() {
-                return Err("A shell program is required.".to_string());
+                return Err("shell-program-required".to_string());
             }
             if program.contains('\0') {
-                return Err("A shell program cannot contain NUL.".to_string());
+                return Err("shell-program-nul".to_string());
             }
             if form
                 .arguments
                 .iter()
                 .any(|argument| argument.contains('\0'))
             {
-                return Err("Shell arguments cannot contain NUL.".to_string());
+                return Err("shell-argument-nul".to_string());
             }
             let title_override = form.title_override.trim().to_string();
             if title_override.contains('\0') {
-                return Err("The title override cannot contain NUL.".to_string());
+                return Err("shell-title-nul".to_string());
             }
             Ok(settings::Shell::WithArguments {
                 program,
@@ -1680,19 +1680,19 @@ fn validate_environment(
     for entry in entries {
         let key = entry.key.trim();
         if key.is_empty() {
-            return Err("Environment variable names cannot be empty.".to_string());
+            return Err("environment-variable-name-required".to_string());
         }
         if key.contains('=') {
-            return Err("Environment variable names cannot contain `=`.".to_string());
+            return Err("environment-variable-name-equals-sign".to_string());
         }
         if key.contains('\0') || entry.value.contains('\0') {
-            return Err("Environment variable names and values cannot contain NUL.".to_string());
+            return Err("environment-variable-nul".to_string());
         }
         if environment
             .insert(key.to_string(), entry.value.clone())
             .is_some()
         {
-            return Err("Environment variable names must be unique.".to_string());
+            return Err("environment-variable-name-not-unique".to_string());
         }
     }
     Ok(environment)
@@ -1704,22 +1704,22 @@ fn normalize_fixed_directory_input(
 ) -> Result<PathBuf, String> {
     let input = input.trim();
     if input.is_empty() {
-        return Err("A fixed working directory is required.".to_string());
+        return Err("fixed-directory-required".to_string());
     }
     if input.contains('\0') {
-        return Err("A fixed working directory cannot contain NUL.".to_string());
+        return Err("fixed-directory-nul".to_string());
     }
 
     let path = if input == "~" || input.starts_with("~/") {
-        let home_directory = home_directory
-            .ok_or_else(|| "The platform home directory is unavailable.".to_string())?;
+        let home_directory =
+            home_directory.ok_or_else(|| "home-directory-unavailable".to_string())?;
         let suffix = input.strip_prefix('~').unwrap_or_default();
         home_directory.join(suffix.trim_start_matches('/'))
     } else {
         PathBuf::from(input)
     };
     if !path.is_absolute() {
-        return Err("A fixed working directory must be absolute or begin with `~/`.".to_string());
+        return Err("fixed-directory-not-absolute".to_string());
     }
     Ok(path)
 }
@@ -1749,7 +1749,7 @@ fn validate_existing_directory(
         .canonicalize(path)
         .map_err(|error| format!("The working directory does not exist: {error}"))?;
     if !directory_access.is_directory(&canonical) {
-        return Err("The fixed working directory must be a directory.".to_string());
+        return Err("fixed-directory-is-not-directory".to_string());
     }
     Ok(canonical)
 }

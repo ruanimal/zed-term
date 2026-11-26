@@ -59,14 +59,14 @@ impl RenderOnce for TerminalSearchBar {
             None
         } else if invalid_regex {
             Some(
-                Label::new(language::text(cx, "Invalid pattern"))
+                Label::new(language::text(cx, "invalid-pattern"))
                     .size(LabelSize::Small)
                     .color(Color::Error)
                     .into_any_element(),
             )
         } else if match_count == 0 {
             Some(
-                Label::new(language::text(cx, "No matches"))
+                Label::new(language::text(cx, "no-matches"))
                     .size(LabelSize::Small)
                     .color(Color::Error)
                     .into_any_element(),
@@ -149,13 +149,13 @@ impl RenderOnce for TerminalSearchBar {
                 "terminal-search-previous",
                 IconName::ChevronLeft,
                 true,
-                "Select Previous Match (shift-enter)",
+                "select-previous-match",
             ))
             .child(nav_button(
                 "terminal-search-next",
                 IconName::ChevronRight,
                 false,
-                "Select Next Match (enter)",
+                "select-next-match",
             ))
             .child({
                 let tab = tab.clone();
@@ -163,7 +163,7 @@ impl RenderOnce for TerminalSearchBar {
                     .shape(IconButtonShape::Square)
                     .icon_size(IconSize::Small)
                     .toggle_state(regex)
-                    .tooltip(Tooltip::text(language::text(cx, "Use Regular Expressions")))
+                    .tooltip(Tooltip::text(language::text(cx, "use-regular-expressions")))
                     .on_click(move |_, _window, cx| {
                         tab.update(cx, |tab, cx| tab.toggle_search_regex(cx));
                     })
@@ -173,7 +173,7 @@ impl RenderOnce for TerminalSearchBar {
                 IconButton::new("terminal-search-close", IconName::Close)
                     .shape(IconButtonShape::Square)
                     .icon_size(IconSize::Small)
-                    .tooltip(Tooltip::text(language::text(cx, "Close Search (escape)")))
+                    .tooltip(Tooltip::text(language::text(cx, "close-search")))
                     .on_click(move |_, window, cx| {
                         tab.update(cx, |tab, cx| tab.close_search(window, cx));
                     })
@@ -301,7 +301,7 @@ fn search_field_content(
             content = content.child(caret());
         }
         return content
-            .child(Label::new(language::text(cx, "Search…")).color(Color::Muted))
+            .child(Label::new(language::text(cx, "search-placeholder")).color(Color::Muted))
             .into_any_element();
     }
 

@@ -192,7 +192,7 @@ impl WindowTab {
         self.title_override
             .clone()
             .or_else(|| self.focused_tab().map(|pane| pane.read(cx).title(cx)))
-            .unwrap_or_else(|| language::text(cx, "Terminal").to_string())
+            .unwrap_or_else(|| language::text(cx, "terminal").to_string())
     }
 
     fn set_title_override(&mut self, title: String) {
@@ -680,8 +680,8 @@ impl TerminalWindowView {
                     this.update(cx, |this, cx| {
                         this.terminal_error = Some(localized_format!(
                             language::current(cx),
-                            "Could not start terminal: {error:#}",
-                            "无法启动终端：{error:#}"
+                            "start-terminal-error",
+                            error = format!("{:#}", error),
                         ));
                         cx.notify();
                     })
@@ -1009,8 +1009,8 @@ impl TerminalWindowView {
         log::error!("Could not move terminal tab: {error:#}");
         self.terminal_error = Some(localized_format!(
             language::current(cx),
-            "Could not move terminal tab: {error:#}",
-            "无法移动终端标签页：{error:#}"
+            "move-terminal-tab-error",
+            error = format!("{:#}", error),
         ));
         cx.notify();
     }
@@ -1157,7 +1157,7 @@ impl TerminalWindowView {
                             .tabs
                             .get(view.active_tab_index)
                             .map(|tab| tab.title(cx))
-                            .unwrap_or_else(|| language::text(cx, "Terminal").to_string());
+                            .unwrap_or_else(|| language::text(cx, "terminal").to_string());
                         let position = positions_available.then(|| window.bounds().origin);
                         (title, position)
                     })
@@ -1405,8 +1405,8 @@ impl TerminalWindowView {
                     this.update(cx, |this, cx| {
                         this.terminal_error = Some(localized_format!(
                             language::current(cx),
-                            "Could not start terminal: {error:#}",
-                            "无法启动终端：{error:#}"
+                            "start-terminal-error",
+                            error = format!("{:#}", error),
                         ));
                         cx.notify();
                     })
@@ -1749,13 +1749,13 @@ impl TerminalWindowView {
                         PromptLevel::Warning,
                         &localized_format!(
                             language::current(cx),
-                            "Close terminal tab with {pane_count} panes?",
-                            "关闭包含 {pane_count} 个窗格的终端标签页吗？"
+                            "confirm-close-terminal-tab",
+                            pane_count = pane_count,
                         ),
                         None,
                         &[
-                            language::text(cx, "Close All"),
-                            language::text(cx, "Cancel"),
+                            language::text(cx, "close-all").as_ref(),
+                            language::text(cx, "cancel").as_ref(),
                         ],
                         cx,
                     )
@@ -2160,8 +2160,8 @@ impl TerminalWindowView {
             // Link entries only exist when the click landed on a link, and they
             // act on that link rather than on the pane's selection.
             let menu = if has_link {
-                menu.action(locale.text("Open Link"), Box::new(OpenLink))
-                    .action(locale.text("Copy Link"), Box::new(CopyLink))
+                menu.action(locale.text("open-link"), Box::new(OpenLink))
+                    .action(locale.text("copy-link"), Box::new(CopyLink))
                     .separator()
             } else {
                 menu
@@ -2171,44 +2171,44 @@ impl TerminalWindowView {
             // that already has splits. `Split*` actions target the active
             // pane the right-click selected.
             let menu = menu
-                .action(locale.text("New Terminal"), Box::new(NewTab))
+                .action(locale.text("new-terminal"), Box::new(NewTab))
                 .separator()
-                .action(locale.text("Split Right"), Box::new(SplitRight))
-                .action(locale.text("Split Down"), Box::new(SplitDown))
+                .action(locale.text("split-right"), Box::new(SplitRight))
+                .action(locale.text("split-down"), Box::new(SplitDown))
                 .separator();
             let menu = if in_split_layout {
                 // Zoom keeps the split tree alive but lets the selected pane
                 // temporarily occupy the full terminal content area.
                 let zoom_label = if is_pane_maximized {
-                    "Restore Panes"
+                    "restore-panes"
                 } else {
-                    "Zoom Pane"
+                    "zoom-pane"
                 };
                 menu.action(locale.text(zoom_label), Box::new(ToggleZoom))
-                    .action(locale.text("Close Pane"), Box::new(ClosePane))
+                    .action(locale.text("close-pane"), Box::new(ClosePane))
                     .separator()
             } else {
                 menu
             };
-            menu.action(locale.text("Copy"), Box::new(terminal_core::Copy))
-                .action(locale.text("Paste"), Box::new(terminal_core::Paste))
+            menu.action(locale.text("copy"), Box::new(terminal_core::Copy))
+                .action(locale.text("paste"), Box::new(terminal_core::Paste))
                 .action(
-                    locale.text("Paste Text"),
+                    locale.text("paste-text"),
                     Box::new(terminal_core::PasteText),
                 )
                 .action(
-                    locale.text("Select All"),
+                    locale.text("select-all"),
                     Box::new(terminal_core::SelectAll),
                 )
-                .action(locale.text("Search"), Box::new(SearchTest))
-                .action(locale.text("Clear"), Box::new(terminal_core::Clear))
+                .action(locale.text("search"), Box::new(SearchTest))
+                .action(locale.text("clear"), Box::new(terminal_core::Clear))
                 // Single-pane tab (no split): the only close entry is the tab.
                 // In split layout `Close Pane` above is the per-pane close.
                 .when(!in_split_layout, |menu| {
-                    menu.action(locale.text("Close Terminal Tab"), Box::new(CloseTab))
+                    menu.action(locale.text("close-terminal-tab"), Box::new(CloseTab))
                 })
                 .separator()
-                .action(locale.text("Settings"), Box::new(OpenSettings))
+                .action(locale.text("settings"), Box::new(OpenSettings))
         });
     }
 
@@ -2230,7 +2230,7 @@ impl TerminalWindowView {
         let locale = language::current(cx);
         self.show_context_menu(position, window, cx, move |menu, _, _| {
             menu.context(focus_handle)
-                .entry(locale.text("Rename Tab"), None, move |window, cx| {
+                .entry(locale.text("rename-tab"), None, move |window, cx| {
                     if let Some(focus_handle) = rename_view
                         .update(cx, |this, cx| this.begin_tab_rename(tab_index, cx))
                         .log_err()
@@ -2240,14 +2240,14 @@ impl TerminalWindowView {
                 })
                 .separator()
                 .submenu(
-                    locale.text("Move Tab to Window"),
+                    locale.text("move-tab-to-window"),
                     move |menu, window, cx| {
                         let target_windows =
                             Self::tab_move_destinations(window.window_handle().window_id(), cx);
                         let new_window_view = view.clone();
                         let new_window_pane = pane.clone();
                         let mut menu =
-                            menu.entry(locale.text("New Window"), None, move |window, cx| {
+                            menu.entry(locale.text("new-window"), None, move |window, cx| {
                                 Self::request_tab_move(
                                     &new_window_view,
                                     &new_window_pane,
@@ -2263,17 +2263,17 @@ impl TerminalWindowView {
                             let label = match destination.position {
                                 Some(position) => localized_format!(
                                     locale,
-                                    "Window {} ({:.0}, {:.0}): {title}",
-                                    "窗口 {}（{:.0}, {:.0}）：{title}",
-                                    index + 1,
-                                    position.x.as_f32(),
-                                    position.y.as_f32(),
+                                    "destination-window-with-position",
+                                    window_number = index + 1,
+                                    x = format!("{:.0}", position.x.as_f32()),
+                                    y = format!("{:.0}", position.y.as_f32()),
+                                    title = title,
                                 ),
                                 None => localized_format!(
                                     locale,
-                                    "Window {}: {title}",
-                                    "窗口 {}：{title}",
-                                    index + 1
+                                    "destination-window",
+                                    window_number = index + 1,
+                                    title = title,
                                 ),
                             };
                             let destination = destination.window;
@@ -2291,11 +2291,11 @@ impl TerminalWindowView {
                     },
                 )
                 .separator()
-                .action(locale.text("Close"), Box::new(CloseTab))
-                .action(locale.text("Close Others"), Box::new(CloseOtherTabs))
-                .action(locale.text("Close Left"), Box::new(CloseLeft))
-                .action(locale.text("Close Right"), Box::new(CloseRight))
-                .action(locale.text("Close All"), Box::new(CloseAll))
+                .action(locale.text("close"), Box::new(CloseTab))
+                .action(locale.text("close-others"), Box::new(CloseOtherTabs))
+                .action(locale.text("close-left"), Box::new(CloseLeft))
+                .action(locale.text("close-right"), Box::new(CloseRight))
+                .action(locale.text("close-all"), Box::new(CloseAll))
         });
     }
 
@@ -2396,9 +2396,9 @@ impl TerminalWindowView {
             .child(
                 IconButton::new("exit-fullscreen", IconName::Minimize)
                     .icon_size(IconSize::XSmall)
-                    .aria_label(language::text(cx, "Exit Full Screen"))
+                    .aria_label(language::text(cx, "exit-full-screen"))
                     .tooltip(Tooltip::for_action_title(
-                        language::text(cx, "Exit Full Screen"),
+                        language::text(cx, "exit-full-screen"),
                         &ToggleFullScreen,
                     ))
                     .on_click(cx.listener(|_, _, window, cx| {
@@ -2446,12 +2446,12 @@ impl TerminalWindowView {
             TabBarScrollDirection::Left => (
                 "scroll-tabs-left",
                 IconName::ChevronLeft,
-                "Scroll tabs left",
+                "scroll-tabs-left",
             ),
             TabBarScrollDirection::Right => (
                 "scroll-tabs-right",
                 IconName::ChevronRight,
-                "Scroll tabs right",
+                "scroll-tabs-right",
             ),
         };
         div()
@@ -2742,7 +2742,7 @@ impl TerminalWindowView {
                 MouseButton::Left,
                 cx.listener(|_, _: &MouseDownEvent, _, cx| cx.stop_propagation()),
             )
-            .child(Label::new(language::text(cx, "Rename Tab")).size(LabelSize::Large))
+            .child(Label::new(language::text(cx, "rename-tab")).size(LabelSize::Large))
             .child(
                 div()
                     .id("rename-tab-name-input")
@@ -2766,7 +2766,7 @@ impl TerminalWindowView {
                     .child(TabRenameInput { view, focus_handle }),
             )
             .child(
-                Label::new(language::text(cx, "Enter to rename · Esc to cancel"))
+                Label::new(language::text(cx, "rename-tab-help"))
                     .size(LabelSize::Small)
                     .color(Color::Muted),
             )
@@ -2776,7 +2776,7 @@ impl TerminalWindowView {
                     .justify_end()
                     .gap_2()
                     .child(
-                        Button::new("rename-tab-cancel", language::text(cx, "Cancel"))
+                        Button::new("rename-tab-cancel", language::text(cx, "cancel"))
                             .style(ButtonStyle::Outlined)
                             .label_size(LabelSize::Small)
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -2785,7 +2785,7 @@ impl TerminalWindowView {
                             })),
                     )
                     .child(
-                        Button::new("rename-tab-confirm", language::text(cx, "Rename"))
+                        Button::new("rename-tab-confirm", language::text(cx, "rename"))
                             .style(ButtonStyle::Filled)
                             .label_size(LabelSize::Small)
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -2860,7 +2860,7 @@ fn render_tab_rename_input_content(
         }
         return content
             .child(
-                Label::new(language::text(cx, "Tab name"))
+                Label::new(language::text(cx, "tab-name"))
                     .size(LabelSize::Small)
                     .color(Color::Muted),
             )
@@ -3023,7 +3023,7 @@ impl Render for TerminalWindowView {
                             .icon_size(IconSize::Small)
                             .tooltip(|_window, cx| {
                                 Tooltip::for_action(
-                                    language::text(cx, "Restore Panes"),
+                                    language::text(cx, "restore-panes"),
                                     &ToggleZoom,
                                     cx,
                                 )
@@ -3084,7 +3084,7 @@ impl Render for TerminalWindowView {
                 .unwrap_or_else(|| {
                     div()
                         .size_full()
-                        .child(language::text(cx, "Starting terminal…"))
+                        .child(language::text(cx, "starting-terminal"))
                         .into_any_element()
                 })
         };

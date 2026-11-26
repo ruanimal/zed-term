@@ -144,17 +144,12 @@ struct FinishedTransfer {
 /// would claim a local save that never happened.
 fn completion_summary(paths: &[PathBuf], direction: Option<Direction>, locale: Locale) -> String {
     match paths.len() {
-        0 => locale.text("Transfer completed").to_string(),
+        0 => locale.text("transfer-completed").to_string(),
         1 if direction == Some(Direction::Upload) => {
-            localized_format!(locale, "Sent {}", "已发送 {}", paths[0].display())
+            localized_format!(locale, "transfer-sent", path = paths[0].display())
         }
-        1 => localized_format!(locale, "Saved {}", "已保存 {}", paths[0].display()),
-        _ => localized_format!(
-            locale,
-            "Transferred {} files",
-            "已传输 {} 个文件",
-            paths.len()
-        ),
+        1 => localized_format!(locale, "transfer-saved", path = paths[0].display()),
+        _ => localized_format!(locale, "transfer-files-completed", count = paths.len(),),
     }
 }
 
@@ -252,8 +247,8 @@ impl TransferUiState {
                 self.finished = Some(FinishedTransfer {
                     message: localized_format!(
                         language::current(cx),
-                        "Transfer failed: {reason}",
-                        "传输失败：{reason}"
+                        "transfer-failed",
+                        reason = reason,
                     ),
                     ok: false,
                 });
@@ -261,10 +256,10 @@ impl TransferUiState {
             }
             TransferUiEvent::Cancelled => self.on_cancelled(),
             TransferUiEvent::BusyRejected => {
-                self.hint = Some("Already transferring — ignoring new transfer request".into());
+                self.hint = Some("transfer-busy-hint".into());
             }
             TransferUiEvent::InputRefused => {
-                self.hint = Some("Transfer in progress — press Esc to cancel".into());
+                self.hint = Some("transfer-cancel-hint".into());
             }
         }
         if finished {
@@ -302,7 +297,7 @@ impl TransferUiState {
         let explained_by_error = self.finished.as_ref().is_some_and(|finished| !finished.ok);
         if !explained_by_error {
             self.finished = Some(FinishedTransfer {
-                message: "Transfer cancelled".to_string(),
+                message: "transfer-cancelled".to_string(),
                 ok: true,
             });
         }
@@ -338,8 +333,8 @@ impl TransferUiState {
                         });
                         this.transfer_ui.fail(localized_format!(
                             language::current(cx),
-                            "Could not open the file picker: {error}",
-                            "无法打开文件选择器：{error}"
+                            "transfer-file-picker-error",
+                            error = error,
                         ));
                         this.transfer_ui.schedule_dismiss(cx);
                         cx.notify();
@@ -402,8 +397,8 @@ impl TransferUiState {
                         });
                         this.transfer_ui.fail(localized_format!(
                             language::current(cx),
-                            "Could not open the directory picker: {error}",
-                            "无法打开目录选择器：{error}"
+                            "transfer-directory-picker-error",
+                            error = error,
                         ));
                         this.transfer_ui.schedule_dismiss(cx);
                         cx.notify();
@@ -470,17 +465,16 @@ impl RenderOnce for TransferBar {
 
         let (text, ok, fraction, hint) = if let Some(active) = &state.active {
             let direction = locale.text(match active.direction {
-                Some(Direction::Upload) => "Uploading",
-                Some(Direction::Download) => "Downloading",
-                None => "Transferring",
+                Some(Direction::Upload) => "uploading",
+                Some(Direction::Download) => "downloading",
+                None => "transferring",
             });
             let file = if active.file_count > 1 {
                 localized_format!(
                     locale,
-                    " (file {}/{})",
-                    "（文件 {}/{}）",
-                    active.file_index + 1,
-                    active.file_count
+                    "transfer-file-position",
+                    position = active.file_index + 1,
+                    count = active.file_count,
                 )
             } else {
                 String::new()
@@ -492,9 +486,11 @@ impl RenderOnce for TransferBar {
             (
                 localized_format!(
                     locale,
-                    "{direction}{file}: {}{total}",
-                    "{direction}{file}：{}{total}",
-                    human_bytes(active.bytes_done),
+                    "transfer-progress",
+                    direction = direction,
+                    file = file,
+                    bytes = human_bytes(active.bytes_done),
+                    total = total,
                 ),
                 true,
                 active
@@ -508,13 +504,13 @@ impl RenderOnce for TransferBar {
             )
         } else if let Some(finished) = &state.finished {
             (
-                locale.text(&finished.message).to_owned(),
+                locale.text(&finished.message).to_string(),
                 finished.ok,
                 None,
                 state.hint.clone(),
             )
         } else if let Some(hint) = &state.hint {
-            (locale.text(hint).to_owned(), true, None, None)
+            (locale.text(hint).to_string(), true, None, None)
         } else {
             return div();
         };
@@ -570,9 +566,9 @@ impl RenderOnce for TransferBar {
                             .shape(IconButtonShape::Square)
                             .icon_size(IconSize::Small)
                             .tooltip(Tooltip::text(locale.text(if cancel_active {
-                                "Cancel transfer"
+                                "cancel-transfer"
                             } else {
-                                "Dismiss"
+                                "dismiss"
                             })))
                             .on_click(move |_, window, cx| {
                                 if cancel_active {
@@ -744,7 +740,10 @@ mod tests {
         assert!(state.active.is_none());
         let finished = state.finished.expect("a cancel must be reported");
         assert!(finished.ok);
-        assert_eq!(finished.message, "Transfer cancelled");
+        assert_eq!(
+            Locale::English.text(&finished.message),
+            "Transfer cancelled"
+        );
     }
 
     /// A picker that could not be opened reports the real reason; the

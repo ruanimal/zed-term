@@ -65,12 +65,17 @@ impl ActionInformation {
             text.push('\n');
             text.push_str(&payload.description(locale));
             text.push('\n');
-            text.push_str(locale.text("keymap.json value: "));
+            text.push_str(&locale.text("keymap-json-value-prefix"));
             text.push_str(&payload.json);
         }
         if let Some(documentation) = self.documentation {
             text.push('\n');
-            text.push_str(locale.text(documentation.trim()));
+            let description = locale.lookup(&format!("actions.{}.description", self.name));
+            text.push_str(
+                description
+                    .as_deref()
+                    .unwrap_or_else(|| documentation.trim()),
+            );
         }
         Some(text.into())
     }
@@ -128,10 +133,14 @@ impl ProcessedBinding {
     /// global, but an action with no binding has no context at all: labelling it
     /// `<global>` would read as if it had one.
     pub fn display_context(&self) -> String {
+        self.localized_context(Locale::English).to_string()
+    }
+
+    fn localized_context(&self, locale: Locale) -> SharedString {
         match self.context_text() {
-            Some(context) => context.to_string(),
-            None if self.is_unbound() => String::new(),
-            None => "<global>".to_string(),
+            Some(context) => context.clone(),
+            None if self.is_unbound() => SharedString::default(),
+            None => locale.text("global-context"),
         }
     }
 
@@ -401,6 +410,16 @@ fn humanize_action_name(action_name: &str) -> SharedString {
     humanized.into()
 }
 
+fn action_label_key(action_name: &str) -> String {
+    format!("actions.{action_name}.name")
+}
+
+fn action_label(locale: Locale, action_name: &str, fallback: &SharedString) -> SharedString {
+    locale
+        .lookup(&action_label_key(action_name))
+        .unwrap_or_else(|| fallback.clone())
+}
+
 fn is_displayable_action(action_name: &str) -> bool {
     matches!(
         action_name.split_once("::"),
@@ -455,13 +474,12 @@ impl ActionPayload {
         match self.effect {
             Some(effect) => localized_format!(
                 locale,
-                "Sends {} — {}",
-                "发送 {}（{}）",
-                self.display,
-                locale.text(effect)
+                "keymap-payload-with-effect",
+                keys = self.display,
+                effect = locale.text(effect),
             )
             .into(),
-            None => localized_format!(locale, "Sends {}", "发送 {}", self.display).into(),
+            None => localized_format!(locale, "keymap-payload", keys = self.display).into(),
         }
     }
 }
@@ -494,17 +512,17 @@ fn control_sequence_text(text: &str) -> SharedString {
 fn shell_effect(kind: PayloadKind, value: &str) -> Option<&'static str> {
     match kind {
         PayloadKind::Keystroke => match value.to_ascii_lowercase().as_str() {
-            "ctrl-u" => Some("clear to start of line"),
-            "ctrl-k" => Some("delete to end of line"),
-            "ctrl-a" => Some("move to start of line"),
-            "ctrl-e" => Some("move to end of line"),
-            "ctrl-w" => Some("delete word before cursor"),
+            "ctrl-u" => Some("clear-to-start-of-line"),
+            "ctrl-k" => Some("delete-to-end-of-line"),
+            "ctrl-a" => Some("move-to-start-of-line"),
+            "ctrl-e" => Some("move-to-end-of-line"),
+            "ctrl-w" => Some("delete-word-before-cursor"),
             _ => None,
         },
         PayloadKind::Text => match value {
-            "\u{1b}d" | "\u{1b}[3;5~" => Some("delete word after cursor"),
-            "\u{1b}b" => Some("move back one word"),
-            "\u{1b}f" => Some("move forward one word"),
+            "\u{1b}d" | "\u{1b}[3;5~" => Some("delete-word-after-cursor"),
+            "\u{1b}b" => Some("move-back-one-word"),
+            "\u{1b}f" => Some("move-forward-one-word"),
             _ => None,
         },
     }
@@ -684,7 +702,7 @@ impl KeymapTab {
     }
 
     /// Records the outcome of a finished write, replacing the in-progress
-    /// status so the tab cannot stay stuck on "Saving keybinding…".
+    /// status so the tab cannot stay stuck on "saving-keybinding".
     pub fn clear_write_status(&mut self, message: &str) {
         self.write_in_progress = false;
         self.status = Some((message.into(), true));
@@ -705,6 +723,7 @@ impl KeymapTab {
 
     fn refresh_matches(&mut self, operating_system: OperatingSystem) {
         let query = self.search_query.to_lowercase();
+        let locales = rust_i18n::available_locales!();
         self.matches = self
             .bindings
             .iter()
@@ -722,7 +741,13 @@ impl KeymapTab {
                 let action = binding.action();
                 if action.humanized_name.to_lowercase().contains(&query)
                     || action.name.to_lowercase().contains(&query)
-                    || language::simplified_chinese(&action.humanized_name).contains(&query)
+                    || {
+                        let key = action_label_key(action.name);
+                        locales.iter().any(|locale| {
+                            crate::_rust_i18n_try_translate(locale, &key)
+                                .is_some_and(|label| label.to_lowercase().contains(&query))
+                        })
+                    }
                 {
                     return true;
                 }
@@ -861,9 +886,9 @@ impl KeymapTab {
         };
         self.write_unbinding(
             pending,
-            "Unbinding keybinding…",
-            "Keybinding unbound.",
-            "Could not unbind keybinding",
+            "unbinding-keybinding",
+            "keybinding-unbound",
+            "could-not-unbind-keybinding",
             cx,
         );
     }
@@ -893,9 +918,9 @@ impl KeymapTab {
         };
         self.write_unbinding(
             pending,
-            "Restoring keybinding…",
-            "Default keybinding restored.",
-            "Could not restore keybinding",
+            "restoring-keybinding",
+            "default-keybinding-restored",
+            "could-not-restore-keybinding",
             cx,
         );
     }
@@ -908,7 +933,7 @@ impl KeymapTab {
 
         let mut keystrokes = editor.keystrokes.read(cx).keystrokes().to_vec();
         if keystrokes.is_empty() {
-            self.status = Some(("Keystrokes cannot be empty.".into(), false));
+            self.status = Some(("keystrokes-cannot-be-empty".into(), false));
             cx.notify();
             return;
         }
@@ -919,8 +944,8 @@ impl KeymapTab {
             self.status = Some((
                 localized_format!(
                     language::current(cx),
-                    "Invalid context: {error}",
-                    "无效的上下文：{error}"
+                    "keymap-invalid-context",
+                    error = error,
                 )
                 .into(),
                 false,
@@ -938,24 +963,23 @@ impl KeymapTab {
             .conflict_state
             .conflicting_indices_for_mapping(&action_mapping, editor.index)
         {
-            let conflicting_action = self
-                .bindings
-                .get(conflict.first_conflict_index)
-                .map(|binding| binding.action().humanized_name.clone());
             let locale = language::current(cx);
-            let message = match conflicting_action.as_deref().map(|name| locale.text(name)) {
+            let conflicting_action =
+                self.bindings
+                    .get(conflict.first_conflict_index)
+                    .map(|binding| {
+                        let action = binding.action();
+                        action_label(locale, action.name, &action.humanized_name)
+                    });
+            let message = match conflicting_action {
                 Some(name) if conflict.remaining_conflict_amount > 0 => localized_format!(
                     locale,
-                    "This binding conflicts with \"{name}\" and {} other binding(s).",
-                    "此快捷键与“{name}”等快捷键冲突，另有 {} 项冲突。",
-                    conflict.remaining_conflict_amount
+                    "keymap-conflicts-with-more",
+                    name = name,
+                    count = conflict.remaining_conflict_amount,
                 ),
-                Some(name) => localized_format!(
-                    locale,
-                    "This binding conflicts with \"{name}\".",
-                    "此快捷键与“{name}”冲突。"
-                ),
-                None => "This binding conflicts with another binding.".to_string(),
+                Some(name) => localized_format!(locale, "keymap-conflicts-with", name = name,),
+                None => "keymap-binding-conflict".to_string(),
             };
             self.status = Some((message.into(), false));
             cx.notify();
@@ -987,7 +1011,7 @@ impl KeymapTab {
             return;
         }
         self.write_in_progress = true;
-        self.status = Some(("Saving keybinding…".into(), true));
+        self.status = Some(("saving-keybinding".into(), true));
         cx.notify();
 
         let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(cx.background_executor().clone()));
@@ -1011,8 +1035,8 @@ impl KeymapTab {
                     Err(error) => page.fail_keymap_write(
                         localized_format!(
                             language::current(cx),
-                            "Could not save keybinding: {error}",
-                            "无法保存快捷键：{error}"
+                            "save-keybinding-error",
+                            error = error,
                         ),
                         cx,
                     ),
@@ -1063,7 +1087,12 @@ impl KeymapTab {
                         let locale = language::current(cx);
                         let prefix = locale.text(error_prefix);
                         page.fail_keymap_write(
-                            localized_format!(locale, "{prefix}: {error}", "{prefix}：{error}"),
+                            localized_format!(
+                                locale,
+                                "keymap-operation-error",
+                                prefix = prefix,
+                                error = error
+                            ),
                             cx,
                         );
                     }
@@ -1080,7 +1109,7 @@ impl KeymapTab {
             return;
         }
         self.write_in_progress = true;
-        self.status = Some(("Resetting keymap…".into(), true));
+        self.status = Some(("resetting-keymap".into(), true));
         cx.notify();
 
         let fs: Arc<dyn fs::Fs> = Arc::new(fs::RealFs::new(cx.background_executor().clone()));
@@ -1095,14 +1124,13 @@ impl KeymapTab {
                 match result {
                     Ok(()) => {
                         page.apply_user_keymap(&reset_contents, cx);
-                        page.keymap_tab
-                            .clear_write_status("Keymap reset to defaults.");
+                        page.keymap_tab.clear_write_status("keymap-reset-success");
                     }
                     Err(error) => page.fail_keymap_write(
                         localized_format!(
                             language::current(cx),
-                            "Could not reset keymap: {error}",
-                            "无法重置快捷键：{error}"
+                            "reset-keymap-error",
+                            error = error,
                         ),
                         cx,
                     ),
@@ -1131,7 +1159,7 @@ impl KeymapTab {
         if self.matches.is_empty() {
             list = list.child(
                 v_flex().px_8().py_4().child(
-                    Label::new(language::text(cx, "No matching key bindings."))
+                    Label::new(language::text(cx, "no-matching-key-bindings"))
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                 ),
@@ -1157,7 +1185,7 @@ impl KeymapTab {
         };
         let locale = language::current(cx);
         let action_name = humanize_action_name(editor.action_name);
-        let action_label = locale.text(&action_name);
+        let action_label = action_label(locale, editor.action_name, &action_name);
         let context = editor.context.clone();
         let payload_description = editor
             .payload
@@ -1174,15 +1202,11 @@ impl KeymapTab {
                 Label::new(if editor.index.is_some() {
                     localized_format!(
                         locale,
-                        "Change keybinding for {action_label}",
-                        "更改“{action_label}”的快捷键"
+                        "keymap-change-action-binding",
+                        action = action_label,
                     )
                 } else {
-                    localized_format!(
-                        locale,
-                        "Add keybinding for {action_label}",
-                        "为“{action_label}”添加快捷键"
-                    )
+                    localized_format!(locale, "keymap-add-action-binding", action = action_label,)
                 })
                 .size(LabelSize::Small),
             )
@@ -1195,25 +1219,22 @@ impl KeymapTab {
             })
             .child(editor.keystrokes.clone())
             .child(
-                Label::new(locale.text(
-                    "Click the ▶ button (or press Enter) to record, then press \
-                     Escape three times to finish.",
-                ))
-                .size(LabelSize::Small)
-                .color(Color::Muted),
+                Label::new(locale.text("record-keybinding-help"))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
             )
             .child(
                 h_flex()
                     .gap_2()
                     .items_center()
                     .child(
-                        Label::new(locale.text("Context"))
+                        Label::new(locale.text("context"))
                             .size(LabelSize::Small)
                             .color(Color::Muted),
                     )
                     .child(
                         Label::new(if context.is_empty() {
-                            locale.text("<global>").to_string()
+                            locale.text("global-context").to_string()
                         } else {
                             context
                         })
@@ -1225,14 +1246,14 @@ impl KeymapTab {
                     .gap_2()
                     .child(self.editor_button(
                         "keymap-editor-save",
-                        "Save",
+                        "save",
                         true,
                         |tab, cx| tab.commit_edit(cx),
                         cx,
                     ))
                     .child(self.editor_button(
                         "keymap-editor-cancel",
-                        "Cancel",
+                        "cancel",
                         false,
                         |tab, cx| tab.cancel_edit(cx),
                         cx,
@@ -1314,7 +1335,7 @@ impl KeymapTab {
                                     .toggle_state(self.only_user)
                                     .tooltip(Tooltip::text(language::text(
                                         cx,
-                                        "Show user overrides only",
+                                        "show-user-overrides-only",
                                     )))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.keymap_tab.toggle_user_filter(cx);
@@ -1329,7 +1350,7 @@ impl KeymapTab {
                                     .toggle_state(self.only_conflicts)
                                     .tooltip(Tooltip::text(language::text(
                                         cx,
-                                        "Show conflicting bindings only",
+                                        "show-conflicting-bindings-only",
                                     )))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.keymap_tab.toggle_conflict_filter(cx);
@@ -1341,10 +1362,7 @@ impl KeymapTab {
                             .debug_selector(|| "keymap-reset-defaults".to_string())
                             .child(
                                 IconButton::new("keymap-reset-defaults", IconName::RotateCcw)
-                                    .tooltip(Tooltip::text(language::text(
-                                        cx,
-                                        "Reset keymap.json to defaults",
-                                    )))
+                                    .tooltip(Tooltip::text(language::text(cx, "reset-keymap")))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.keymap_tab.reset_to_defaults(cx);
                                     })),
@@ -1353,13 +1371,9 @@ impl KeymapTab {
             )
             .child(
                 h_flex().px_8().py_1().child(
-                    Label::new(language::text(
-                        cx,
-                        "Send Keystroke replays a keystroke through the terminal, \
-                         Send Text writes its value to the shell byte for byte.",
-                    ))
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
+                    Label::new(language::text(cx, "keymap-send-actions-help"))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
                 ),
             )
             .when_some(status, |this, (message, is_success)| {
@@ -1401,13 +1415,13 @@ impl KeymapTab {
                     .disabled(is_disabled_by_unbind)
                     .into_any_element()
             }
-            None => Label::new(locale.text("Unbound"))
+            None => Label::new(locale.text("unbound"))
                 .size(LabelSize::Small)
                 .color(Color::Muted)
                 .into_any_element(),
         };
 
-        let context_label = binding.display_context();
+        let context_label = binding.localized_context(locale);
 
         let source_label = match binding.source() {
             Some(KeybindSource::User) => "user",
@@ -1424,10 +1438,10 @@ impl KeymapTab {
         let row_tooltip: Option<SharedString> =
             match (is_disabled_by_unbind, action.tooltip(locale)) {
                 (true, Some(tooltip)) => {
-                    let status = locale.text("This shortcut is unbound");
+                    let status = locale.text("this-shortcut-is-unbound");
                     Some(format!("{status}\n{tooltip}").into())
                 }
-                (true, None) => Some(locale.text("This shortcut is unbound").into()),
+                (true, None) => Some(locale.text("this-shortcut-is-unbound")),
                 (false, tooltip) => tooltip,
             };
 
@@ -1448,7 +1462,11 @@ impl KeymapTab {
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .child(Label::new(locale.text(&action.humanized_name)))
+                        .child(Label::new(action_label(
+                            locale,
+                            action.name,
+                            &action.humanized_name,
+                        )))
                         .child(
                             Label::new(action.name)
                                 .size(LabelSize::Small)
@@ -1462,13 +1480,9 @@ impl KeymapTab {
                 )
                 .child(
                     div().flex_none().min_w_24().child(
-                        Label::new(if binding.context_text().is_none() {
-                            locale.text(&context_label)
-                        } else {
-                            &context_label
-                        })
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
+                        Label::new(context_label)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
                     ),
                 )
                 .child(
@@ -1494,7 +1508,7 @@ impl KeymapTab {
                         .debug_selector(move || format!("keymap-restore-{index}"))
                         .child(
                             IconButton::new(format!("keymap-restore-{index}"), IconName::RotateCcw)
-                                .tooltip(Tooltip::text(locale.text("Restore default keybinding")))
+                                .tooltip(Tooltip::text(locale.text("restore-default-keybinding")))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.keymap_tab.restore(index, cx);
                                 })),
@@ -1507,7 +1521,7 @@ impl KeymapTab {
                         .debug_selector(move || format!("keymap-unbind-{index}"))
                         .child(
                             IconButton::new(format!("keymap-unbind-{index}"), IconName::Trash)
-                                .tooltip(Tooltip::text(locale.text("Unbind keybinding")))
+                                .tooltip(Tooltip::text(locale.text("unbind-keybinding")))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.keymap_tab.unbind(index, cx);
                                 })),
@@ -1522,9 +1536,9 @@ impl KeymapTab {
                     .child(
                         IconButton::new(format!("keymap-edit-{index}"), IconName::Pencil)
                             .tooltip(Tooltip::text(locale.text(if binding.is_unbound() {
-                                "Add keybinding"
+                                "add-keybinding"
                             } else {
-                                "Change keybinding"
+                                "change-keybinding"
                             })))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.begin_keymap_binding_edit(index, window, cx);
@@ -1697,13 +1711,9 @@ fn conflict_description(conflict: &ConflictOrigin, locale: Locale) -> String {
         Some(_) => {
             let source = conflict.override_source.name().to_lowercase();
             let source = locale.text(&source);
-            localized_format!(
-                locale,
-                "Overridden by a {source} binding",
-                "被{source}快捷键覆盖"
-            )
+            localized_format!(locale, "keymap-overridden-by", source = source,)
         }
-        None => locale.text("This binding takes precedence").to_string(),
+        None => locale.text("this-binding-takes-precedence").to_string(),
     }
 }
 
@@ -1804,15 +1814,15 @@ mod tests {
     fn known_payloads_carry_a_shell_effect() {
         assert_eq!(
             shell_effect(PayloadKind::Keystroke, "Ctrl-U"),
-            Some("clear to start of line")
+            Some("clear-to-start-of-line")
         );
         assert_eq!(
             shell_effect(PayloadKind::Keystroke, "ctrl-w"),
-            Some("delete word before cursor")
+            Some("delete-word-before-cursor")
         );
         assert_eq!(
             shell_effect(PayloadKind::Text, "\u{1b}b"),
-            Some("move back one word")
+            Some("move-back-one-word")
         );
         assert_eq!(shell_effect(PayloadKind::Keystroke, "ctrl-y"), None);
     }

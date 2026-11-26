@@ -39,6 +39,8 @@ pub mod transfer_ui;
 pub mod window;
 pub(crate) mod window_chrome;
 
+rust_i18n::i18n!("locales", fallback = "en");
+
 /// Product/program name injected into child processes (`TERM_PROGRAM`,
 /// `ZED_TERM`).
 pub const TERM_PROGRAM: &str = "zedterm";
@@ -558,7 +560,7 @@ pub fn run(cx: &mut App, initial_directory: Option<std::path::PathBuf>) {
 #[cfg(target_os = "macos")]
 fn update_dock_menu(cx: &mut App) {
     cx.set_dock_menu(vec![MenuItem::action(
-        language::text(cx, "New Window"),
+        language::text(cx, "new-window"),
         NewWindow,
     )]);
 }

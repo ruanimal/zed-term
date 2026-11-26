@@ -122,7 +122,7 @@ impl SettingsPage {
                     this.begin_edit(EditableField::KeymapSearch, window, cx);
                 }),
             )
-            .child(self.text_input_content(&value, "Filter by action or keystroke…", is_active, cx))
+            .child(self.text_input_content(&value, "filter-by-action-or-keystroke", is_active, cx))
             .into_any_element()
     }
 
@@ -153,7 +153,7 @@ impl SettingsPage {
                     this.begin_edit(EditableField::ThemesSearch, window, cx);
                 }),
             )
-            .child(self.text_input_content(&value, "Filter theme extensions…", is_active, cx))
+            .child(self.text_input_content(&value, "filter-theme-extensions", is_active, cx))
             .into_any_element()
     }
 
@@ -425,9 +425,9 @@ impl SettingsPage {
             .draft_display_language
             .unwrap_or_else(|| language::configured(cx));
         let label = |language| match language {
-            DisplayLanguage::Auto => "Auto",
-            DisplayLanguage::English => "English",
-            DisplayLanguage::SimplifiedChinese => "简体中文",
+            DisplayLanguage::Auto => "language-auto",
+            DisplayLanguage::English => "language-english",
+            DisplayLanguage::SimplifiedChinese => "language-simplified-chinese",
         };
         let page = cx.weak_entity();
         let options = languages
@@ -452,8 +452,8 @@ impl SettingsPage {
         self.enum_row(
             window,
             cx,
-            "Display language",
-            "Auto follows your system language. Save to apply the change.",
+            "display-language",
+            "display-language-description",
             label(selected).to_owned(),
             options,
         )
@@ -483,9 +483,9 @@ impl SettingsPage {
         });
         self.row(
             language::current(cx),
-            "Color theme",
-            "Choose the color theme for the terminal and UI.",
-            DropdownMenu::new(element_id_for("Color theme"), current, menu).into_any_element(),
+            "color-theme",
+            "color-theme-description",
+            DropdownMenu::new(element_id_for("color-theme"), current, menu).into_any_element(),
         )
     }
 
@@ -498,8 +498,8 @@ impl SettingsPage {
         let page = cx.weak_entity();
         let application_default_label = localized_format!(
             language::current(cx),
-            "Application default ({DEFAULT_TERMINAL_FONT_FAMILY})",
-            "应用默认（{DEFAULT_TERMINAL_FONT_FAMILY}）"
+            "default-terminal-font-family",
+            family = DEFAULT_TERMINAL_FONT_FAMILY,
         );
         let menu_application_default_label = application_default_label.clone();
         let menu = ContextMenu::build(window, cx, |menu, _, _| {
@@ -530,10 +530,10 @@ impl SettingsPage {
         });
         self.row(
             language::current(cx),
-            "Font family",
-            "Choose an installed font, or use the application default.",
+            "font-family",
+            "font-family-description",
             DropdownMenu::new(
-                element_id_for("Font family"),
+                element_id_for("font-family"),
                 if self.font_family.is_empty() {
                     application_default_label
                 } else {
@@ -548,8 +548,8 @@ impl SettingsPage {
     fn shell_mode_options(&self, cx: &mut Context<Self>) -> DropdownOptions {
         [
             ("system", ShellMode::System),
-            ("custom program", ShellMode::Program),
-            ("program with arguments", ShellMode::WithArguments),
+            ("custom-program", ShellMode::Program),
+            ("program-with-arguments", ShellMode::WithArguments),
         ]
         .into_iter()
         .map(|(label, mode)| {
@@ -573,28 +573,28 @@ impl SettingsPage {
     fn render_shell_form(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let mode = match self.shell_form.mode {
             ShellMode::System => "system",
-            ShellMode::Program => "custom program",
-            ShellMode::WithArguments => "program with arguments",
+            ShellMode::Program => "custom-program",
+            ShellMode::WithArguments => "program-with-arguments",
         };
         let shell_mode_options = self.shell_mode_options(cx);
         let mut form = v_flex().id("shell-form").child(self.enum_row(
             window,
             cx,
-            "Shell mode",
-            "Choose the system shell or a structured program and argument list. Applies only to newly created terminals and panes.",
+            "shell-mode",
+            "shell-mode-description",
             mode.to_string(),
             shell_mode_options,
         ));
         if self.shell_form.mode != ShellMode::System {
             form = form.child(self.row(
                 language::current(cx),
-                "Shell program",
-                "The executable to run for each new terminal.",
+                "shell-program",
+                "shell-program-description",
                 self.text_input(
                     "shell-program-input",
                     EditableField::ShellProgram,
                     self.shell_form.program.clone(),
-                    "e.g. /bin/zsh",
+                    "shell-path-placeholder",
                     cx,
                 ),
             ));
@@ -602,13 +602,13 @@ impl SettingsPage {
         if self.shell_form.mode == ShellMode::WithArguments {
             form = form.child(self.row(
                 language::current(cx),
-                "Shell title override",
-                "Optional title used for tabs started with this shell.",
+                "shell-title-override",
+                "shell-title-override-description",
                 self.text_input(
                     "shell-title-input",
                     EditableField::ShellTitleOverride,
                     self.shell_form.title_override.clone(),
-                    "Optional title",
+                    "optional-title",
                     cx,
                 ),
             ));
@@ -624,9 +624,8 @@ impl SettingsPage {
                         .child(
                             Label::new(localized_format!(
                                 language::current(cx),
-                                "Argument {}",
-                                "参数 {}",
-                                index + 1
+                                "shell-argument-number",
+                                index = index + 1,
                             ))
                             .color(Color::Muted),
                         )
@@ -634,7 +633,7 @@ impl SettingsPage {
                             format!("shell-argument-input-{index}"),
                             EditableField::ShellArgument(index),
                             argument.clone(),
-                            "Argument",
+                            "argument",
                             cx,
                         ))
                         .child(
@@ -657,7 +656,7 @@ impl SettingsPage {
             }
             form = form.child(h_flex().px_8().py_2().child(self.action_button(
                 "add-shell-argument",
-                "Add argument",
+                "add-argument",
                 true,
                 |this, _, window, cx| {
                     let index = this.shell_form.arguments.len();
@@ -686,7 +685,7 @@ impl SettingsPage {
                         format!("environment-key-{index}"),
                         EditableField::EnvironmentKey(index),
                         variable.key.clone(),
-                        "NAME",
+                        "environment-variable-name",
                         cx,
                     ))
                     .child(Label::new("=").color(Color::Muted))
@@ -694,7 +693,7 @@ impl SettingsPage {
                         format!("environment-value-{index}"),
                         EditableField::EnvironmentValue(index),
                         variable.value.clone(),
-                        "Value",
+                        "value",
                         cx,
                     ))
                     .child(
@@ -713,7 +712,7 @@ impl SettingsPage {
         editor
             .child(h_flex().px_8().py_2().child(self.action_button(
                 "add-environment-variable",
-                "Add variable",
+                "add-variable",
                 true,
                 |this, _, window, cx| {
                     let index = this.environment.len();
@@ -732,8 +731,8 @@ impl SettingsPage {
     fn working_directory_options(&self, cx: &mut Context<Self>) -> DropdownOptions {
         [
             ("home", WorkingDirectoryMode::Home),
-            ("previous tab", WorkingDirectoryMode::PreviousTab),
-            ("fixed directory", WorkingDirectoryMode::Fixed),
+            ("previous-tab-directory", WorkingDirectoryMode::PreviousTab),
+            ("fixed-directory", WorkingDirectoryMode::Fixed),
         ]
         .into_iter()
         .map(|(label, mode)| {
@@ -761,21 +760,21 @@ impl SettingsPage {
     ) -> gpui::AnyElement {
         let mode = match self.working_directory.mode {
             WorkingDirectoryMode::Home => "home",
-            WorkingDirectoryMode::PreviousTab => "previous tab",
-            WorkingDirectoryMode::Fixed => "fixed directory",
+            WorkingDirectoryMode::PreviousTab => "previous-tab-directory",
+            WorkingDirectoryMode::Fixed => "fixed-directory",
         };
         let description = if self.working_directory.fell_back_from_workspace_setting {
-            "Newly created terminals and panes use Home when an inherited workspace directory is configured."
+            "inherited-working-directory-description"
         } else if self.working_directory.mode == WorkingDirectoryMode::PreviousTab {
-            "New tabs inherit the active tab's working directory when available; otherwise they use Home."
+            "previous-tab-directory-description"
         } else {
-            "Only newly created terminals and panes use the selected Home or verified fixed directory."
+            "working-directory-description"
         };
         let working_directory_options = self.working_directory_options(cx);
         let mut form = v_flex().id("working-directory-form").child(self.enum_row(
             window,
             cx,
-            "Working directory",
+            "working-directory",
             description,
             mode.to_string(),
             working_directory_options,
@@ -783,13 +782,13 @@ impl SettingsPage {
         if self.working_directory.mode == WorkingDirectoryMode::Fixed {
             form = form.child(self.row(
                 language::current(cx),
-                "Fixed working directory",
-                "An existing directory. `~` is expanded before it is saved.",
+                "fixed-working-directory",
+                "fixed-working-directory-description",
                 self.text_input(
                     "working-directory-input",
                     EditableField::WorkingDirectory,
                     self.working_directory.directory.clone(),
-                    "/Users/name/project",
+                    "fixed-directory-placeholder",
                     cx,
                 ),
             ));
@@ -813,7 +812,11 @@ impl Render for SettingsPage {
             settings::TerminalLineHeight::Comfortable => "comfortable".to_string(),
             settings::TerminalLineHeight::Standard => "standard".to_string(),
             settings::TerminalLineHeight::Custom(value) => {
-                localized_format!(locale, "custom ({value:.2})", "自定义（{value:.2}）")
+                localized_format!(
+                    locale,
+                    "custom-line-height-value",
+                    value = format!("{:.2}", value)
+                )
             }
         };
         let line_height_custom = match settings.line_height {
@@ -849,124 +852,41 @@ impl Render for SettingsPage {
                 .try_list_font_families()
                 .unwrap_or_default();
             v_flex()
-            .id("settings-content")
-            .w_full()
-            .child(self.status_row(locale))
-            .child(self.section_header("Appearance", cx))
-            .child(self.display_language_row(window, cx))
-            .child(self.theme_row(window, cx, current_theme.clone(), theme_names))
-            .child(self.font_family_row(window, cx, font_families))
-            .child(self.number_row(
-                cx,
-                "Font size",
-                "The size of the terminal font. The default is the application terminal font size.",
-                font_size.map_or_else(
-                    || localized_format!(locale, "Application default ({DEFAULT_TERMINAL_FONT_SIZE:.1} px)", "应用默认（{DEFAULT_TERMINAL_FONT_SIZE:.1} px）"),
-                    |value| format!("{value:.1} px"),
-                ),
-                {
-                    let page = page.clone();
-                    move |cx, delta| {
-                        page.update(cx, |this, cx| {
-                            let current = this
-                                .draft_settings
-                                .font_size
-                                .map(f32::from)
-                                .unwrap_or(DEFAULT_TERMINAL_FONT_SIZE);
-                            this.update_draft(
-                                DirtySetting::FontSize,
-                                |settings| {
-                                    settings.font_size =
-                                        Some(px(adjust_bounded(current, delta, 1.0, f32::MAX)))
-                                },
-                                cx,
-                            );
-                        })
-                        .log_err();
-                    }
-                },
-            ))
-            .child(self.number_row(
-                cx,
-                "Font weight",
-                "CSS font weight from 100 to 900. The default uses the normal font weight.",
-                font_weight.map_or_else(
-                    || locale.text("400 (default)").to_string(),
-                    |value| format!("{value:.0}"),
-                ),
-                {
-                    let page = page.clone();
-                    move |cx, delta| {
-                        page.update(cx, |this, cx| {
-                            let current = this
-                                .draft_settings
-                                .font_weight
-                                .map(|weight| weight.0)
-                                .unwrap_or(400.0);
-                            this.update_draft(
-                                DirtySetting::FontWeight,
-                                |settings| {
-                                    settings.font_weight = Some(gpui::FontWeight(adjust_bounded(
-                                        current,
-                                        delta * 100.0,
-                                        100.0,
-                                        900.0,
-                                    )));
-                                },
-                                cx,
-                            );
-                        })
-                        .log_err();
-                    }
-                },
-            ))
-            .child(self.enum_row(
-                window,
-                cx,
-                "Line height",
-                "Standard is the standalone default and works best with terminal UIs.",
-                line_height,
-                vec![
-                    draft_setting_option(
-                        "standard",
-                        page.clone(),
-                        DirtySetting::LineHeight,
-                        |settings| settings.line_height = settings::TerminalLineHeight::Standard,
-                    ),
-                    draft_setting_option(
-                        "comfortable",
-                        page.clone(),
-                        DirtySetting::LineHeight,
-                        |settings| settings.line_height = settings::TerminalLineHeight::Comfortable,
-                    ),
-                    draft_setting_option(
-                        "custom",
-                        page.clone(),
-                        DirtySetting::LineHeight,
-                        |settings| settings.line_height = settings::TerminalLineHeight::Custom(1.5),
-                    ),
-                ],
-            ))
-            .when_some(line_height_custom, |content, value| {
-                content.child(self.number_row(
+                .id("settings-content")
+                .w_full()
+                .child(self.status_row(locale))
+                .child(self.section_header("appearance", cx))
+                .child(self.display_language_row(window, cx))
+                .child(self.theme_row(window, cx, current_theme.clone(), theme_names))
+                .child(self.font_family_row(window, cx, font_families))
+                .child(self.number_row(
                     cx,
-                    "Custom line height",
-                    "A positive line-height multiplier.",
-                    format!("{value:.2}"),
+                    "font-size",
+                    "font-size-description",
+                    font_size.map_or_else(
+                        || {
+                            localized_format!(
+                                locale,
+                                "default-terminal-font-size",
+                                size = format!("{:.1}", DEFAULT_TERMINAL_FONT_SIZE)
+                            )
+                        },
+                        |value| format!("{value:.1} px"),
+                    ),
                     {
                         let page = page.clone();
                         move |cx, delta| {
                             page.update(cx, |this, cx| {
-                                let current = match this.draft_settings.line_height {
-                                    settings::TerminalLineHeight::Custom(value) => value,
-                                    _ => 1.5,
-                                };
+                                let current = this
+                                    .draft_settings
+                                    .font_size
+                                    .map(f32::from)
+                                    .unwrap_or(DEFAULT_TERMINAL_FONT_SIZE);
                                 this.update_draft(
-                                    DirtySetting::LineHeight,
+                                    DirtySetting::FontSize,
                                     |settings| {
-                                        settings.line_height = settings::TerminalLineHeight::Custom(
-                                            adjust_bounded(current, delta * 0.1, 1.0, f32::MAX),
-                                        );
+                                        settings.font_size =
+                                            Some(px(adjust_bounded(current, delta, 1.0, f32::MAX)))
                                     },
                                     cx,
                                 );
@@ -975,333 +895,462 @@ impl Render for SettingsPage {
                         }
                     },
                 ))
-            })
-            .child(self.number_row(
-                cx,
-                "Minimum contrast",
-                "APCA minimum contrast from 0 to 106.",
-                format!("{:.0}", settings.minimum_contrast),
-                {
-                    let page = page.clone();
-                    move |cx, delta| {
-                        page.update(cx, |this, cx| {
-                            let next = adjust_bounded(
-                                this.draft_settings.minimum_contrast,
-                                delta,
-                                0.0,
-                                106.0,
-                            );
-                            this.update_draft(
-                                DirtySetting::MinimumContrast,
-                                |settings| settings.minimum_contrast = next,
-                                cx,
-                            );
-                        })
-                        .log_err();
-                    }
-                },
-            ))
-            .child(self.section_header("Cursor", cx))
-            .child(self.enum_row(
-                window,
-                cx,
-                "Cursor shape",
-                "The shape of the terminal cursor.",
-                cursor_shape,
-                vec![
-                    draft_setting_option(
-                        "block",
-                        page.clone(),
-                        DirtySetting::CursorShape,
-                        |settings| settings.cursor_shape = CursorShape::Block,
-                    ),
-                    draft_setting_option(
-                        "underline",
-                        page.clone(),
-                        DirtySetting::CursorShape,
-                        |settings| settings.cursor_shape = CursorShape::Underline,
-                    ),
-                    draft_setting_option(
-                        "bar",
-                        page.clone(),
-                        DirtySetting::CursorShape,
-                        |settings| settings.cursor_shape = CursorShape::Bar,
-                    ),
-                    draft_setting_option(
-                        "hollow",
-                        page.clone(),
-                        DirtySetting::CursorShape,
-                        |settings| settings.cursor_shape = CursorShape::Hollow,
-                    ),
-                ],
-            ))
-            .child(self.enum_row(
-                window,
-                cx,
-                "Cursor blinking",
-                "Controls the actual cursor blink animation for each terminal pane.",
-                blinking.to_string(),
-                vec![
-                    draft_setting_option("on", page.clone(), DirtySetting::Blinking, |settings| {
-                        settings.blinking = settings::TerminalBlink::On
-                    }),
-                    draft_setting_option("off", page.clone(), DirtySetting::Blinking, |settings| {
-                        settings.blinking = settings::TerminalBlink::Off
-                    }),
-                    draft_setting_option(
-                        "terminal-controlled",
-                        page.clone(),
-                        DirtySetting::Blinking,
-                        |settings| settings.blinking = settings::TerminalBlink::TerminalControlled,
-                    ),
-                ],
-            ))
-            .child(self.section_header("Behavior", cx))
-            .child(self.toggle_row(cx,
-                "Option as meta",
-                "Use the option key as the meta key.",
-                settings.option_as_meta,
-                {
-                    let page = page.clone();
-                    move |cx| {
-                        page.update(cx, |this, cx| {
-                            let next = !this.draft_settings.option_as_meta;
-                            this.update_draft(
-                                DirtySetting::OptionAsMeta,
-                                |settings| settings.option_as_meta = next,
-                                cx,
-                            );
-                        })
-                        .log_err();
-                    }
-                },
-            ))
-            .child(self.toggle_row(cx,
-                "Copy on select",
-                "Automatically copy selected text to the clipboard.",
-                settings.copy_on_select,
-                {
-                    let page = page.clone();
-                    move |cx| {
-                        page.update(cx, |this, cx| {
-                            let next = !this.draft_settings.copy_on_select;
-                            this.update_draft(
-                                DirtySetting::CopyOnSelect,
-                                |settings| settings.copy_on_select = next,
-                                cx,
-                            );
-                        })
-                        .log_err();
-                    }
-                },
-            ))
-            .child(self.toggle_row(cx,
-                "Keep selection on copy",
-                "Keep a terminal selection after it is copied manually.",
-                settings.keep_selection_on_copy,
-                {
-                    let page = page.clone();
-                    move |cx| {
-                        page.update(cx, |this, cx| {
-                            let next = !this.draft_settings.keep_selection_on_copy;
-                            this.update_draft(
-                                DirtySetting::KeepSelectionOnCopy,
-                                |settings| settings.keep_selection_on_copy = next,
-                                cx,
-                            );
-                        })
-                        .log_err();
-                    }
-                },
-            ))
-            .child(self.toggle_row(cx,
-                "Open links in mouse mode",
-                "Allow Command-click links while an application receives mouse input.",
-                settings.open_links_in_mouse_mode,
-                {
-                    let page = page.clone();
-                    move |cx| {
-                        page.update(cx, |this, cx| {
-                            let next = !this.draft_settings.open_links_in_mouse_mode;
-                            this.update_draft(
-                                DirtySetting::OpenLinksInMouseMode,
-                                |settings| settings.open_links_in_mouse_mode = next,
-                                cx,
-                            );
-                        })
-                        .log_err();
-                    }
-                },
-            ))
-            .child(self.enum_row(
-                window,
-                cx,
-                "Alternate scroll",
-                "Convert scroll events to key presses in the alternate screen.",
-                alternate_scroll,
-                vec![
-                    draft_setting_option(
-                        "on",
-                        page.clone(),
-                        DirtySetting::AlternateScroll,
-                        |settings| settings.alternate_scroll = settings::AlternateScroll::On,
-                    ),
-                    draft_setting_option(
-                        "off",
-                        page.clone(),
-                        DirtySetting::AlternateScroll,
-                        |settings| settings.alternate_scroll = settings::AlternateScroll::Off,
-                    ),
-                ],
-            ))
-            .child(self.enum_row(
-                window,
-                cx,
-                "Bell",
-                "What to do when the BEL character is printed. The standalone default is off.",
-                bell,
-                vec![
-                    draft_setting_option("system", page.clone(), DirtySetting::Bell, |settings| {
-                        settings.bell = settings::TerminalBell::System
-                    }),
-                    draft_setting_option("off", page.clone(), DirtySetting::Bell, |settings| {
-                        settings.bell = settings::TerminalBell::Off
-                    }),
-                ],
-            ))
-            .child(self.section_header("File transfer", cx))
-            .child(self.row(language::current(cx),
-                "Download directory",
-                "Where received files are saved. Leave blank to choose a directory for each download.",
-                self.text_input(
-                    "transfer-download-directory-input",
-                    EditableField::DownloadDirectory,
-                    download_directory.clone(),
-                    "e.g. /Users/name/Downloads",
+                .child(self.number_row(
                     cx,
-                ),
-            ))
-            .child(self.toggle_row(cx,
-                "Confirm download location",
-                "Ask where each download should be saved. When disabled, the configured directory is used without prompting.",
-                transfer_settings.confirm_before_download,
-                {
-                    let page = page.clone();
-                    move |cx| {
-                        page.update(cx, |this, cx| {
-                            let next = !this
-                                .draft_settings
-                                .transfer
-                                .as_ref()
-                                .is_none_or(|transfer| transfer.confirm_before_download);
-                            this.update_draft(
-                                DirtySetting::ConfirmBeforeDownload,
-                                |settings| {
-                                    settings
-                                        .transfer
-                                        .get_or_insert_with(Default::default)
-                                        .confirm_before_download = next;
-                                },
-                                cx,
-                            );
-                        })
-                        .log_err();
-                    }
-                },
-            ))
-            .child(self.number_row(
-                cx,
-                "Transfer notification timeout",
-                "Seconds before a finished transfer notification closes. Set to 0 to keep it open.",
-                localized_format!(locale, "{} s", "{} 秒", transfer_settings.notification_timeout_secs),
-                {
-                    let page = page.clone();
-                    move |cx, delta| {
-                        page.update(cx, |this, cx| {
-                            this.update_draft(
-                                DirtySetting::TransferNotificationTimeout,
-                                |settings| {
-                                    let transfer = settings.transfer.get_or_insert_with(Default::default);
-                                    transfer.notification_timeout_secs = if delta < 0.0 {
-                                        transfer.notification_timeout_secs.saturating_sub(1)
-                                    } else {
-                                        transfer.notification_timeout_secs.saturating_add(1)
+                    "font-weight",
+                    "font-weight-description",
+                    font_weight.map_or_else(
+                        || locale.text("default-font-weight").to_string(),
+                        |value| format!("{value:.0}"),
+                    ),
+                    {
+                        let page = page.clone();
+                        move |cx, delta| {
+                            page.update(cx, |this, cx| {
+                                let current = this
+                                    .draft_settings
+                                    .font_weight
+                                    .map(|weight| weight.0)
+                                    .unwrap_or(400.0);
+                                this.update_draft(
+                                    DirtySetting::FontWeight,
+                                    |settings| {
+                                        settings.font_weight = Some(gpui::FontWeight(
+                                            adjust_bounded(current, delta * 100.0, 100.0, 900.0),
+                                        ));
+                                    },
+                                    cx,
+                                );
+                            })
+                            .log_err();
+                        }
+                    },
+                ))
+                .child(self.enum_row(
+                    window,
+                    cx,
+                    "line-height",
+                    "line-height-description",
+                    line_height,
+                    vec![
+                        draft_setting_option(
+                            "standard",
+                            page.clone(),
+                            DirtySetting::LineHeight,
+                            |settings| {
+                                settings.line_height = settings::TerminalLineHeight::Standard
+                            },
+                        ),
+                        draft_setting_option(
+                            "comfortable",
+                            page.clone(),
+                            DirtySetting::LineHeight,
+                            |settings| {
+                                settings.line_height = settings::TerminalLineHeight::Comfortable
+                            },
+                        ),
+                        draft_setting_option(
+                            "custom",
+                            page.clone(),
+                            DirtySetting::LineHeight,
+                            |settings| {
+                                settings.line_height = settings::TerminalLineHeight::Custom(1.5)
+                            },
+                        ),
+                    ],
+                ))
+                .when_some(line_height_custom, |content, value| {
+                    content.child(self.number_row(
+                        cx,
+                        "custom-line-height",
+                        "custom-line-height-description",
+                        format!("{value:.2}"),
+                        {
+                            let page = page.clone();
+                            move |cx, delta| {
+                                page.update(cx, |this, cx| {
+                                    let current = match this.draft_settings.line_height {
+                                        settings::TerminalLineHeight::Custom(value) => value,
+                                        _ => 1.5,
                                     };
-                                },
-                                cx,
-                            );
-                        })
-                        .log_err();
-                    }
-                },
-            ))
-            .child(self.section_header("Shell and environment", cx))
-            .child(self.render_shell_form(window, cx))
-            .child(self.row(language::current(cx),
-                "Environment variables",
-                "Variables are validated and apply only to newly created terminals and panes.",
-                div().into_any_element(),
-            ))
-            .child(self.render_environment_editor(cx))
-            .child(self.render_working_directory_form(window, cx))
-            .child(self.enum_row(
-                window,
-                cx,
-                "Open from file manager",
-                "Open directories in a new window or a new tab in the most recently active terminal window.",
-                match settings.file_manager_open_mode {
-                    settings::FileManagerOpenMode::NewWindow => "New window".to_string(),
-                    settings::FileManagerOpenMode::NewTab => "New tab".to_string(),
-                },
-                vec![
-                    draft_setting_option(
-                        "New window",
-                        page.clone(),
-                        DirtySetting::FileManagerOpenMode,
-                        |settings| settings.file_manager_open_mode = settings::FileManagerOpenMode::NewWindow,
-                    ),
-                    draft_setting_option(
-                        "New tab",
-                        page.clone(),
-                        DirtySetting::FileManagerOpenMode,
-                        |settings| settings.file_manager_open_mode = settings::FileManagerOpenMode::NewTab,
-                    ),
-                ],
-            ))
-            .child(self.section_header("Input and scroll", cx))
-            .child(self.number_row(
-                cx,
-                "Scroll multiplier",
-                "The multiplier for scrolling with the mouse wheel.",
-                format!("{:.2}x", settings.scroll_multiplier),
-                {
-                    let page = page.clone();
-                    move |cx, delta| {
-                        page.update(cx, |this, cx| {
-                            let next = adjust_bounded(
-                                this.draft_settings.scroll_multiplier,
-                                delta,
-                                0.1,
-                                f32::MAX,
-                            );
-                            this.update_draft(
-                                DirtySetting::ScrollMultiplier,
-                                |settings| settings.scroll_multiplier = next,
-                                cx,
-                            );
-                        })
-                        .log_err();
-                    }
-                },
-            ))
-            .child(
-                self.number_row(
+                                    this.update_draft(
+                                        DirtySetting::LineHeight,
+                                        |settings| {
+                                            settings.line_height =
+                                                settings::TerminalLineHeight::Custom(
+                                                    adjust_bounded(
+                                                        current,
+                                                        delta * 0.1,
+                                                        1.0,
+                                                        f32::MAX,
+                                                    ),
+                                                );
+                                        },
+                                        cx,
+                                    );
+                                })
+                                .log_err();
+                            }
+                        },
+                    ))
+                })
+                .child(self.number_row(
                     cx,
-                    "Max scrollback lines",
-                    "The maximum number of lines to keep in scrollback for newly created terminals and panes.",
-                    settings
-                        .max_scroll_history_lines
-                        .map_or_else(|| locale.text("10,000 (default)").to_string(), |value| value.to_string()),
+                    "minimum-contrast",
+                    "apca-minimum-contrast-from-0-to-106",
+                    format!("{:.0}", settings.minimum_contrast),
+                    {
+                        let page = page.clone();
+                        move |cx, delta| {
+                            page.update(cx, |this, cx| {
+                                let next = adjust_bounded(
+                                    this.draft_settings.minimum_contrast,
+                                    delta,
+                                    0.0,
+                                    106.0,
+                                );
+                                this.update_draft(
+                                    DirtySetting::MinimumContrast,
+                                    |settings| settings.minimum_contrast = next,
+                                    cx,
+                                );
+                            })
+                            .log_err();
+                        }
+                    },
+                ))
+                .child(self.section_header("cursor", cx))
+                .child(self.enum_row(
+                    window,
+                    cx,
+                    "cursor-shape",
+                    "the-shape-of-the-terminal-cursor",
+                    cursor_shape,
+                    vec![
+                        draft_setting_option(
+                            "block",
+                            page.clone(),
+                            DirtySetting::CursorShape,
+                            |settings| settings.cursor_shape = CursorShape::Block,
+                        ),
+                        draft_setting_option(
+                            "underline",
+                            page.clone(),
+                            DirtySetting::CursorShape,
+                            |settings| settings.cursor_shape = CursorShape::Underline,
+                        ),
+                        draft_setting_option(
+                            "bar",
+                            page.clone(),
+                            DirtySetting::CursorShape,
+                            |settings| settings.cursor_shape = CursorShape::Bar,
+                        ),
+                        draft_setting_option(
+                            "hollow",
+                            page.clone(),
+                            DirtySetting::CursorShape,
+                            |settings| settings.cursor_shape = CursorShape::Hollow,
+                        ),
+                    ],
+                ))
+                .child(self.enum_row(
+                    window,
+                    cx,
+                    "cursor-blinking",
+                    "cursor-blinking-description",
+                    blinking.to_string(),
+                    vec![
+                        draft_setting_option(
+                            "on",
+                            page.clone(),
+                            DirtySetting::Blinking,
+                            |settings| settings.blinking = settings::TerminalBlink::On,
+                        ),
+                        draft_setting_option(
+                            "off",
+                            page.clone(),
+                            DirtySetting::Blinking,
+                            |settings| settings.blinking = settings::TerminalBlink::Off,
+                        ),
+                        draft_setting_option(
+                            "terminal-controlled",
+                            page.clone(),
+                            DirtySetting::Blinking,
+                            |settings| {
+                                settings.blinking = settings::TerminalBlink::TerminalControlled
+                            },
+                        ),
+                    ],
+                ))
+                .child(self.section_header("behavior", cx))
+                .child(self.toggle_row(
+                    cx,
+                    "option-as-meta",
+                    "use-the-option-key-as-the-meta-key",
+                    settings.option_as_meta,
+                    {
+                        let page = page.clone();
+                        move |cx| {
+                            page.update(cx, |this, cx| {
+                                let next = !this.draft_settings.option_as_meta;
+                                this.update_draft(
+                                    DirtySetting::OptionAsMeta,
+                                    |settings| settings.option_as_meta = next,
+                                    cx,
+                                );
+                            })
+                            .log_err();
+                        }
+                    },
+                ))
+                .child(self.toggle_row(
+                    cx,
+                    "copy-on-select",
+                    "copy-on-select-description",
+                    settings.copy_on_select,
+                    {
+                        let page = page.clone();
+                        move |cx| {
+                            page.update(cx, |this, cx| {
+                                let next = !this.draft_settings.copy_on_select;
+                                this.update_draft(
+                                    DirtySetting::CopyOnSelect,
+                                    |settings| settings.copy_on_select = next,
+                                    cx,
+                                );
+                            })
+                            .log_err();
+                        }
+                    },
+                ))
+                .child(self.toggle_row(
+                    cx,
+                    "keep-selection-on-copy",
+                    "keep-selection-on-copy-description",
+                    settings.keep_selection_on_copy,
+                    {
+                        let page = page.clone();
+                        move |cx| {
+                            page.update(cx, |this, cx| {
+                                let next = !this.draft_settings.keep_selection_on_copy;
+                                this.update_draft(
+                                    DirtySetting::KeepSelectionOnCopy,
+                                    |settings| settings.keep_selection_on_copy = next,
+                                    cx,
+                                );
+                            })
+                            .log_err();
+                        }
+                    },
+                ))
+                .child(self.toggle_row(
+                    cx,
+                    "open-links-in-mouse-mode",
+                    "open-links-in-mouse-mode-description",
+                    settings.open_links_in_mouse_mode,
+                    {
+                        let page = page.clone();
+                        move |cx| {
+                            page.update(cx, |this, cx| {
+                                let next = !this.draft_settings.open_links_in_mouse_mode;
+                                this.update_draft(
+                                    DirtySetting::OpenLinksInMouseMode,
+                                    |settings| settings.open_links_in_mouse_mode = next,
+                                    cx,
+                                );
+                            })
+                            .log_err();
+                        }
+                    },
+                ))
+                .child(self.enum_row(
+                    window,
+                    cx,
+                    "alternate-scroll",
+                    "alternate-scroll-description",
+                    alternate_scroll,
+                    vec![
+                        draft_setting_option(
+                            "on",
+                            page.clone(),
+                            DirtySetting::AlternateScroll,
+                            |settings| settings.alternate_scroll = settings::AlternateScroll::On,
+                        ),
+                        draft_setting_option(
+                            "off",
+                            page.clone(),
+                            DirtySetting::AlternateScroll,
+                            |settings| settings.alternate_scroll = settings::AlternateScroll::Off,
+                        ),
+                    ],
+                ))
+                .child(self.enum_row(
+                    window,
+                    cx,
+                    "bell",
+                    "bell-description",
+                    bell,
+                    vec![
+                        draft_setting_option(
+                            "system",
+                            page.clone(),
+                            DirtySetting::Bell,
+                            |settings| settings.bell = settings::TerminalBell::System,
+                        ),
+                        draft_setting_option("off", page.clone(), DirtySetting::Bell, |settings| {
+                            settings.bell = settings::TerminalBell::Off
+                        }),
+                    ],
+                ))
+                .child(self.section_header("file-transfer", cx))
+                .child(self.row(
+                    language::current(cx),
+                    "download-directory",
+                    "download-directory-description",
+                    self.text_input(
+                        "transfer-download-directory-input",
+                        EditableField::DownloadDirectory,
+                        download_directory.clone(),
+                        "download-directory-placeholder",
+                        cx,
+                    ),
+                ))
+                .child(self.toggle_row(
+                    cx,
+                    "confirm-download-location",
+                    "confirm-download-location-description",
+                    transfer_settings.confirm_before_download,
+                    {
+                        let page = page.clone();
+                        move |cx| {
+                            page.update(cx, |this, cx| {
+                                let next = !this
+                                    .draft_settings
+                                    .transfer
+                                    .as_ref()
+                                    .is_none_or(|transfer| transfer.confirm_before_download);
+                                this.update_draft(
+                                    DirtySetting::ConfirmBeforeDownload,
+                                    |settings| {
+                                        settings
+                                            .transfer
+                                            .get_or_insert_with(Default::default)
+                                            .confirm_before_download = next;
+                                    },
+                                    cx,
+                                );
+                            })
+                            .log_err();
+                        }
+                    },
+                ))
+                .child(self.number_row(
+                    cx,
+                    "transfer-notification-timeout",
+                    "transfer-notification-timeout-description",
+                    localized_format!(
+                        locale,
+                        "transfer-timeout-seconds",
+                        seconds = transfer_settings.notification_timeout_secs
+                    ),
+                    {
+                        let page = page.clone();
+                        move |cx, delta| {
+                            page.update(cx, |this, cx| {
+                                this.update_draft(
+                                    DirtySetting::TransferNotificationTimeout,
+                                    |settings| {
+                                        let transfer =
+                                            settings.transfer.get_or_insert_with(Default::default);
+                                        transfer.notification_timeout_secs = if delta < 0.0 {
+                                            transfer.notification_timeout_secs.saturating_sub(1)
+                                        } else {
+                                            transfer.notification_timeout_secs.saturating_add(1)
+                                        };
+                                    },
+                                    cx,
+                                );
+                            })
+                            .log_err();
+                        }
+                    },
+                ))
+                .child(self.section_header("shell-and-environment", cx))
+                .child(self.render_shell_form(window, cx))
+                .child(self.row(
+                    language::current(cx),
+                    "environment-variables",
+                    "environment-variables-description",
+                    div().into_any_element(),
+                ))
+                .child(self.render_environment_editor(cx))
+                .child(self.render_working_directory_form(window, cx))
+                .child(self.enum_row(
+                    window,
+                    cx,
+                    "open-from-file-manager",
+                    "open-from-file-manager-description",
+                    match settings.file_manager_open_mode {
+                        settings::FileManagerOpenMode::NewWindow => {
+                            "file-manager-new-window".to_string()
+                        }
+                        settings::FileManagerOpenMode::NewTab => "file-manager-new-tab".to_string(),
+                    },
+                    vec![
+                        draft_setting_option(
+                            "file-manager-new-window",
+                            page.clone(),
+                            DirtySetting::FileManagerOpenMode,
+                            |settings| {
+                                settings.file_manager_open_mode =
+                                    settings::FileManagerOpenMode::NewWindow
+                            },
+                        ),
+                        draft_setting_option(
+                            "file-manager-new-tab",
+                            page.clone(),
+                            DirtySetting::FileManagerOpenMode,
+                            |settings| {
+                                settings.file_manager_open_mode =
+                                    settings::FileManagerOpenMode::NewTab
+                            },
+                        ),
+                    ],
+                ))
+                .child(self.section_header("input-and-scroll", cx))
+                .child(self.number_row(
+                    cx,
+                    "scroll-multiplier",
+                    "scroll-multiplier-description",
+                    format!("{:.2}x", settings.scroll_multiplier),
+                    {
+                        let page = page.clone();
+                        move |cx, delta| {
+                            page.update(cx, |this, cx| {
+                                let next = adjust_bounded(
+                                    this.draft_settings.scroll_multiplier,
+                                    delta,
+                                    0.1,
+                                    f32::MAX,
+                                );
+                                this.update_draft(
+                                    DirtySetting::ScrollMultiplier,
+                                    |settings| settings.scroll_multiplier = next,
+                                    cx,
+                                );
+                            })
+                            .log_err();
+                        }
+                    },
+                ))
+                .child(self.number_row(
+                    cx,
+                    "max-scrollback-lines",
+                    "max-scrollback-lines-description",
+                    settings.max_scroll_history_lines.map_or_else(
+                        || locale.text("default-scrollback-lines").to_string(),
+                        |value| value.to_string(),
+                    ),
                     {
                         let page = page.clone();
                         move |cx, delta| {
@@ -1325,62 +1374,62 @@ impl Render for SettingsPage {
                             .log_err();
                         }
                     },
-                ),
-            )
-            .child(self.enum_row(
-                window,
-                cx,
-                "Scrollbar",
-                "Choose when the terminal scrollbar is visible.",
-                scrollbar_show,
-                vec![
-                    draft_setting_option(
-                        "auto",
-                        page.clone(),
-                        DirtySetting::Scrollbar,
-                        |settings| {
-                            settings.scrollbar.show = Some(settings::ShowScrollbar::Auto);
-                        },
-                    ),
-                    draft_setting_option(
-                        "system",
-                        page.clone(),
-                        DirtySetting::Scrollbar,
-                        |settings| {
-                            settings.scrollbar.show = Some(settings::ShowScrollbar::System);
-                        },
-                    ),
-                    draft_setting_option(
-                        "always",
-                        page.clone(),
-                        DirtySetting::Scrollbar,
-                        |settings| {
-                            settings.scrollbar.show = Some(settings::ShowScrollbar::Always);
-                        },
-                    ),
-                    draft_setting_option(
-                        "never",
-                        page.clone(),
-                        DirtySetting::Scrollbar,
-                        |settings| {
-                            settings.scrollbar.show = Some(settings::ShowScrollbar::Never);
-                        },
-                    ),
-                ],
-            ))
-            .child(self.section_header("Reset", cx))
-            .child(self.row(language::current(cx),
-                "Reset Terminal Defaults",
-                "Restore terminal defaults in this draft. Click Save to persist the changes.",
-                self.action_button(
-                    "reset-terminal-defaults",
-                    "Reset Terminal Defaults",
-                    self.pending_write.is_none(),
-                    |this, _, _, cx| this.reset_terminal_defaults(cx),
+                ))
+                .child(self.enum_row(
+                    window,
                     cx,
-                ),
-            ))
-            .into_any_element()
+                    "scrollbar",
+                    "scrollbar-description",
+                    scrollbar_show,
+                    vec![
+                        draft_setting_option(
+                            "auto",
+                            page.clone(),
+                            DirtySetting::Scrollbar,
+                            |settings| {
+                                settings.scrollbar.show = Some(settings::ShowScrollbar::Auto);
+                            },
+                        ),
+                        draft_setting_option(
+                            "system",
+                            page.clone(),
+                            DirtySetting::Scrollbar,
+                            |settings| {
+                                settings.scrollbar.show = Some(settings::ShowScrollbar::System);
+                            },
+                        ),
+                        draft_setting_option(
+                            "always",
+                            page.clone(),
+                            DirtySetting::Scrollbar,
+                            |settings| {
+                                settings.scrollbar.show = Some(settings::ShowScrollbar::Always);
+                            },
+                        ),
+                        draft_setting_option(
+                            "never",
+                            page.clone(),
+                            DirtySetting::Scrollbar,
+                            |settings| {
+                                settings.scrollbar.show = Some(settings::ShowScrollbar::Never);
+                            },
+                        ),
+                    ],
+                ))
+                .child(self.section_header("reset", cx))
+                .child(self.row(
+                    language::current(cx),
+                    "reset-terminal-defaults",
+                    "reset-terminal-defaults-description",
+                    self.action_button(
+                        "reset-terminal-defaults",
+                        "reset-terminal-defaults",
+                        self.pending_write.is_none(),
+                        |this, _, _, cx| this.reset_terminal_defaults(cx),
+                        cx,
+                    ),
+                ))
+                .into_any_element()
         };
 
         window_chrome::client_side_decorations(
@@ -1512,27 +1561,24 @@ impl SettingsPage {
                             .gap_1()
                             .child(Label::new("ZedTerm").size(LabelSize::Large))
                             .child(
-                                Label::new(language::text(
-                                    cx,
-                                    "A standalone terminal application based on Zed's terminal.",
-                                ))
-                                .color(Color::Muted),
+                                Label::new(language::text(cx, "about-description"))
+                                    .color(Color::Muted),
                             ),
                     ),
             )
             .child(self.row(
                 language::current(cx),
-                "Version",
-                "The version of ZedTerm currently running.",
+                "version",
+                "about-version-description",
                 Label::new(env!("CARGO_PKG_VERSION")).into_any_element(),
             ))
             .child(
                 self.row(
                     language::current(cx),
-                    "Repository",
-                    "View the ZedTerm source code.",
+                    "repository",
+                    "about-repository-description",
                     ButtonLink::new(
-                        language::text(cx, "GitHub repository"),
+                        language::text(cx, "github-repository"),
                         "https://github.com/ruanimal/zed-term",
                     )
                     .into_any_element(),
@@ -1540,8 +1586,8 @@ impl SettingsPage {
             )
             .child(self.row(
                 language::current(cx),
-                "License",
-                "ZedTerm is distributed under the GPL-3.0-or-later license.",
+                "license",
+                "about-license-description",
                 Label::new("GPL-3.0-or-later").into_any_element(),
             ))
             .into_any_element()
@@ -1560,11 +1606,11 @@ impl SettingsPage {
         let save_label = language::text(
             cx,
             if saving {
-                "Saving…"
+                "saving"
             } else if self.save_status == SaveStatus::Succeeded && !has_unsaved_changes {
-                "Saved"
+                "saved"
             } else {
-                "Save"
+                "save"
             },
         )
         .to_string();
@@ -1583,7 +1629,7 @@ impl SettingsPage {
             .gap_2()
             .child(self.title_bar_action_button(
                 "discard-settings",
-                language::text(cx, "Discard").to_string(),
+                language::text(cx, "discard").to_string(),
                 has_unsaved_changes && !saving,
                 false,
                 false,

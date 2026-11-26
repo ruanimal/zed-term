@@ -35,6 +35,7 @@ parking_lot.workspace = true
 paths.workspace = true
 regex.workspace = true
 reqwest_client.workspace = true
+rust-i18n = "4.2.2"
 schemars.workspace = true
 semver.workspace = true
 serde.workspace = true

@@ -205,7 +205,7 @@ impl TerminalTab {
     pub fn title(&self, cx: &App) -> String {
         self.terminal
             .read(cx)
-            .title_with_fallback(false, language::text(cx, "Terminal"))
+            .title_with_fallback(false, &language::text(cx, "terminal"))
     }
 
     pub(crate) fn has_bell(&self) -> bool {

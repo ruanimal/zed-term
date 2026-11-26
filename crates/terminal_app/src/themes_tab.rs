@@ -387,7 +387,7 @@ impl ThemesTab {
         // The installed set is read from disk immediately so rows can render
         // their installed state before the network answers.
         self.refresh_installed();
-        self.set_status("Loading theme extensions…", StatusKind::Info);
+        self.set_status("loading-theme-extensions", StatusKind::Info);
         cx.notify();
 
         // The catalog search box filters locally, so the full theme list is
@@ -417,11 +417,7 @@ impl ThemesTab {
                 let count = catalog.len();
                 self.set_catalog(catalog);
                 self.set_status(
-                    localized_format!(
-                        locale,
-                        "Loaded {count} theme extensions.",
-                        "已加载 {count} 个主题扩展。"
-                    ),
+                    localized_format!(locale, "theme-extensions-loaded", count = count,),
                     StatusKind::Success,
                 );
             }
@@ -429,11 +425,7 @@ impl ThemesTab {
                 // An empty catalog would hide the extensions already on disk,
                 // so the cached rows are kept and only the status changes.
                 self.set_status(
-                    localized_format!(
-                        locale,
-                        "Could not load theme extensions: {error}",
-                        "无法加载主题扩展：{error}"
-                    ),
+                    localized_format!(locale, "load-theme-extensions-error", error = error,),
                     StatusKind::Error,
                 );
             }
@@ -471,8 +463,8 @@ impl ThemesTab {
         self.set_status(
             localized_format!(
                 language::current(cx),
-                "Installing {extension_id}…",
-                "正在安装 {extension_id}…"
+                "installing-extension",
+                extension_id = extension_id,
             ),
             StatusKind::Info,
         );
@@ -507,8 +499,8 @@ impl ThemesTab {
         self.set_status(
             localized_format!(
                 language::current(cx),
-                "Removing {extension_id}…",
-                "正在卸载 {extension_id}…"
+                "removing-extension",
+                extension_id = extension_id,
             ),
             StatusKind::Info,
         );
@@ -553,18 +545,19 @@ impl ThemesTab {
                     if version.is_empty() {
                         localized_format!(
                             locale,
-                            "Installed {extension_id}.",
-                            "已安装 {extension_id}。"
+                            "extension-installed",
+                            extension_id = extension_id,
                         )
                     } else {
                         localized_format!(
                             locale,
-                            "Installed {extension_id} {version}.",
-                            "已安装 {extension_id} {version}。"
+                            "extension-version-installed",
+                            extension_id = extension_id,
+                            version = version,
                         )
                     }
                 } else {
-                    localized_format!(locale, "Removed {extension_id}.", "已卸载 {extension_id}。")
+                    localized_format!(locale, "extension-removed", extension_id = extension_id)
                 };
                 self.set_status(message, StatusKind::Success);
             }
@@ -572,14 +565,16 @@ impl ThemesTab {
                 let message = if action == "install" {
                     localized_format!(
                         locale,
-                        "Could not install {extension_id}: {error}",
-                        "无法安装 {extension_id}：{error}"
+                        "install-extension-error",
+                        extension_id = extension_id,
+                        error = error,
                     )
                 } else {
                     localized_format!(
                         locale,
-                        "Could not remove {extension_id}: {error}",
-                        "无法卸载 {extension_id}：{error}"
+                        "remove-extension-error",
+                        extension_id = extension_id,
+                        error = error,
                     )
                 };
                 self.set_status(message, StatusKind::Error);
@@ -598,11 +593,11 @@ impl ThemesTab {
 
         if self.matches.is_empty() {
             let message = if self.busy == BusyState::Fetching {
-                "Loading theme extensions…"
+                "loading-theme-extensions"
             } else if self.rows.is_empty() {
-                "No theme extensions are available."
+                "no-theme-extensions-are-available"
             } else {
-                "No theme extensions match this search."
+                "no-matching-theme-extensions"
             };
             return v_flex()
                 .id("settings-themes-content")
@@ -679,8 +674,8 @@ impl ThemesTab {
                             .child(
                                 Label::new(localized_format!(
                                     language::current(cx),
-                                    "{installed_count} installed",
-                                    "已安装 {installed_count} 个"
+                                    "installed-extension-count",
+                                    installed_count = installed_count,
                                 ))
                                 .size(LabelSize::Small)
                                 .color(Color::Muted),
@@ -694,7 +689,7 @@ impl ThemesTab {
                                     .toggle_state(self.only_installed)
                                     .tooltip(Tooltip::text(language::text(
                                         cx,
-                                        "Show installed extensions only",
+                                        "show-installed-extensions-only",
                                     )))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.themes_tab.toggle_installed_filter(cx);
@@ -707,7 +702,7 @@ impl ThemesTab {
                                 .disabled(busy)
                                 .tooltip(Tooltip::text(language::text(
                                     cx,
-                                    "Reload the theme extension list",
+                                    "reload-the-theme-extension-list",
                                 )))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     let http_client = cx.http_client();
@@ -773,8 +768,8 @@ impl ThemesTab {
             badges = badges.child(
                 Label::new(localized_format!(
                     language::current(cx),
-                    "{theme_count} themes",
-                    "{theme_count} 个主题"
+                    "extension-theme-count",
+                    theme_count = theme_count,
                 ))
                 .size(LabelSize::Small)
                 .color(Color::Muted),
@@ -820,9 +815,9 @@ impl ThemesTab {
                 Label::new(language::text(
                     cx,
                     match self.busy {
-                        BusyState::Installing => "Installing…",
-                        BusyState::Uninstalling => "Removing…",
-                        BusyState::Fetching | BusyState::Idle => "Working…",
+                        BusyState::Installing => "installing-theme-extension",
+                        BusyState::Uninstalling => "removing-theme-extension",
+                        BusyState::Fetching | BusyState::Idle => "working",
                     },
                 ))
                 .size(LabelSize::Small)
@@ -842,7 +837,7 @@ impl ThemesTab {
                         .child(
                             Button::new(
                                 SharedString::from(format!("themes-update-{extension_id}")),
-                                language::text(cx, "Update"),
+                                language::text(cx, "update"),
                             )
                             .style(ButtonStyle::Filled)
                             .label_size(LabelSize::Small)
@@ -872,7 +867,7 @@ impl ThemesTab {
                         .child(
                             Button::new(
                                 SharedString::from(format!("themes-install-{extension_id}")),
-                                language::text(cx, "Install"),
+                                language::text(cx, "install"),
                             )
                             .style(ButtonStyle::Outlined)
                             .label_size(LabelSize::Small)
@@ -909,7 +904,7 @@ impl ThemesTab {
                             .disabled(any_busy)
                             .tooltip(Tooltip::text(language::text(
                                 cx,
-                                "Uninstall this theme extension",
+                                "uninstall-this-theme-extension",
                             )))
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {

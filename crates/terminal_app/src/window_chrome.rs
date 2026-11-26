@@ -130,10 +130,10 @@ where
     F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 {
     let (icon, label) = match button {
-        WindowButton::Minimize => (IconName::GenericMinimize, "Minimize"),
-        WindowButton::Maximize if is_maximized => (IconName::GenericRestore, "Restore"),
-        WindowButton::Maximize => (IconName::GenericMaximize, "Maximize"),
-        WindowButton::Close => (IconName::GenericClose, "Close"),
+        WindowButton::Minimize => (IconName::GenericMinimize, "minimize"),
+        WindowButton::Maximize if is_maximized => (IconName::GenericRestore, "restore"),
+        WindowButton::Maximize => (IconName::GenericMaximize, "maximize"),
+        WindowButton::Close => (IconName::GenericClose, "close"),
     };
 
     let label = locale.text(label);

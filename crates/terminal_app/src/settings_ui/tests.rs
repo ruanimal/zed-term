@@ -916,7 +916,7 @@ fn shell_validation_normalizes_program_and_rejects_invalid_text() {
     };
     assert_eq!(
         validate_shell_form(&empty_program),
-        Err("A custom shell program is required.".to_string())
+        Err("custom-shell-program-required".to_string())
     );
 
     let with_arguments = ShellForm {
@@ -935,24 +935,14 @@ fn shell_validation_normalizes_program_and_rejects_invalid_text() {
     );
 
     for (program, arguments, title_override, expected_error) in [
-        (
-            "/bin/sh\0",
-            Vec::new(),
-            "",
-            "A shell program cannot contain NUL.",
-        ),
+        ("/bin/sh\0", Vec::new(), "", "shell-program-nul"),
         (
             "/bin/sh",
             vec!["bad\0argument".to_string()],
             "",
-            "Shell arguments cannot contain NUL.",
+            "shell-argument-nul",
         ),
-        (
-            "/bin/sh",
-            Vec::new(),
-            "bad\0title",
-            "The title override cannot contain NUL.",
-        ),
+        ("/bin/sh", Vec::new(), "bad\0title", "shell-title-nul"),
     ] {
         let form = ShellForm {
             mode: ShellMode::WithArguments,
@@ -986,28 +976,28 @@ fn environment_validation_trims_keys_and_preserves_complete_values() {
                 key: "  ".to_string(),
                 value: String::new(),
             }],
-            "Environment variable names cannot be empty.",
+            "environment-variable-name-required",
         ),
         (
             vec![EnvironmentVariable {
                 key: "NAME=VALUE".to_string(),
                 value: String::new(),
             }],
-            "Environment variable names cannot contain `=`.",
+            "environment-variable-name-equals-sign",
         ),
         (
             vec![EnvironmentVariable {
                 key: "NA\0ME".to_string(),
                 value: String::new(),
             }],
-            "Environment variable names and values cannot contain NUL.",
+            "environment-variable-nul",
         ),
         (
             vec![EnvironmentVariable {
                 key: "NAME".to_string(),
                 value: "value\0".to_string(),
             }],
-            "Environment variable names and values cannot contain NUL.",
+            "environment-variable-nul",
         ),
         (
             vec![
@@ -1020,7 +1010,7 @@ fn environment_validation_trims_keys_and_preserves_complete_values() {
                     value: "second".to_string(),
                 },
             ],
-            "Environment variable names must be unique.",
+            "environment-variable-name-not-unique",
         ),
     ];
     for (entries, expected_error) in invalid_entries {
@@ -1077,7 +1067,7 @@ fn directory_access_preserves_errors_and_checks_directory_type() {
     };
     assert_eq!(
         validate_existing_directory(Path::new("/input/project"), &regular_file),
-        Err("The fixed working directory must be a directory.".to_string())
+        Err("fixed-directory-is-not-directory".to_string())
     );
 }
 
@@ -1302,7 +1292,7 @@ fn fixed_working_directories_normalize_and_validate_consistently(
             Some(&home_directory),
             &relative_access,
         ),
-        Err("A fixed working directory must be absolute or begin with `~/`.".to_string())
+        Err("fixed-directory-not-absolute".to_string())
     );
     assert!(relative_access.canonicalized_paths().is_empty());
     assert!(relative_access.directory_checks().is_empty());
@@ -1311,7 +1301,7 @@ fn fixed_working_directories_normalize_and_validate_consistently(
         RecordingFakeDirectoryAccess::existing_directory(PathBuf::from("/unused"));
     assert_eq!(
         validate_working_directory_form(&valid_form, None, &unavailable_home_access),
-        Err("The platform home directory is unavailable.".to_string())
+        Err("home-directory-unavailable".to_string())
     );
     assert!(unavailable_home_access.canonicalized_paths().is_empty());
     assert!(unavailable_home_access.directory_checks().is_empty());
@@ -1342,7 +1332,7 @@ fn fixed_working_directories_normalize_and_validate_consistently(
             Some(&home_directory),
             &non_directory_access,
         ),
-        Err("The fixed working directory must be a directory.".to_string())
+        Err("fixed-directory-is-not-directory".to_string())
     );
     assert_eq!(
         non_directory_access.canonicalized_paths(),
@@ -1680,21 +1670,21 @@ impl InvalidShellText {
             Self::TrimmedEmptyProgram {
                 mode: ShellMode::Program,
                 ..
-            } => "A custom shell program is required.",
+            } => "custom-shell-program-required",
             Self::TrimmedEmptyProgram {
                 mode: ShellMode::WithArguments,
                 ..
-            } => "A shell program is required.",
+            } => "shell-program-required",
             Self::NulProgram {
                 mode: ShellMode::Program,
                 ..
-            } => "A custom shell program cannot contain NUL.",
+            } => "custom-shell-program-nul",
             Self::NulProgram {
                 mode: ShellMode::WithArguments,
                 ..
-            } => "A shell program cannot contain NUL.",
-            Self::NulArgument { .. } => "Shell arguments cannot contain NUL.",
-            Self::NulTitle { .. } => "The title override cannot contain NUL.",
+            } => "shell-program-nul",
+            Self::NulArgument { .. } => "shell-argument-nul",
+            Self::NulTitle { .. } => "shell-title-nul",
             Self::TrimmedEmptyProgram {
                 mode: ShellMode::System,
                 ..
@@ -1831,12 +1821,10 @@ impl InvalidEnvironment {
 
     fn expected_error(&self) -> &'static str {
         match self {
-            Self::WhitespaceKey { .. } => "Environment variable names cannot be empty.",
-            Self::EqualsKey { .. } => "Environment variable names cannot contain `=`.",
-            Self::NulKey { .. } | Self::NulValue { .. } => {
-                "Environment variable names and values cannot contain NUL."
-            }
-            Self::TrimmedDuplicateKey { .. } => "Environment variable names must be unique.",
+            Self::WhitespaceKey { .. } => "environment-variable-name-required",
+            Self::EqualsKey { .. } => "environment-variable-name-equals-sign",
+            Self::NulKey { .. } | Self::NulValue { .. } => "environment-variable-nul",
+            Self::TrimmedDuplicateKey { .. } => "environment-variable-name-not-unique",
         }
     }
 }
@@ -2007,19 +1995,19 @@ fn reference_validate_environment(
     for (entry_key, entry_value) in entries {
         let key = entry_key.trim();
         if key.is_empty() {
-            return Err("Environment variable names cannot be empty.".to_string());
+            return Err("environment-variable-name-required".to_string());
         }
         if key.contains('=') {
-            return Err("Environment variable names cannot contain `=`.".to_string());
+            return Err("environment-variable-name-equals-sign".to_string());
         }
         if key.contains('\0') || entry_value.contains('\0') {
-            return Err("Environment variable names and values cannot contain NUL.".to_string());
+            return Err("environment-variable-nul".to_string());
         }
         if environment
             .insert(key.to_string(), entry_value.clone())
             .is_some()
         {
-            return Err("Environment variable names must be unique.".to_string());
+            return Err("environment-variable-name-not-unique".to_string());
         }
     }
     Ok(environment)
@@ -2482,9 +2470,9 @@ fn settings_tabs_fill_the_title_bar_height(cx: &mut gpui::TestAppContext) {
 
     let title_bar_height = window_chrome::TITLE_BAR_HEIGHT;
     let tab_selectors = [
-        ("Terminal", "settings-tab-Terminal"),
-        ("Keymap", "settings-tab-Keymap"),
-        ("Themes", "settings-tab-Themes"),
+        ("Terminal", "settings-tab-terminal"),
+        ("Keymap", "settings-tab-keymap"),
+        ("Themes", "settings-tab-themes"),
     ];
     for (label, selector) in tab_selectors {
         let bounds = cx
@@ -3117,13 +3105,13 @@ async fn display_language_saves_independently_of_terminal_defaults(cx: &mut gpui
         cx.set_global(store);
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         assert_eq!(language::current(cx), Locale::English);
-        assert_eq!(language::text(cx, "Settings"), "Settings");
+        assert_eq!(language::text(cx, "settings"), "Settings");
     });
     let (page, cx) = cx.add_window_view(|_, cx| clean_test_settings_page(cx));
     cx.simulate_resize(size(px(700.), px(700.)));
     cx.run_until_parked();
     let language_row = cx
-        .debug_bounds("setting-Display language")
+        .debug_bounds("setting-display-language")
         .expect("the display language row should be visible");
     cx.simulate_click(
         gpui::point(language_row.right() - px(60.), language_row.center().y),
@@ -3164,7 +3152,7 @@ async fn display_language_saves_independently_of_terminal_defaults(cx: &mut gpui
 
     cx.update(|_, cx| {
         assert_eq!(language::current(cx), Locale::SimplifiedChinese);
-        assert_eq!(language::text(cx, "Settings"), "设置");
+        assert_eq!(language::text(cx, "settings"), "设置");
         let mut reloaded_store = SettingsStore::test(cx);
         reloaded_store
             .set_user_settings(&updated, cx)
@@ -3199,7 +3187,7 @@ fn auto_display_language_can_be_selected_saved_and_reloaded(cx: &mut gpui::TestA
     cx.simulate_resize(size(px(700.), px(700.)));
     cx.run_until_parked();
     let language_row = cx
-        .debug_bounds("setting-Display language")
+        .debug_bounds("setting-display-language")
         .expect("the display language row should be visible");
     cx.simulate_click(
         gpui::point(language_row.right() - px(60.), language_row.center().y),
@@ -3375,7 +3363,7 @@ fn write_completion_is_revision_aware(
         assert_eq!(settings_page.save_status, SaveStatus::Succeeded);
         assert_eq!(
             settings_page.status_message.as_deref(),
-            Some("No settings changes to save.")
+            Some("no-settings-changes-to-save")
         );
 
         settings_page.update_draft(
@@ -3398,7 +3386,7 @@ fn write_completion_is_revision_aware(
         assert_eq!(settings_page.save_status, SaveStatus::Saving);
         assert_eq!(
             settings_page.status_message.as_deref(),
-            Some("Saving settings…")
+            Some("saving-settings")
         );
 
         settings_page.save_drafts(cx);
@@ -3513,7 +3501,7 @@ fn write_completion_is_revision_aware(
         );
         assert_eq!(
             settings_page.status_message.as_deref(),
-            Some("Settings saved. Additional changes remain.")
+            Some("settings-saved-with-pending-changes")
         );
 
         let draft_before_late_completion = settings_page.current_draft();
@@ -3706,7 +3694,7 @@ fn save_without_dirty_settings_does_not_start_a_write(cx: &mut gpui::TestAppCont
         assert_eq!(settings_page.save_status, SaveStatus::Succeeded);
         assert_eq!(
             settings_page.status_message.as_deref(),
-            Some("No settings changes to save.")
+            Some("no-settings-changes-to-save")
         );
     });
 }
@@ -3752,7 +3740,7 @@ fn matching_success_reloads_baseline_and_replays_newer_field_edits(cx: &mut gpui
         assert_eq!(settings_page.save_status, SaveStatus::Saving);
         assert_eq!(
             settings_page.status_message.as_deref(),
-            Some("Saving settings…")
+            Some("saving-settings")
         );
         operation_id
     });
@@ -3786,7 +3774,7 @@ fn matching_success_reloads_baseline_and_replays_newer_field_edits(cx: &mut gpui
         assert!(settings_page.pending_write.is_none());
         assert_eq!(
             settings_page.status_message.as_deref(),
-            Some("Settings saved. Additional changes remain.")
+            Some("settings-saved-with-pending-changes")
         );
     });
 }
@@ -3944,7 +3932,7 @@ fn reset_terminal_defaults_updates_draft_until_saved(cx: &mut gpui::TestAppConte
         assert_eq!(settings_page.save_status, SaveStatus::Succeeded);
         assert_eq!(
             settings_page.status_message.as_deref(),
-            Some("Settings saved.")
+            Some("settings-saved")
         );
     });
 }

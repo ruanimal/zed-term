@@ -515,7 +515,7 @@ impl Render for KeystrokeInput {
             .rounded_sm()
             .child(recording_pulse(Color::Error))
             .child(
-                Label::new(language::text(cx, "REC"))
+                Label::new(language::text(cx, "recording-indicator"))
                     .size(LabelSize::XSmall)
                     .weight(FontWeight::SEMIBOLD)
                     .color(Color::Error),
@@ -533,7 +533,7 @@ impl Render for KeystrokeInput {
             .rounded_sm()
             .child(recording_pulse(Color::Accent))
             .child(
-                Label::new(language::text(cx, "SEARCH"))
+                Label::new(language::text(cx, "searching-indicator"))
                     .size(LabelSize::XSmall)
                     .weight(FontWeight::SEMIBOLD)
                     .color(Color::Accent),
@@ -625,9 +625,9 @@ impl Render for KeystrokeInput {
                                             language::text(
                                                 cx,
                                                 if self.search {
-                                                    "Stop Searching"
+                                                    "stop-searching"
                                                 } else {
-                                                    "Stop Recording"
+                                                    "stop-recording"
                                                 },
                                             ),
                                             &StopRecording,
@@ -647,9 +647,9 @@ impl Render for KeystrokeInput {
                                             language::text(
                                                 cx,
                                                 if self.search {
-                                                    "Start Searching"
+                                                    "start-searching"
                                                 } else {
-                                                    "Start Recording"
+                                                    "start-recording"
                                                 },
                                             ),
                                             &StartRecording,
@@ -669,9 +669,9 @@ impl Render for KeystrokeInput {
                                 .shape(IconButtonShape::Square)
                                 .tooltip(move |_, cx| {
                                     Tooltip::with_meta(
-                                        language::text(cx, "Clear Keystrokes"),
+                                        language::text(cx, "clear-keystrokes"),
                                         Some(&ClearKeystrokes),
-                                        language::text(cx, "Hit it three times to execute"),
+                                        language::text(cx, "clear-keystrokes-confirmation-help"),
                                         cx,
                                     )
                                 })

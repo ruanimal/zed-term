@@ -2,6 +2,7 @@ use std::{env, error::Error, fs, path::PathBuf};
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=resources/windows/app-icon.ico");
+    println!("cargo:rerun-if-changed=locales");
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let manifest_dir = PathBuf::from(
