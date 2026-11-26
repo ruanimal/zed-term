@@ -389,6 +389,58 @@ fn watch_user_settings(cx: &mut App) {
     });
 }
 
+#[cfg(target_os = "macos")]
+struct NativeWindowAppearance(Option<gpui::WindowAppearance>);
+
+#[cfg(target_os = "macos")]
+impl Global for NativeWindowAppearance {}
+
+#[cfg(target_os = "macos")]
+fn follows_system_appearance(cx: &App) -> bool {
+    theme_settings::ThemeSettings::get_global(cx).theme.mode()
+        == Some(theme_settings::ThemeAppearanceMode::System)
+}
+
+#[cfg(target_os = "macos")]
+fn sync_native_window_appearance(cx: &mut App) {
+    let appearance = if follows_system_appearance(cx) {
+        None
+    } else {
+        Some(match theme::GlobalTheme::theme(cx).appearance {
+            theme::Appearance::Light => gpui::WindowAppearance::Light,
+            theme::Appearance::Dark => gpui::WindowAppearance::Dark,
+        })
+    };
+    let applied_appearance = cx
+        .try_global::<NativeWindowAppearance>()
+        .and_then(|state| state.0);
+    if applied_appearance != appearance {
+        cx.set_global(NativeWindowAppearance(appearance));
+        cx.set_window_appearance(appearance);
+    }
+    refresh_system_appearance(cx);
+}
+
+#[cfg(target_os = "macos")]
+fn refresh_system_appearance(cx: &mut App) {
+    if follows_system_appearance(cx) {
+        let appearance = cx.window_appearance().into();
+        if theme::SystemAppearance::global(cx).0 != appearance {
+            *theme::SystemAppearance::global_mut(cx) = theme::SystemAppearance(appearance);
+            theme_settings::reload_theme(cx);
+            theme_settings::reload_icon_theme(cx);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn observe_system_appearance(window: &gpui::Window, cx: &mut App) {
+    window
+        .observe_window_appearance(|_, cx| refresh_system_appearance(cx))
+        .detach();
+    refresh_system_appearance(cx);
+}
+
 /// Opens a fresh window with its own tab set. Activates the window shortly
 /// after opening so the macOS display link (which drives redraws) starts.
 pub fn open_new_window(cx: &mut App) {
@@ -492,6 +544,8 @@ fn create_terminal_window(
     let mut options = window_options(bounds);
     options.display_id = display_id;
     let handle = cx.open_window(options, |window, cx| {
+        #[cfg(target_os = "macos")]
+        observe_system_appearance(window, cx);
         let view = cx.new(|cx| {
             cx.observe_window_activation(window, |_, window, cx| {
                 if window.is_window_active() {
@@ -540,6 +594,13 @@ pub fn run(cx: &mut App, initial_directory: Option<std::path::PathBuf>) {
 
     #[cfg(target_os = "macos")]
     {
+        sync_native_window_appearance(cx);
+        cx.observe_global::<theme::GlobalTheme>(sync_native_window_appearance)
+            .detach();
+        // Switching to System can keep the same theme while clearing the override.
+        cx.observe_global::<SettingsStore>(sync_native_window_appearance)
+            .detach();
+
         // Dock menu actions have no active window to receive them after all windows close.
         cx.on_action(|_: &NewWindow, cx| open_new_window(cx));
         let mut locale = language::current(cx);

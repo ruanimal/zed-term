@@ -459,33 +459,111 @@ impl SettingsPage {
         )
     }
 
+    fn theme_mode_row(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let label = |mode| match mode {
+            ThemeAppearanceMode::System => "theme-mode-system",
+            ThemeAppearanceMode::Light => "theme-mode-light",
+            ThemeAppearanceMode::Dark => "theme-mode-dark",
+        };
+        let page = cx.weak_entity();
+        let modes = [
+            ThemeAppearanceMode::System,
+            ThemeAppearanceMode::Light,
+            ThemeAppearanceMode::Dark,
+        ];
+        let options = modes
+            .into_iter()
+            .map(|mode| {
+                let page = page.clone();
+                opt(label(mode), move |_, cx| {
+                    page.update(cx, |this, cx| this.select_theme_mode(mode, cx))
+                        .log_err();
+                })
+            })
+            .collect();
+        self.enum_row(
+            window,
+            cx,
+            "theme-mode",
+            "theme-mode-description",
+            label(self.theme_mode(cx)).to_owned(),
+            options,
+        )
+    }
+
+    fn theme_rows(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mode = self.theme_mode(cx);
+        let mut themes = ThemeRegistry::global(cx).list();
+        themes.sort_by(|left, right| left.name.cmp(&right.name));
+        let mut rows = v_flex().w_full();
+        for appearance in [theme::Appearance::Light, theme::Appearance::Dark] {
+            if mode != ThemeAppearanceMode::System
+                && mode != theme_settings::appearance_to_mode(appearance)
+            {
+                continue;
+            }
+            let current = match &self.theme_selection {
+                ThemeSelection::Static(name) => name,
+                ThemeSelection::Dynamic { light, dark, .. } => match appearance {
+                    theme::Appearance::Light => light,
+                    theme::Appearance::Dark => dark,
+                },
+            };
+            rows = rows.child(self.theme_row(
+                window,
+                cx,
+                appearance,
+                current,
+                mode == ThemeAppearanceMode::System,
+                &themes,
+            ));
+        }
+        rows
+    }
+
     fn theme_row(
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        current: String,
-        names: Vec<SharedString>,
+        appearance: theme::Appearance,
+        current: &ThemeName,
+        show_both: bool,
+        themes: &[theme::ThemeMeta],
     ) -> gpui::AnyElement {
         let page = cx.weak_entity();
         let menu = ContextMenu::build(window, cx, |menu, _, _| {
             let mut menu = menu;
-            for name in names {
+            for theme in themes.iter().filter(|theme| theme.appearance == appearance) {
                 let page = page.clone();
+                let name = theme.name.clone();
                 menu = menu.entry(name.to_string(), None, move |_window, cx| {
                     page.update(cx, |this, cx| {
-                        this.theme_name = name.to_string();
-                        this.mark_dirty(DirtySetting::Theme, cx);
+                        this.select_color_theme(appearance, name.clone(), cx);
                     })
                     .log_err();
                 });
             }
             menu
         });
+        let (title, description) = if show_both {
+            match appearance {
+                theme::Appearance::Light => ("light-color-theme", "light-color-theme-description"),
+                theme::Appearance::Dark => ("dark-color-theme", "dark-color-theme-description"),
+            }
+        } else {
+            ("color-theme", "color-theme-description")
+        };
         self.row(
             language::current(cx),
-            "color-theme",
-            "color-theme-description",
-            DropdownMenu::new(element_id_for("color-theme"), current, menu).into_any_element(),
+            title,
+            description,
+            DropdownMenu::new(
+                element_id_for(title),
+                SharedString::from(current.0.clone()),
+                menu,
+            )
+            .aria_label(language::text(cx, title))
+            .into_any_element(),
         )
     }
 
@@ -837,7 +915,6 @@ impl Render for SettingsPage {
             .as_ref()
             .map(|directory| directory.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let current_theme = self.theme_name.clone();
         let page = cx.weak_entity();
 
         let title_bar = self.render_title_bar(window, cx);
@@ -847,7 +924,6 @@ impl Render for SettingsPage {
             // Enumerating themes and font families is comparatively expensive, so
             // it happens only when this tab is actually built. `render` runs on
             // every keystroke.
-            let theme_names = ThemeRegistry::global(cx).list_names();
             let font_families = FontFamilyCache::global(cx)
                 .try_list_font_families()
                 .unwrap_or_default();
@@ -857,7 +933,8 @@ impl Render for SettingsPage {
                 .child(self.status_row(locale))
                 .child(self.section_header("appearance", cx))
                 .child(self.display_language_row(window, cx))
-                .child(self.theme_row(window, cx, current_theme.clone(), theme_names))
+                .child(self.theme_mode_row(window, cx))
+                .child(self.theme_rows(window, cx))
                 .child(self.font_family_row(window, cx, font_families))
                 .child(self.number_row(
                     cx,

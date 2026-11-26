@@ -16,7 +16,7 @@ use gpui::{
     px, size,
 };
 use settings::Settings as _;
-use settings::SettingsStore;
+use settings::{SettingsStore, ThemeAppearanceMode, ThemeName, ThemeSelection};
 use terminal_core::terminal_settings::{
     CursorShape, DEFAULT_TERMINAL_FONT_FAMILY, DEFAULT_TERMINAL_FONT_SIZE, TerminalSettings,
 };
@@ -132,7 +132,7 @@ enum EditableField {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum DirtySetting {
-    Theme,
+    Theme(ThemeField),
     DisplayLanguage,
     FileManagerOpenMode,
     ResetTerminalDefaults,
@@ -160,11 +160,44 @@ enum DirtySetting {
     Scrollbar,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ThemeField {
+    Selection,
+    Mode,
+    Light,
+    Dark,
+}
+
+impl ThemeField {
+    fn apply(self, current: &mut ThemeSelection, draft: &ThemeSelection) {
+        match (self, current, draft) {
+            (
+                Self::Mode,
+                ThemeSelection::Dynamic { mode, .. },
+                ThemeSelection::Dynamic { mode: selected, .. },
+            ) => *mode = *selected,
+            (
+                Self::Light,
+                ThemeSelection::Dynamic { light, .. },
+                ThemeSelection::Dynamic {
+                    light: selected, ..
+                },
+            ) => light.clone_from(selected),
+            (
+                Self::Dark,
+                ThemeSelection::Dynamic { dark, .. },
+                ThemeSelection::Dynamic { dark: selected, .. },
+            ) => dark.clone_from(selected),
+            (_, current, draft) => current.clone_from(draft),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct SettingsPageDraft {
     draft_settings: TerminalSettings,
     display_language: Option<settings::DisplayLanguage>,
-    theme_name: String,
+    theme_selection: ThemeSelection,
     font_family: String,
     shell_form: ShellForm,
     environment: Vec<EnvironmentVariable>,
@@ -195,7 +228,6 @@ struct CapturedSavePatch {
     shell: Option<settings::Shell>,
     environment: Option<HashMap<String, String>>,
     working_directory: Option<settings::WorkingDirectory>,
-    appearance: theme::Appearance,
 }
 
 #[derive(Clone)]
@@ -224,7 +256,7 @@ pub struct SettingsPage {
     marked_range: Option<Range<usize>>,
     draft_settings: TerminalSettings,
     draft_display_language: Option<settings::DisplayLanguage>,
-    theme_name: String,
+    theme_selection: ThemeSelection,
     font_family: String,
     shell_form: ShellForm,
     environment: Vec<EnvironmentVariable>,
@@ -263,6 +295,8 @@ pub fn open_settings_window(cx: &mut App) {
         cx,
     )));
     cx.open_window(options, |window, cx| {
+        #[cfg(target_os = "macos")]
+        crate::observe_system_appearance(window, cx);
         let view = cx.new(SettingsPage::new);
         let weak_view = view.downgrade();
         window.on_window_should_close(cx, move |window, cx| {
@@ -283,27 +317,36 @@ pub fn open_settings_window(cx: &mut App) {
 }
 
 fn settings_page_draft(cx: &App) -> SettingsPageDraft {
-    let theme_name = theme_settings::ThemeSettings::get_global(cx)
-        .theme
-        .name(theme::SystemAppearance::global(cx).0)
-        .0
-        .to_string();
-    settings_page_draft_from_settings(TerminalSettings::get_global(cx).clone(), theme_name)
+    settings_page_draft_from_settings(
+        TerminalSettings::get_global(cx).clone(),
+        theme_selection_from_settings(theme_settings::ThemeSettings::get_global(cx).theme.clone()),
+    )
 }
 
-fn default_settings_page_draft(theme_name: String) -> Result<SettingsPageDraft, String> {
+fn theme_selection_from_settings(selection: theme_settings::ThemeSelection) -> ThemeSelection {
+    match selection {
+        theme_settings::ThemeSelection::Static(name) => ThemeSelection::Static(name),
+        theme_settings::ThemeSelection::Dynamic { mode, light, dark } => {
+            ThemeSelection::Dynamic { mode, light, dark }
+        }
+    }
+}
+
+fn default_settings_page_draft(
+    theme_selection: ThemeSelection,
+) -> Result<SettingsPageDraft, String> {
     let content: settings::SettingsContent =
         settings::parse_json_with_comments(&settings::default_settings())
             .map_err(|error| format!("Could not load terminal defaults: {error}"))?;
     Ok(settings_page_draft_from_settings(
         TerminalSettings::from_settings(&content),
-        theme_name,
+        theme_selection,
     ))
 }
 
 fn settings_page_draft_from_settings(
     draft_settings: TerminalSettings,
-    theme_name: String,
+    theme_selection: ThemeSelection,
 ) -> SettingsPageDraft {
     let shell_form = match draft_settings.shell.clone() {
         TerminalShell::System => ShellForm {
@@ -363,7 +406,7 @@ fn settings_page_draft_from_settings(
 
     SettingsPageDraft {
         display_language: None,
-        theme_name,
+        theme_selection,
         font_family: draft_settings
             .font_family
             .as_ref()
@@ -391,13 +434,14 @@ impl CapturedPatch {
                     reset_terminal_overrides(content);
                 }
 
-                if patch.dirty_settings.contains(&DirtySetting::Theme) {
-                    theme_settings::set_theme(
-                        content,
-                        patch.draft.theme_name.clone(),
-                        patch.appearance,
-                        patch.appearance,
-                    );
+                for setting in &patch.dirty_settings {
+                    if let DirtySetting::Theme(field) = setting {
+                        let current = content
+                            .theme
+                            .theme
+                            .get_or_insert_with(|| patch.draft.theme_selection.clone());
+                        field.apply(current, &patch.draft.theme_selection);
+                    }
                 }
 
                 if let Some(language) = patch.draft.display_language {
@@ -407,7 +451,7 @@ impl CapturedPatch {
                 if !patch.dirty_settings.iter().any(|setting| {
                     !matches!(
                         setting,
-                        DirtySetting::Theme
+                        DirtySetting::Theme(_)
                             | DirtySetting::DisplayLanguage
                             | DirtySetting::ResetTerminalDefaults
                     )
@@ -420,7 +464,7 @@ impl CapturedPatch {
                     .get_or_insert_with(settings::TerminalSettingsContent::default);
                 for setting in &patch.dirty_settings {
                     match setting {
-                        DirtySetting::Theme
+                        DirtySetting::Theme(_)
                         | DirtySetting::DisplayLanguage
                         | DirtySetting::ResetTerminalDefaults => {}
                         DirtySetting::FileManagerOpenMode => {
@@ -566,7 +610,7 @@ impl SettingsPage {
         let SettingsPageDraft {
             draft_settings,
             display_language,
-            theme_name,
+            theme_selection,
             font_family,
             shell_form,
             environment,
@@ -585,7 +629,7 @@ impl SettingsPage {
             marked_range: None,
             draft_settings,
             draft_display_language: display_language,
-            theme_name,
+            theme_selection,
             font_family,
             shell_form,
             environment,
@@ -606,11 +650,68 @@ impl SettingsPage {
         SettingsPageDraft {
             draft_settings: self.draft_settings.clone(),
             display_language: self.draft_display_language,
-            theme_name: self.theme_name.clone(),
+            theme_selection: self.theme_selection.clone(),
             font_family: self.font_family.clone(),
             shell_form: self.shell_form.clone(),
             environment: self.environment.clone(),
             working_directory: self.working_directory.clone(),
+        }
+    }
+
+    fn theme_mode(&self, cx: &App) -> ThemeAppearanceMode {
+        match &self.theme_selection {
+            ThemeSelection::Dynamic { mode, .. } => *mode,
+            ThemeSelection::Static(name) => theme_settings::appearance_to_mode(
+                ThemeRegistry::global(cx)
+                    .get(&name.0)
+                    .map_or_else(|_| cx.theme().appearance, |theme| theme.appearance),
+            ),
+        }
+    }
+
+    fn select_theme_mode(&mut self, mode: ThemeAppearanceMode, cx: &mut Context<Self>) {
+        let previous_mode = self.theme_mode(cx);
+        if mode == previous_mode {
+            return;
+        }
+        let field = match &mut self.theme_selection {
+            ThemeSelection::Dynamic { mode: current, .. } => {
+                *current = mode;
+                ThemeField::Mode
+            }
+            ThemeSelection::Static(name) => {
+                let (light, dark) = if previous_mode == ThemeAppearanceMode::Light {
+                    (name.clone(), ThemeName(settings::DEFAULT_DARK_THEME.into()))
+                } else {
+                    (
+                        ThemeName(settings::DEFAULT_LIGHT_THEME.into()),
+                        name.clone(),
+                    )
+                };
+                self.theme_selection = ThemeSelection::Dynamic { mode, light, dark };
+                ThemeField::Selection
+            }
+        };
+        self.mark_dirty(DirtySetting::Theme(field), cx);
+    }
+
+    fn select_color_theme(
+        &mut self,
+        appearance: theme::Appearance,
+        name: SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        let (current, field) = match &mut self.theme_selection {
+            ThemeSelection::Static(name) => (name, ThemeField::Selection),
+            ThemeSelection::Dynamic { light, dark, .. } => match appearance {
+                theme::Appearance::Light => (light, ThemeField::Light),
+                theme::Appearance::Dark => (dark, ThemeField::Dark),
+            },
+        };
+        let name = ThemeName(name.into());
+        if *current != name {
+            *current = name;
+            self.mark_dirty(DirtySetting::Theme(field), cx);
         }
     }
 
@@ -628,7 +729,7 @@ impl SettingsPage {
                         preview_settings.file_manager_open_mode =
                             self.draft_settings.file_manager_open_mode;
                     }
-                    DirtySetting::Theme
+                    DirtySetting::Theme(_)
                     | DirtySetting::DisplayLanguage
                     | DirtySetting::ResetTerminalDefaults
                     | DirtySetting::FontFamily
@@ -763,22 +864,19 @@ impl SettingsPage {
             }
         }
 
-        let appearance = theme::SystemAppearance::global(cx).0;
         let mut preview_theme = theme_settings::ThemeSettings::get_global(cx).clone();
-        if self.dirty_settings.contains(&DirtySetting::Theme) {
-            let theme_name = theme_settings::ThemeName(self.theme_name.clone().into());
-            match &mut preview_theme.theme {
-                theme_settings::ThemeSelection::Static(current) => *current = theme_name,
-                theme_settings::ThemeSelection::Dynamic { mode, light, dark } => {
-                    match appearance {
-                        theme::Appearance::Light => *light = theme_name,
-                        theme::Appearance::Dark => *dark = theme_name,
-                    }
-                    if *mode != theme_settings::ThemeAppearanceMode::System {
-                        *mode = theme_settings::appearance_to_mode(appearance);
-                    }
+        if self
+            .dirty_settings
+            .iter()
+            .any(|setting| matches!(setting, DirtySetting::Theme(_)))
+        {
+            let mut current = theme_selection_from_settings(preview_theme.theme);
+            for setting in &self.dirty_settings {
+                if let DirtySetting::Theme(field) = setting {
+                    field.apply(&mut current, &self.theme_selection);
                 }
             }
+            preview_theme.theme = current.into();
         }
 
         SettingsStore::update_global(cx, |store, _| {
@@ -815,7 +913,7 @@ impl SettingsPage {
     fn replace_draft(&mut self, draft: SettingsPageDraft) {
         self.draft_settings = draft.draft_settings;
         self.draft_display_language = draft.display_language;
-        self.theme_name = draft.theme_name;
+        self.theme_selection = draft.theme_selection;
         self.font_family = draft.font_family;
         self.shell_form = draft.shell_form;
         self.environment = draft.environment;
@@ -829,7 +927,9 @@ impl SettingsPage {
                 self.draft_settings.file_manager_open_mode =
                     source.draft_settings.file_manager_open_mode;
             }
-            DirtySetting::Theme => self.theme_name.clone_from(&source.theme_name),
+            DirtySetting::Theme(field) => {
+                field.apply(&mut self.theme_selection, &source.theme_selection)
+            }
             DirtySetting::DisplayLanguage => {
                 self.draft_display_language = source.display_language;
             }
@@ -1047,22 +1147,20 @@ impl SettingsPage {
         if self.pending_write.is_some() {
             return;
         }
-        let mut draft = match default_settings_page_draft(self.theme_name.clone()) {
+        let mut draft = match default_settings_page_draft(self.theme_selection.clone()) {
             Ok(draft) => draft,
             Err(error) => {
                 self.fail_validation(error, cx);
                 return;
             }
         };
-        let theme_was_dirty = self.dirty_settings.contains(&DirtySetting::Theme);
+        self.dirty_settings
+            .retain(|setting| matches!(setting, DirtySetting::Theme(_)));
+        self.draft_revisions
+            .field_revisions
+            .retain(|setting, _| matches!(setting, DirtySetting::Theme(_)));
         draft.display_language = self.draft_display_language;
         self.replace_draft(draft);
-        self.dirty_settings.clear();
-        self.draft_revisions.field_revisions.clear();
-        if theme_was_dirty {
-            self.dirty_settings.push(DirtySetting::Theme);
-            self.draft_revisions.record_edit(DirtySetting::Theme);
-        }
         if self.draft_display_language.is_some() {
             self.dirty_settings.push(DirtySetting::DisplayLanguage);
             self.draft_revisions
@@ -1473,7 +1571,6 @@ impl SettingsPage {
         &self,
         home_directory: Option<&Path>,
         directory_access: &dyn DirectoryAccess,
-        appearance: theme::Appearance,
     ) -> Result<CapturedPatch, String> {
         let dirty_settings = self.dirty_settings.clone();
         let shell = dirty_settings
@@ -1503,7 +1600,6 @@ impl SettingsPage {
             shell,
             environment,
             working_directory,
-            appearance,
         })))
     }
 
@@ -1518,11 +1614,9 @@ impl SettingsPage {
             return;
         }
 
-        let captured_patch = match self.capture_save_patch(
-            Some(paths::home_dir().as_path()),
-            &RealDirectoryAccess,
-            theme::SystemAppearance::global(cx).0,
-        ) {
+        let captured_patch = match self
+            .capture_save_patch(Some(paths::home_dir().as_path()), &RealDirectoryAccess)
+        {
             Ok(captured_patch) => captured_patch,
             Err(error) => {
                 self.fail_validation(error, cx);

@@ -715,12 +715,8 @@ fn supported_setting_persistence_is_isolated_and_round_trippable(
         is_directory: true,
     };
     let captured_patch = settings_page.update(cx, |page, _| {
-        page.capture_save_patch(
-            Some(&home_directory),
-            &directory_access,
-            theme::Appearance::Dark,
-        )
-        .expect("generated Property 2 patch should validate")
+        page.capture_save_patch(Some(&home_directory), &directory_access)
+            .expect("generated Property 2 patch should validate")
     });
     let expected_working_directory = validate_working_directory_form(
         &patch.working_directory(),
@@ -2115,7 +2111,7 @@ fn test_settings_page(shell_form: ShellForm, cx: &mut Context<SettingsPage>) -> 
         marked_range: None,
         draft_settings: TerminalSettings::get_global(cx).clone(),
         draft_display_language: None,
-        theme_name: String::new(),
+        theme_selection: ThemeSelection::default(),
         font_family: String::new(),
         shell_form,
         environment: Vec::new(),
@@ -2188,7 +2184,7 @@ fn file_transfer_settings_patch_preserves_protocol_options() -> anyhow::Result<(
         settings::parse_json_with_comments(&settings::default_settings())?;
     let mut draft = settings_page_draft_from_settings(
         TerminalSettings::from_settings(&defaults),
-        "One Dark".to_string(),
+        ThemeSelection::default(),
     );
     let transfer = draft
         .draft_settings
@@ -2208,7 +2204,6 @@ fn file_transfer_settings_patch_preserves_protocol_options() -> anyhow::Result<(
         shell: None,
         environment: None,
         working_directory: None,
-        appearance: theme::Appearance::Dark,
     }));
     let mut content = settings::SettingsContent::default();
     let transfer = content
@@ -2314,12 +2309,12 @@ fn settings_edits_preserve_ai_and_override_jsonc(cx: &mut App) {
 
         for dirty_setting in [
             DirtySetting::FontSize,
-            DirtySetting::Theme,
+            DirtySetting::Theme(ThemeField::Selection),
             DirtySetting::ResetTerminalDefaults,
         ] {
             let mut draft = settings_page_draft_from_settings(
                 TerminalSettings::from_settings(&defaults),
-                "One Light".to_string(),
+                ThemeSelection::Static(ThemeName("One Light".into())),
             );
             draft.draft_settings.font_size = Some(gpui::px(22.0));
             let patch = CapturedPatch::Save(Box::new(CapturedSavePatch {
@@ -2328,7 +2323,6 @@ fn settings_edits_preserve_ai_and_override_jsonc(cx: &mut App) {
                 shell: None,
                 environment: None,
                 working_directory: None,
-                appearance: theme::Appearance::Dark,
             }));
             let updated =
                 store.new_text_for_update(original.to_string(), |content| patch.apply(content))?;
@@ -2342,7 +2336,7 @@ fn settings_edits_preserve_ai_and_override_jsonc(cx: &mut App) {
                     expected_object
                         .insert("terminal".into(), serde_json::json!({"font_size": 22.0}));
                 }
-                DirtySetting::Theme => {
+                DirtySetting::Theme(ThemeField::Selection) => {
                     expected_object.insert("theme".into(), serde_json::json!("One Light"));
                 }
                 DirtySetting::ResetTerminalDefaults => {
@@ -3069,7 +3063,6 @@ fn captured_save_patch(settings_page: &SettingsPage) -> CapturedPatch {
         shell: None,
         environment: None,
         working_directory: None,
-        appearance: theme::Appearance::Dark,
     }))
 }
 
@@ -3222,10 +3215,100 @@ fn auto_display_language_can_be_selected_saved_and_reloaded(cx: &mut gpui::TestA
     });
 }
 
+#[gpui::test]
+fn appearance_controls_preview_save_and_discard_matching_theme_modes(
+    cx: &mut gpui::TestAppContext,
+) {
+    let original = r#"{"theme":{"mode":"system","light":"Dracula Solid","dark":"One Dark"}}"#;
+    cx.update(|cx| {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        let registry = ThemeRegistry::global(cx);
+        let mut dracula = (*registry.get("One Dark").expect("bundled dark theme")).clone();
+        dracula.name = "Dracula Solid".into();
+        registry.insert_themes([dracula]);
+        *theme::SystemAppearance::global_mut(cx) =
+            theme::SystemAppearance(theme::Appearance::Light);
+        SettingsStore::update_global(cx, |store, cx| {
+            store
+                .set_user_settings(original, cx)
+                .result()
+                .expect("load theme settings");
+        });
+        theme_settings::reload_theme(cx);
+    });
+    let (page, cx) = cx.add_window_view(|_, cx| SettingsPage::new(cx));
+    cx.simulate_resize(size(px(700.), px(700.)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("setting-light-color-theme").is_some());
+    assert!(cx.debug_bounds("setting-dark-color-theme").is_some());
+
+    let open_dropdown = |cx: &mut gpui::VisualTestContext, row| {
+        let bounds = cx.debug_bounds(row).expect("settings row is visible");
+        cx.simulate_click(
+            gpui::point(bounds.right() - px(60.), bounds.center().y),
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+    };
+    let click_option = |cx: &mut gpui::VisualTestContext, item| {
+        let bounds = cx.debug_bounds(item).expect("menu item is visible");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+    };
+
+    open_dropdown(cx, "setting-theme-mode");
+    click_option(cx, "MENU_ITEM-Dark");
+    assert!(cx.debug_bounds("setting-dark-color-theme").is_none());
+    cx.update(|_, cx| assert_eq!(cx.theme().name.as_ref(), "One Dark"));
+    open_dropdown(cx, "setting-color-theme");
+    assert!(cx.debug_bounds("MENU_ITEM-One Light").is_none());
+    click_option(cx, "MENU_ITEM-Dracula Solid");
+    cx.update(|_, cx| {
+        assert_eq!(cx.theme().name.as_ref(), "Dracula Solid");
+        assert_eq!(
+            theme_settings::ThemeSettings::get_global(cx).theme.mode(),
+            Some(ThemeAppearanceMode::Dark)
+        );
+    });
+
+    let patch = page.update(cx, |page, cx| {
+        let patch = captured_save_patch(page);
+        page.discard_drafts(cx);
+        assert_eq!(
+            theme_settings::ThemeSettings::get_global(cx).theme.mode(),
+            Some(ThemeAppearanceMode::System)
+        );
+        patch
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("setting-light-color-theme").is_some());
+    assert!(cx.debug_bounds("setting-dark-color-theme").is_some());
+
+    cx.update(|_, cx| {
+        let latest_on_disk =
+            original.replace(r#""light":"Dracula Solid""#, r#""light":"One Light""#);
+        let updated = SettingsStore::global(cx)
+            .new_text_for_update(latest_on_disk, |content| patch.apply(content))
+            .expect("serialize the edited theme selection");
+        let updated: settings::SettingsContent =
+            settings::parse_json_with_comments(&updated).expect("reload the theme selection");
+        assert_eq!(
+            updated.theme.theme,
+            Some(ThemeSelection::Dynamic {
+                mode: ThemeAppearanceMode::Dark,
+                light: ThemeName("One Light".into()),
+                dark: ThemeName("Dracula Solid".into()),
+            })
+        );
+    });
+}
+
 #[derive(Debug, PartialEq)]
 struct AtomicFailurePageSnapshot {
     draft_settings: String,
-    theme_name: String,
+    theme_selection: ThemeSelection,
     font_family: String,
     shell_form: ShellForm,
     environment: Vec<EnvironmentVariable>,
@@ -3238,7 +3321,7 @@ struct AtomicFailurePageSnapshot {
 fn atomic_failure_page_snapshot(settings_page: &SettingsPage) -> AtomicFailurePageSnapshot {
     AtomicFailurePageSnapshot {
         draft_settings: format!("{:?}", settings_page.draft_settings),
-        theme_name: settings_page.theme_name.clone(),
+        theme_selection: settings_page.theme_selection.clone(),
         font_family: settings_page.font_family.clone(),
         shell_form: settings_page.shell_form.clone(),
         environment: settings_page.environment.clone(),
