@@ -7237,6 +7237,7 @@ dependencies = [
  "serde_json",
  "settings",
  "smol",
+ "sys-locale",
  "tar",
  "tempfile",
  "terminal_core",

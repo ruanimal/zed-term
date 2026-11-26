@@ -1,6 +1,6 @@
 {
   "$schema": "zed://schemas/settings",
-  // ZedTerm interface language. Supported values are "en" and "zh-CN".
+  // ZedTerm interface language. Use "auto" to follow system preferences, "en", or "zh-CN".
   "display_language": "en",
   // The name of the Zed theme to use for the UI.
   //

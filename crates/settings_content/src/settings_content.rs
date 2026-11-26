@@ -329,6 +329,8 @@ pub struct SettingsContent {
     Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, MergeFrom,
 )]
 pub enum DisplayLanguage {
+    #[serde(rename = "auto")]
+    Auto,
     #[default]
     #[serde(rename = "en")]
     English,

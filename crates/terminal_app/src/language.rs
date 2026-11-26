@@ -1,16 +1,18 @@
+use std::sync::OnceLock;
+
 use gpui::App;
 use settings::{DisplayLanguage, SettingsFile, SettingsStore};
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Locale(DisplayLanguage);
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Locale {
+    #[default]
+    English,
+    SimplifiedChinese,
+}
 
 impl Locale {
     pub(crate) fn is_simplified_chinese(self) -> bool {
-        self.0 == DisplayLanguage::SimplifiedChinese
-    }
-
-    pub(crate) fn language(self) -> DisplayLanguage {
-        self.0
+        self == Self::SimplifiedChinese
     }
 
     pub(crate) fn text(self, english: &str) -> &str {
@@ -20,20 +22,48 @@ impl Locale {
             english
         }
     }
+
+    fn from_preferred_languages(languages: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        languages
+            .into_iter()
+            .find_map(|language| {
+                let language = language.as_ref().to_ascii_lowercase();
+                let mut subtags = language.split('-');
+                match subtags.next()? {
+                    "en" => Some(Self::English),
+                    "zh" => match subtags.next() {
+                        Some("hant" | "hk" | "mo" | "tw") => None,
+                        _ => Some(Self::SimplifiedChinese),
+                    },
+                    _ => None,
+                }
+            })
+            .unwrap_or_default()
+    }
+}
+
+pub(crate) fn configured(cx: &App) -> DisplayLanguage {
+    cx.try_global::<SettingsStore>()
+        .and_then(|store| {
+            // The language picker saves to the root user settings, even when a profile or OS override is active.
+            store
+                .get_content_for_file(SettingsFile::User)
+                .and_then(|content| content.display_language)
+                .or(store.merged_settings().display_language)
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) fn current(cx: &App) -> Locale {
-    Locale(
-        cx.try_global::<SettingsStore>()
-            .and_then(|store| {
-                // The language picker saves to the root user settings, even when a profile or OS override is active.
-                store
-                    .get_content_for_file(SettingsFile::User)
-                    .and_then(|content| content.display_language)
-                    .or(store.merged_settings().display_language)
-            })
-            .unwrap_or_default(),
-    )
+    match configured(cx) {
+        DisplayLanguage::Auto => {
+            static SYSTEM_LOCALE: OnceLock<Locale> = OnceLock::new();
+            *SYSTEM_LOCALE
+                .get_or_init(|| Locale::from_preferred_languages(sys_locale::get_locales()))
+        }
+        DisplayLanguage::English => Locale::English,
+        DisplayLanguage::SimplifiedChinese => Locale::SimplifiedChinese,
+    }
 }
 
 pub(crate) fn text<'a>(cx: &App, english: &'a str) -> &'a str {
@@ -89,6 +119,7 @@ pub(crate) fn simplified_chinese(english: &str) -> &str {
         "Ask where each download should be saved. When disabled, the configured directory is used without prompting." => {
             "每次下载时询问保存位置。关闭后，直接使用已配置的目录。"
         }
+        "Auto" => "自动（跟随系统）",
         "auto" => "自动",
         "Automatically copy selected text to the clipboard." => "自动将选中的文字复制到剪贴板。",
         "bar" => "竖线",
@@ -103,8 +134,8 @@ pub(crate) fn simplified_chinese(english: &str) -> &str {
             "选择已安装的字体，或使用应用默认字体。"
         }
         "Choose the color theme for the terminal and UI." => "选择终端和界面的配色主题。",
-        "Choose the interface language. The change takes effect when you save." => {
-            "选择界面语言，保存后立即生效。"
+        "Auto follows your system language. Save to apply the change." => {
+            "自动模式跟随系统语言，保存后立即生效。"
         }
         "Choose the system shell or a structured program and argument list. Applies only to newly created terminals and panes." => {
             "选择系统 Shell，或指定程序和参数。仅对新建的终端和窗格生效。"
@@ -430,5 +461,25 @@ pub(crate) fn simplified_chinese(english: &str) -> &str {
         }
         "Zoom Pane" => "放大窗格",
         _ => english,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Locale::{self, English, SimplifiedChinese};
+
+    #[test]
+    fn auto_display_language_uses_supported_system_preferences() {
+        for (preferences, expected) in [
+            (&["zh-Hans-CN", "en-US"][..], SimplifiedChinese),
+            (&["en-GB", "zh-CN"], English),
+            (&["ja-JP", "zh-SG"], SimplifiedChinese),
+            (&["zh-hans-HK"], SimplifiedChinese),
+            (&["zh-Hant-CN", "zh-TW", "zh-HK", "zh-MO"], English),
+            (&["fr-FR"], English),
+            (&[], English),
+        ] {
+            assert_eq!(Locale::from_preferred_languages(preferences), expected);
+        }
     }
 }

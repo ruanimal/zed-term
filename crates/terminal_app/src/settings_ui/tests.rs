@@ -3087,8 +3087,9 @@ fn captured_save_patch(settings_page: &SettingsPage) -> CapturedPatch {
 
 #[gpui::test]
 async fn display_language_saves_independently_of_terminal_defaults(cx: &mut gpui::TestAppContext) {
+    use crate::language::Locale;
     use fs::Fs as _;
-    use settings::DisplayLanguage::{English, SimplifiedChinese};
+    use settings::DisplayLanguage::SimplifiedChinese;
 
     let filesystem = fs::FakeFs::new(cx.background_executor.clone());
     let settings_path = paths::settings_file();
@@ -3115,7 +3116,7 @@ async fn display_language_saves_independently_of_terminal_defaults(cx: &mut gpui
         let store = SettingsStore::test(cx);
         cx.set_global(store);
         theme_settings::init(theme::LoadThemes::JustBase, cx);
-        assert_eq!(language::current(cx).language(), English);
+        assert_eq!(language::current(cx), Locale::English);
         assert_eq!(language::text(cx, "Settings"), "Settings");
     });
     let (page, cx) = cx.add_window_view(|_, cx| clean_test_settings_page(cx));
@@ -3138,7 +3139,7 @@ async fn display_language_saves_independently_of_terminal_defaults(cx: &mut gpui
     let patch = page.update(cx, |page, cx| {
         assert_eq!(page.draft_display_language, Some(SimplifiedChinese));
         page.reset_terminal_defaults(cx);
-        assert_eq!(language::current(cx).language(), English);
+        assert_eq!(language::current(cx), Locale::English);
         assert_eq!(page.draft_display_language, Some(SimplifiedChinese));
         captured_save_patch(page)
     });
@@ -3162,7 +3163,7 @@ async fn display_language_saves_independently_of_terminal_defaults(cx: &mut gpui
     assert!(updated.contains("\"auto_update\": false"));
 
     cx.update(|_, cx| {
-        assert_eq!(language::current(cx).language(), SimplifiedChinese);
+        assert_eq!(language::current(cx), Locale::SimplifiedChinese);
         assert_eq!(language::text(cx, "Settings"), "设置");
         let mut reloaded_store = SettingsStore::test(cx);
         reloaded_store
@@ -3181,7 +3182,55 @@ async fn display_language_saves_independently_of_terminal_defaults(cx: &mut gpui
                 .result()
                 .expect("English settings should load");
         });
-        assert_eq!(language::current(cx).language(), English);
+        assert_eq!(language::current(cx), Locale::English);
+    });
+}
+
+#[gpui::test]
+fn auto_display_language_can_be_selected_saved_and_reloaded(cx: &mut gpui::TestAppContext) {
+    use settings::DisplayLanguage;
+
+    cx.update(|cx| {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+    });
+    let (page, cx) = cx.add_window_view(|_, cx| clean_test_settings_page(cx));
+    cx.simulate_resize(size(px(700.), px(700.)));
+    cx.run_until_parked();
+    let language_row = cx
+        .debug_bounds("setting-Display language")
+        .expect("the display language row should be visible");
+    cx.simulate_click(
+        gpui::point(language_row.right() - px(60.), language_row.center().y),
+        gpui::Modifiers::default(),
+    );
+    cx.run_until_parked();
+    let auto_option = cx
+        .debug_bounds("MENU_ITEM-Auto")
+        .expect("the language menu should offer Auto");
+    cx.simulate_click(auto_option.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+
+    let patch = page.update(cx, |page, _| {
+        assert_eq!(page.draft_display_language, Some(DisplayLanguage::Auto));
+        assert!(page.dirty_settings.contains(&DirtySetting::DisplayLanguage));
+        captured_save_patch(page)
+    });
+    cx.update(|_, cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            let saved = store
+                .new_text_for_update(r#"{"display_language":"en"}"#.to_owned(), |content| {
+                    patch.apply(content)
+                })
+                .expect("Auto should serialize to settings");
+            assert!(saved.contains("\"auto\""));
+            store
+                .set_user_settings(&saved, cx)
+                .result()
+                .expect("Auto should reload from settings");
+        });
+        assert_eq!(language::configured(cx), DisplayLanguage::Auto);
     });
 }
 

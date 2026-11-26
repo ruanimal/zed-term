@@ -41,6 +41,7 @@ serde.workspace = true
 serde_json.workspace = true
 smol.workspace = true
 futures.workspace = true
+sys-locale.workspace = true
 tar = "0.4"
 toml.workspace = true
 settings.workspace = true

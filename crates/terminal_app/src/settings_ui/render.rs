@@ -417,26 +417,29 @@ impl SettingsPage {
         use settings::DisplayLanguage;
 
         let languages = [
-            ("English", DisplayLanguage::English),
-            ("简体中文", DisplayLanguage::SimplifiedChinese),
+            DisplayLanguage::Auto,
+            DisplayLanguage::English,
+            DisplayLanguage::SimplifiedChinese,
         ];
-        let active = language::current(cx).language();
-        let selected = self.draft_display_language.unwrap_or(active);
-        let label = match selected {
+        let selected = self
+            .draft_display_language
+            .unwrap_or_else(|| language::configured(cx));
+        let label = |language| match language {
+            DisplayLanguage::Auto => "Auto",
             DisplayLanguage::English => "English",
             DisplayLanguage::SimplifiedChinese => "简体中文",
         };
         let page = cx.weak_entity();
         let options = languages
             .into_iter()
-            .map(|(label, language)| {
+            .map(|language| {
                 let page = page.clone();
-                opt(label, move |_, cx| {
+                opt(label(language), move |_, cx| {
                     page.update(cx, |this, cx| {
                         if language
                             != this
                                 .draft_display_language
-                                .unwrap_or_else(|| language::current(cx).language())
+                                .unwrap_or_else(|| language::configured(cx))
                         {
                             this.draft_display_language = Some(language);
                             this.mark_dirty(DirtySetting::DisplayLanguage, cx);
@@ -450,8 +453,8 @@ impl SettingsPage {
             window,
             cx,
             "Display language",
-            "Choose the interface language. The change takes effect when you save.",
-            label.to_owned(),
+            "Auto follows your system language. Save to apply the change.",
+            label(selected).to_owned(),
             options,
         )
     }
