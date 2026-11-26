@@ -6,6 +6,14 @@ changes are omitted unless they affect how users install or use ZedTerm.
 
 ## [Unreleased]
 
+## [1.1.0]
+
+- Added light, dark, and system appearance modes in Settings → Terminal →
+  Appearance. System mode lets you choose separate light and dark color themes.
+- Matched the native macOS window frame to the selected light or dark theme.
+- Added automatic interface language selection based on system preferences,
+  with English and Simplified Chinese still available as explicit choices.
+
 ## [1.0.0]
 
 - Migrated the interface to GPUI Fast.
